@@ -4,6 +4,7 @@ const c = @cImport({
     @cInclude("sys/socket.h");
     @cInclude("sys/un.h");
     @cInclude("sys/wait.h");
+    @cInclude("sys/ioctl.h");
     @cInclude("signal.h");
     @cInclude("unistd.h");
     @cInclude("string.h");
@@ -245,11 +246,18 @@ pub const Runtime = struct {
     }
 
     pub fn resize(self: *Runtime, path: []const u8, cols: u16, rows: u16) RuntimeError!void {
-        _ = self;
-        _ = cols;
-        _ = rows;
-        if (path.len == 0) return RuntimeError.InvalidArgs;
-        return RuntimeError.Unsupported;
+        try validateSocketPath(path);
+        if (cols == 0 or rows == 0) return RuntimeError.InvalidArgs;
+
+        const s = self.sessions.get(path) orelse return RuntimeError.SessionNotFound;
+        var ws = c.struct_winsize{
+            .ws_row = @intCast(rows),
+            .ws_col = @intCast(cols),
+            .ws_xpixel = 0,
+            .ws_ypixel = 0,
+        };
+
+        if (c.ioctl(s.master_fd, c.TIOCSWINSZ, &ws) != 0) return RuntimeError.InvalidArgs;
     }
 
     pub fn terminate(self: *Runtime, path: []const u8, signal: ?[]const u8) RuntimeError!void {
@@ -336,4 +344,27 @@ test "create + wait: child exits with status" {
     const status = try rt.wait(path);
     try std.testing.expectEqual(@as(?i32, 7), status.code);
     try std.testing.expectEqual(false, try rt.exists(path));
+}
+
+test "resize: invalid args and not found" {
+    var rt = Runtime.init(std.testing.allocator);
+    defer rt.deinit();
+
+    try std.testing.expectError(RuntimeError.InvalidArgs, rt.resize("", 80, 24));
+    try std.testing.expectError(RuntimeError.InvalidArgs, rt.resize("/tmp/msr-none.sock", 0, 24));
+    try std.testing.expectError(RuntimeError.SessionNotFound, rt.resize("/tmp/msr-none.sock", 80, 24));
+}
+
+test "resize: success on running session" {
+    var rt = Runtime.init(std.testing.allocator);
+    defer rt.deinit();
+
+    const path = "/tmp/msr-resize-test.sock";
+    Runtime.unlinkBestEffort(path);
+
+    const opts = SpawnOptions{ .argv = &.{ "/bin/sh", "-c", "sleep 1" } };
+    try rt.create(path, opts);
+    try rt.resize(path, 100, 30);
+    try rt.terminate(path, "KILL");
+    _ = try rt.wait(path);
 }
