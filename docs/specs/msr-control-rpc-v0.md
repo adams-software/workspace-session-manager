@@ -30,13 +30,11 @@ Result: `create` can start real sessions, but the rest of the CLI is not consist
 
 ## 4) Recommended solution
 
-Use a **tiny framed protocol over the existing Unix session socket path** with two logical lanes on one connection:
+Use a **tiny framed protocol over the existing Unix session socket path** with a simple v0 model:
 
-- **control lane**: strict serialized request/response (one in-flight request at a time)
-- **data lane**: PTY byte flow messages
-
-Optional later:
-- **event frames** (unsolicited notifications like session exit)
+- short-lived **control connections** for request/response ops
+- one long-lived **attached connection** for PTY data stream after explicit attach handshake
+- optional `event` frames from host for notifications
 
 Key point: this composes on top of the core runtime; it does not redefine core semantics.
 
@@ -54,13 +52,13 @@ This preserves architecture boundaries:
 ### Envelope
 All messages use one envelope shape:
 ```json
-{ "type": "control_req|control_res|data", "payload": { } }
+{ "type": "control_req|control_res|data|event", "payload": { } }
 ```
 
 Rules:
-- No request IDs in v0 (strict serialized req/res per lane).
-- Per lane, only one request may be in-flight at a time.
+- No request IDs in v0 (strict serialized req/res on control connections).
 - `data` frames carry PTY bytes (base64 in JSON for v0 simplicity).
+- `event` frames are host->client notifications only (no response required).
 
 Examples:
 ```json
@@ -68,6 +66,7 @@ Examples:
 { "type": "control_res", "payload": { "ok": true, "value": {} } }
 { "type": "control_res", "payload": { "ok": false, "err": { "code": "session_not_found" } } }
 { "type": "data", "payload": { "stream": "stdin", "bytes_b64": "..." } }
+{ "type": "event", "payload": { "kind": "session_exit", "code": 0 } }
 ```
 
 ## 6) Operations
@@ -106,32 +105,35 @@ CLI prints human-readable messages, exits non-zero.
 
 ## 8) Host behavior
 
-For each accepted connection:
-1. keep connection open
-2. establish two logical control lanes (strict req/res each):
-   - **client-initiated control lane** (client sends req, host responds)
-   - **server-initiated control lane** (host sends req, client responds)
-3. parse framed messages continuously
-4. route by envelope type:
-   - `control_req` -> execute op -> emit `control_res`
-   - `data` -> write bytes to PTY stdin (when attached)
-5. while attached, forward PTY output as `data` frames
-6. close on socket hangup/error
+### 8.1 Control connection (default)
+For normal command handling:
+1. accept connection
+2. read one `control_req`
+3. execute runtime op
+4. write one `control_res`
+5. close connection
 
-Lane rules:
-- no request IDs
-- one in-flight request per lane
-- server-initiated control requests replace free-form event messages while preserving strict req/res semantics
+### 8.2 Attached connection (special upgraded mode)
+Attach handshake:
+1. client connects
+2. client sends `control_req { op: "attach", ... }`
+3. host sends `control_res { ok: true|false, ... }`
+4. if success: connection enters **attached mode**
 
-This keeps implementation simple and nested usage viable (control + data over one socket).
+In attached mode:
+- `data` frames are allowed both directions
+- host may emit `event` frames
+- control ops are intentionally narrow/minimal; non-attach control commands should use fresh control connections
+- connection closes on detach/session-end/socket error
+
+This keeps attached behavior explicit and avoids turning attached clients into generic long-lived RPC peers in v0.
 
 ## 9) CLI / application behavior
 
 - `msr create` still spawns `_host` and waits for ready.
-- `msr exists/resize/terminate/wait` send serialized control requests to `<path>`.
-- `msr attach [--takeover]` sends control attach request and starts data-frame bridging.
-- Client must also service the server-initiated control lane (strict req/res) while attached.
-- Nested `msr` usage is supported because control and data coexist on one persistent connection.
+- `msr exists/resize/terminate/wait` open short-lived control connections and do one req/res.
+- `msr attach [--takeover]` sends attach request and, on success, enters attached mode for data frames.
+- Nested `msr` usage remains viable via explicit attached-mode behavior plus optional event notifications.
 
 ## 10) Why this is the best fit now
 
@@ -187,5 +189,9 @@ Add smoke tests:
 
 - All public CLI commands act on host-owned state, not local ephemeral runtime.
 - `create`, `attach`, `terminate`, `wait` work end-to-end across separate CLI invocations.
-- Protocol supports persistent connection with serialized control lane + data lane.
+- v0 protocol supports:
+  - short-lived strict req/res control connections
+  - explicit attach mode transition
+  - data frames in attached mode
+  - optional host->client event frames
 - Tests cover happy path and one representative failure per op.
