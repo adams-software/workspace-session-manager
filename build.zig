@@ -10,26 +10,33 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+    lib.linkSystemLibrary("util", .{});
+
+    const exe_root = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    exe_root.linkSystemLibrary("util", .{});
 
     const exe = b.addExecutable(.{
         .name = "msr-demo",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-        }),
+        .root_module = exe_root,
     });
     exe.root_module.addImport("msr", lib);
     b.installArtifact(exe);
 
+    const test_root = b.createModule(.{
+        .root_source_file = b.path("src/lib.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    test_root.linkSystemLibrary("util", .{});
+
     const lib_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/lib.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-        }),
+        .root_module = test_root,
     });
 
     const run_lib_tests = b.addRunArtifact(lib_tests);

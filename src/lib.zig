@@ -1,8 +1,10 @@
 const std = @import("std");
-const builtin = @import("builtin");
 const c = @cImport({
+    @cInclude("pty.h");
     @cInclude("sys/socket.h");
     @cInclude("sys/un.h");
+    @cInclude("sys/wait.h");
+    @cInclude("signal.h");
     @cInclude("unistd.h");
     @cInclude("string.h");
 });
@@ -53,32 +55,40 @@ pub const RuntimeError = error{
     Unsupported,
 };
 
+const Session = struct {
+    listener_fd: c_int,
+    master_fd: c_int,
+    pid: c.pid_t,
+};
+
 /// MSR v0 runtime surface (single-session primitive).
-/// This is a scaffold: behavior is implemented in follow-up commits.
 pub const Runtime = struct {
     allocator: std.mem.Allocator,
-    listeners: std.StringHashMap(c_int),
+    sessions: std.StringHashMap(Session),
 
     pub fn init(allocator: std.mem.Allocator) Runtime {
         return .{
             .allocator = allocator,
-            .listeners = std.StringHashMap(c_int).init(allocator),
+            .sessions = std.StringHashMap(Session).init(allocator),
         };
     }
 
     pub fn deinit(self: *Runtime) void {
-        var it = self.listeners.iterator();
+        var it = self.sessions.iterator();
         while (it.next()) |entry| {
-            _ = c.close(entry.value_ptr.*);
+            // Best effort cleanup for tests/dev lifecycle.
+            _ = c.kill(entry.value_ptr.pid, c.SIGKILL);
+            _ = c.close(entry.value_ptr.listener_fd);
+            _ = c.close(entry.value_ptr.master_fd);
             unlinkBestEffort(entry.key_ptr.*);
             self.allocator.free(entry.key_ptr.*);
         }
-        self.listeners.deinit();
+        self.sessions.deinit();
     }
 
     fn validateSocketPath(path: []const u8) RuntimeError!void {
         if (path.len == 0) return RuntimeError.InvalidArgs;
-        // Common Unix sun_path limit is 108 incl. NUL; keep conservative.
+        // Common Unix sun_path limit is 108 including NUL.
         if (path.len >= 108) return RuntimeError.PathTooLong;
     }
 
@@ -123,9 +133,68 @@ pub const Runtime = struct {
         return fd;
     }
 
+    fn spawnChild(opts: SpawnOptions) RuntimeError!struct { pid: c.pid_t, master_fd: c_int } {
+        var master: c_int = -1;
+        var ws: c.struct_winsize = .{ .ws_row = 0, .ws_col = 0, .ws_xpixel = 0, .ws_ypixel = 0 };
+        const win_ptr = blk: {
+            if (opts.rows != null or opts.cols != null) {
+                ws.ws_row = @intCast(opts.rows orelse 24);
+                ws.ws_col = @intCast(opts.cols orelse 80);
+                break :blk &ws;
+            }
+            break :blk null;
+        };
+
+        const pid = c.forkpty(&master, null, null, win_ptr);
+        if (pid < 0) return RuntimeError.InvalidArgs;
+
+        if (pid == 0) {
+            if (opts.cwd) |cwd| {
+                withCPath(cwd, struct {
+                    fn call(p: [:0]const u8) void {
+                        if (c.chdir(p.ptr) != 0) c._exit(126);
+                    }
+                }.call, .{});
+            }
+
+            var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+            defer arena.deinit();
+            const a = arena.allocator();
+
+            const argv_c = a.alloc(?[*:0]u8, opts.argv.len + 1) catch c._exit(127);
+            for (opts.argv, 0..) |arg, i| {
+                const z = a.dupeZ(u8, arg) catch c._exit(127);
+                argv_c[i] = z.ptr;
+            }
+            argv_c[opts.argv.len] = null;
+
+            _ = c.execvp(argv_c[0].?, @ptrCast(argv_c.ptr));
+            c._exit(127);
+        }
+
+        return .{ .pid = pid, .master_fd = master };
+    }
+
+    fn cleanupSession(self: *Runtime, path: []const u8) void {
+        if (self.sessions.fetchRemove(path)) |entry| {
+            _ = c.close(entry.value.listener_fd);
+            _ = c.close(entry.value.master_fd);
+            unlinkBestEffort(path);
+            self.allocator.free(entry.key);
+        }
+    }
+
+    fn signalFromName(name: ?[]const u8) c_int {
+        if (name == null) return c.SIGTERM;
+        if (std.mem.eql(u8, name.?, "TERM")) return c.SIGTERM;
+        if (std.mem.eql(u8, name.?, "KILL")) return c.SIGKILL;
+        if (std.mem.eql(u8, name.?, "INT")) return c.SIGINT;
+        return c.SIGTERM;
+    }
+
     pub fn exists(self: *Runtime, path: []const u8) RuntimeError!bool {
-        _ = self;
         try validateSocketPath(path);
+        if (self.sessions.contains(path)) return true;
 
         const fd = std.posix.openat(std.posix.AT.FDCWD, path, .{
             .ACCMODE = .RDONLY,
@@ -143,14 +212,25 @@ pub const Runtime = struct {
         if (opts.argv.len == 0) return RuntimeError.InvalidArgs;
         try validateSocketPath(path);
 
-        if (self.listeners.contains(path)) return RuntimeError.SessionAlreadyRunning;
-        const already = try self.exists(path);
-        if (already) return RuntimeError.SessionAlreadyRunning;
+        if (self.sessions.contains(path)) return RuntimeError.SessionAlreadyRunning;
+        if (try self.exists(path)) return RuntimeError.SessionAlreadyRunning;
 
-        const fd = try createListener(path);
+        const listener_fd = try createListener(path);
+        const child = spawnChild(opts) catch |err| {
+            _ = c.close(listener_fd);
+            unlinkBestEffort(path);
+            return err;
+        };
+
         const key = try self.allocator.dupe(u8, path);
-        self.listeners.put(key, fd) catch {
-            _ = c.close(fd);
+        self.sessions.put(key, .{
+            .listener_fd = listener_fd,
+            .master_fd = child.master_fd,
+            .pid = child.pid,
+        }) catch {
+            _ = c.kill(child.pid, c.SIGKILL);
+            _ = c.close(child.master_fd);
+            _ = c.close(listener_fd);
             unlinkBestEffort(path);
             self.allocator.free(key);
             return RuntimeError.OutOfMemory;
@@ -173,35 +253,41 @@ pub const Runtime = struct {
     }
 
     pub fn terminate(self: *Runtime, path: []const u8, signal: ?[]const u8) RuntimeError!void {
-        _ = signal;
         try validateSocketPath(path);
 
-        if (self.listeners.fetchRemove(path)) |entry| {
-            _ = c.close(entry.value);
-            unlinkBestEffort(path);
-            self.allocator.free(entry.key);
-            return;
-        }
-
-        const has = try self.exists(path);
-        if (!has) return RuntimeError.SessionNotFound;
-        return RuntimeError.Unsupported;
+        const s = self.sessions.get(path) orelse return RuntimeError.SessionNotFound;
+        if (c.kill(s.pid, signalFromName(signal)) != 0) return RuntimeError.InvalidArgs;
     }
 
     pub fn wait(self: *Runtime, path: []const u8) RuntimeError!ExitStatus {
-        _ = self;
-        if (path.len == 0) return RuntimeError.InvalidArgs;
-        return RuntimeError.Unsupported;
+        try validateSocketPath(path);
+
+        const s = self.sessions.get(path) orelse return RuntimeError.SessionNotFound;
+        var status: c_int = 0;
+        const got = c.waitpid(s.pid, &status, 0);
+        if (got < 0) return RuntimeError.InvalidArgs;
+
+        var out = ExitStatus{};
+        if (c.WIFEXITED(status)) {
+            out.code = @intCast(c.WEXITSTATUS(status));
+        } else if (c.WIFSIGNALED(status)) {
+            out.signal = "SIGNALED";
+        }
+
+        self.cleanupSession(path);
+        return out;
     }
 };
 
 test "exists: invalid args" {
     var rt = Runtime.init(std.testing.allocator);
+    defer rt.deinit();
     try std.testing.expectError(RuntimeError.InvalidArgs, rt.exists(""));
 }
 
 test "exists: path too long" {
     var rt = Runtime.init(std.testing.allocator);
+    defer rt.deinit();
     var buf: [200]u8 = undefined;
     @memset(&buf, 'a');
     try std.testing.expectError(RuntimeError.PathTooLong, rt.exists(buf[0..]));
@@ -209,17 +295,20 @@ test "exists: path too long" {
 
 test "exists: false for missing path" {
     var rt = Runtime.init(std.testing.allocator);
+    defer rt.deinit();
     try std.testing.expectEqual(false, try rt.exists("/tmp/this-should-not-exist-msr-test.sock"));
 }
 
 test "create: invalid args" {
     var rt = Runtime.init(std.testing.allocator);
+    defer rt.deinit();
     const opts = SpawnOptions{ .argv = &.{} };
     try std.testing.expectError(RuntimeError.InvalidArgs, rt.create("/tmp/msr-test.sock", opts));
 }
 
 test "create: already exists" {
     var rt = Runtime.init(std.testing.allocator);
+    defer rt.deinit();
 
     const path = "/tmp/msr-create-exists-test.sock";
     const fd = try std.posix.openat(std.posix.AT.FDCWD, path, .{
@@ -228,7 +317,23 @@ test "create: already exists" {
         .TRUNC = true,
         .CLOEXEC = true,
     }, 0o600);
-    _ = fd;
+    _ = c.close(fd);
+    defer Runtime.unlinkBestEffort(path);
+
     const opts = SpawnOptions{ .argv = &.{"sh"} };
     try std.testing.expectError(RuntimeError.SessionAlreadyRunning, rt.create(path, opts));
+}
+
+test "create + wait: child exits with status" {
+    var rt = Runtime.init(std.testing.allocator);
+    defer rt.deinit();
+
+    const path = "/tmp/msr-create-wait-test.sock";
+    Runtime.unlinkBestEffort(path);
+
+    const opts = SpawnOptions{ .argv = &.{ "/bin/sh", "-c", "exit 7" } };
+    try rt.create(path, opts);
+    const status = try rt.wait(path);
+    try std.testing.expectEqual(@as(?i32, 7), status.code);
+    try std.testing.expectEqual(false, try rt.exists(path));
 }
