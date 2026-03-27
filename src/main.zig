@@ -90,18 +90,22 @@ fn connectUnix(path: []const u8) !c_int {
     return fd;
 }
 
-fn rpcExists(allocator: std.mem.Allocator, path: []const u8) !bool {
+fn rpcCall(allocator: std.mem.Allocator, path: []const u8, req_msg: rpc.ControlReq) !rpc.ControlRes {
     const fd = try connectUnix(path);
     defer _ = c.close(fd);
 
-    const req = try rpc.encodeControlReq(allocator, .{ .op = "exists", .path = path });
+    const req = try rpc.encodeControlReq(allocator, req_msg);
     defer allocator.free(req);
     try rpc.writeFrame(fd, req);
 
     const res_bytes = try rpc.readFrame(allocator, fd, 64 * 1024);
     defer allocator.free(res_bytes);
 
-    const res = try rpc.parseControlRes(allocator, res_bytes);
+    return try rpc.parseControlRes(allocator, res_bytes);
+}
+
+fn rpcExists(allocator: std.mem.Allocator, path: []const u8) !bool {
+    const res = try rpcCall(allocator, path, .{ .op = "exists", .path = path });
     if (!res.ok) return error.RemoteError;
     return res.exists orelse false;
 }
@@ -145,8 +149,8 @@ pub fn main(init: std.process.Init) !u8 {
         }
         const cols = parseU16(argv.items[3]) catch return 1;
         const rows = parseU16(argv.items[4]) catch return 1;
-        rt.resize(argv.items[2], cols, rows) catch return 1;
-        return 0;
+        const res = rpcCall(std.heap.page_allocator, argv.items[2], .{ .op = "resize", .path = argv.items[2], .cols = cols, .rows = rows }) catch return 1;
+        return if (res.ok) 0 else 1;
     }
 
     if (std.mem.eql(u8, cmd, "terminate")) {
@@ -155,8 +159,8 @@ pub fn main(init: std.process.Init) !u8 {
             return 1;
         }
         const sig = if (argv.items.len == 4) argv.items[3] else null;
-        rt.terminate(argv.items[2], sig) catch return 1;
-        return 0;
+        const res = rpcCall(std.heap.page_allocator, argv.items[2], .{ .op = "terminate", .path = argv.items[2], .signal = sig }) catch return 1;
+        return if (res.ok) 0 else 1;
     }
 
     if (std.mem.eql(u8, cmd, "wait")) {
@@ -164,12 +168,14 @@ pub fn main(init: std.process.Init) !u8 {
             usage();
             return 1;
         }
-        const st = rt.wait(argv.items[2]) catch return 1;
-        if (st.code) |code| {
+        const res = rpcCall(std.heap.page_allocator, argv.items[2], .{ .op = "wait", .path = argv.items[2] }) catch return 1;
+        if (!res.ok) return 1;
+
+        if (res.code) |code| {
             std.debug.print("exit_code={d}\n", .{code});
             return @intCast(@min(@as(i32, 255), @max(@as(i32, 0), code)));
         }
-        std.debug.print("exit_signal={s}\n", .{st.signal orelse "unknown"});
+        std.debug.print("exit_signal={s}\n", .{res.signal orelse "unknown"});
         return 1;
     }
 
@@ -198,7 +204,11 @@ pub fn main(init: std.process.Init) !u8 {
 
             while (true) {
                 _ = rt.serveControlOnce(std.heap.page_allocator, path, 100) catch {};
-                const polled = rt.pollExit(path) catch null;
+
+                const polled = rt.pollExit(path) catch |e| switch (e) {
+                    msr.RuntimeError.SessionNotFound => break,
+                    else => null,
+                };
                 if (polled != null) break;
             }
             return 0;

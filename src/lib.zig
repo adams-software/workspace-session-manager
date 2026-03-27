@@ -465,10 +465,52 @@ pub const Runtime = struct {
         const req = rpc.parseControlReq(allocator, req_bytes) catch return RuntimeError.InvalidArgs;
 
         var res = rpc.ControlRes{ .ok = false, .err = .{ .code = "unsupported" } };
+        const qpath = req.path orelse path;
+
         if (std.mem.eql(u8, req.op, "exists")) {
-            const qpath = req.path orelse path;
             const ok = self.exists(qpath) catch false;
             res = .{ .ok = true, .exists = ok };
+        } else if (std.mem.eql(u8, req.op, "resize")) {
+            const cols = req.cols orelse 0;
+            const rows = req.rows orelse 0;
+            self.resize(qpath, cols, rows) catch |e| {
+                res = switch (e) {
+                    RuntimeError.SessionNotFound => .{ .ok = false, .err = .{ .code = "session_not_found" } },
+                    RuntimeError.PermissionDenied => .{ .ok = false, .err = .{ .code = "permission_denied" } },
+                    else => .{ .ok = false, .err = .{ .code = "invalid_args" } },
+                };
+                const res_bytes = rpc.encodeControlRes(allocator, res) catch return RuntimeError.InvalidArgs;
+                defer allocator.free(res_bytes);
+                rpc.writeFrame(client_fd, res_bytes) catch return RuntimeError.InvalidArgs;
+                return true;
+            };
+            res = .{ .ok = true };
+        } else if (std.mem.eql(u8, req.op, "terminate")) {
+            self.terminate(qpath, req.signal) catch |e| {
+                res = switch (e) {
+                    RuntimeError.SessionNotFound => .{ .ok = false, .err = .{ .code = "session_not_found" } },
+                    RuntimeError.PermissionDenied => .{ .ok = false, .err = .{ .code = "permission_denied" } },
+                    else => .{ .ok = false, .err = .{ .code = "invalid_args" } },
+                };
+                const res_bytes = rpc.encodeControlRes(allocator, res) catch return RuntimeError.InvalidArgs;
+                defer allocator.free(res_bytes);
+                rpc.writeFrame(client_fd, res_bytes) catch return RuntimeError.InvalidArgs;
+                return true;
+            };
+            res = .{ .ok = true };
+        } else if (std.mem.eql(u8, req.op, "wait")) {
+            const st = self.wait(qpath) catch |e| {
+                res = switch (e) {
+                    RuntimeError.SessionNotFound => .{ .ok = false, .err = .{ .code = "session_not_found" } },
+                    RuntimeError.PermissionDenied => .{ .ok = false, .err = .{ .code = "permission_denied" } },
+                    else => .{ .ok = false, .err = .{ .code = "invalid_args" } },
+                };
+                const res_bytes = rpc.encodeControlRes(allocator, res) catch return RuntimeError.InvalidArgs;
+                defer allocator.free(res_bytes);
+                rpc.writeFrame(client_fd, res_bytes) catch return RuntimeError.InvalidArgs;
+                return true;
+            };
+            res = .{ .ok = true, .code = st.code, .signal = st.signal };
         }
 
         const res_bytes = rpc.encodeControlRes(allocator, res) catch return RuntimeError.InvalidArgs;

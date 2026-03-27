@@ -21,6 +21,8 @@ pub const ControlReq = struct {
 pub const ControlRes = struct {
     ok: bool,
     exists: ?bool = null,
+    code: ?i32 = null,
+    signal: ?[]const u8 = null,
     err: ?ErrBody = null,
 
     pub const ErrBody = struct {
