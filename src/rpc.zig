@@ -20,7 +20,7 @@ pub const ControlReq = struct {
 
 pub const ControlRes = struct {
     ok: bool,
-    value: ?std.json.Value = null,
+    exists: ?bool = null,
     err: ?ErrBody = null,
 
     pub const ErrBody = struct {
@@ -69,6 +69,17 @@ pub fn parseControlReq(allocator: std.mem.Allocator, bytes: []const u8) !Control
     return parsed.value.payload;
 }
 
+pub fn parseControlRes(allocator: std.mem.Allocator, bytes: []const u8) !ControlRes {
+    const Env = struct {
+        type: []const u8,
+        payload: ControlRes,
+    };
+    var parsed = try std.json.parseFromSlice(Env, allocator, bytes, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    if (!std.mem.eql(u8, parsed.value.type, "control_res")) return error.BadMessageType;
+    return parsed.value.payload;
+}
+
 fn writeAll(fd: c_int, bytes: []const u8) !void {
     var off: usize = 0;
     while (off < bytes.len) {
@@ -112,4 +123,15 @@ test "encode/decode control request" {
     try std.testing.expectEqualStrings("exists", out.op);
     try std.testing.expect(out.path != null);
     try std.testing.expectEqualStrings("/tmp/s1.sock", out.path.?);
+}
+
+test "encode/decode control response" {
+    const res = ControlRes{ .ok = true, .exists = true };
+    const payload = try encodeControlRes(std.testing.allocator, res);
+    defer std.testing.allocator.free(payload);
+
+    const out = try parseControlRes(std.testing.allocator, payload);
+    try std.testing.expect(out.ok);
+    try std.testing.expect(out.exists != null);
+    try std.testing.expect(out.exists.?);
 }

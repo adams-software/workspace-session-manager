@@ -1,8 +1,11 @@
 const std = @import("std");
 const msr = @import("msr");
+const rpc = msr.rpc;
 const c = @cImport({
     @cInclude("unistd.h");
     @cInclude("stdlib.h");
+    @cInclude("sys/socket.h");
+    @cInclude("sys/un.h");
 });
 
 fn usage() void {
@@ -55,15 +58,52 @@ fn spawnHostDetached(argv0: []const u8, path: []const u8, child_argv: []const []
 }
 
 fn waitForReady(rt: *msr.Runtime, path: []const u8, timeout_ms: u32) bool {
+    _ = rt;
     const step_us: u32 = 10_000;
     const loops = timeout_ms / 10;
     var i: u32 = 0;
     while (i < loops) : (i += 1) {
-        const ok = rt.exists(path) catch false;
-        if (ok) return true;
-        _ = c.usleep(step_us);
+        const fd = connectUnix(path) catch {
+            _ = c.usleep(step_us);
+            continue;
+        };
+        _ = c.close(fd);
+        return true;
     }
     return false;
+}
+
+fn connectUnix(path: []const u8) !c_int {
+    var addr: c.struct_sockaddr_un = undefined;
+    @memset(std.mem.asBytes(&addr), 0);
+    addr.sun_family = c.AF_UNIX;
+    std.mem.copyForwards(u8, addr.sun_path[0..path.len], path);
+    addr.sun_path[path.len] = 0;
+
+    const fd = c.socket(c.AF_UNIX, c.SOCK_STREAM, 0);
+    if (fd < 0) return error.ConnectFailed;
+
+    if (c.connect(fd, @as(*const c.struct_sockaddr, @ptrCast(&addr)), @intCast(@sizeOf(c.struct_sockaddr_un))) != 0) {
+        _ = c.close(fd);
+        return error.ConnectFailed;
+    }
+    return fd;
+}
+
+fn rpcExists(allocator: std.mem.Allocator, path: []const u8) !bool {
+    const fd = try connectUnix(path);
+    defer _ = c.close(fd);
+
+    const req = try rpc.encodeControlReq(allocator, .{ .op = "exists", .path = path });
+    defer allocator.free(req);
+    try rpc.writeFrame(fd, req);
+
+    const res_bytes = try rpc.readFrame(allocator, fd, 64 * 1024);
+    defer allocator.free(res_bytes);
+
+    const res = try rpc.parseControlRes(allocator, res_bytes);
+    if (!res.ok) return error.RemoteError;
+    return res.exists orelse false;
 }
 
 pub fn main(init: std.process.Init) !u8 {
@@ -93,7 +133,7 @@ pub fn main(init: std.process.Init) !u8 {
             usage();
             return 1;
         }
-        const ok = rt.exists(argv.items[2]) catch return 1;
+        const ok = rpcExists(std.heap.page_allocator, argv.items[2]) catch false;
         std.debug.print("{s}\n", .{if (ok) "true" else "false"});
         return if (ok) 0 else 1;
     }
@@ -155,7 +195,12 @@ pub fn main(init: std.process.Init) !u8 {
 
         if (std.mem.eql(u8, cmd, "_host")) {
             try rt.create(path, .{ .argv = child_argv });
-            _ = try rt.wait(path);
+
+            while (true) {
+                _ = rt.serveControlOnce(std.heap.page_allocator, path, 100) catch {};
+                const polled = rt.pollExit(path) catch null;
+                if (polled != null) break;
+            }
             return 0;
         }
 

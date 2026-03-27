@@ -1,4 +1,6 @@
 const std = @import("std");
+const _rpc = @import("rpc.zig");
+pub const rpc = _rpc;
 const c = @cImport({
     @cInclude("pty.h");
     @cInclude("sys/socket.h");
@@ -411,6 +413,68 @@ pub const Runtime = struct {
 
         self.cleanupSession(path);
         return out;
+    }
+
+    pub fn pollExit(self: *Runtime, path: []const u8) RuntimeError!?ExitStatus {
+        try validateSocketPath(path);
+        const s = self.sessions.get(path) orelse return RuntimeError.SessionNotFound;
+
+        var status: c_int = 0;
+        const got = c.waitpid(s.pid, &status, c.WNOHANG);
+        if (got == 0) return null;
+        if (got < 0) {
+            const e = std.c.errno(-1);
+            return switch (e) {
+                .INTR => null,
+                .CHILD => RuntimeError.SessionNotFound,
+                .PERM => RuntimeError.PermissionDenied,
+                else => RuntimeError.InvalidArgs,
+            };
+        }
+
+        var out = ExitStatus{};
+        if (c.WIFEXITED(status)) {
+            out.code = @intCast(c.WEXITSTATUS(status));
+        } else if (c.WIFSIGNALED(status)) {
+            out.signal = "SIGNALED";
+        }
+        self.cleanupSession(path);
+        return out;
+    }
+
+    pub fn serveControlOnce(self: *Runtime, allocator: std.mem.Allocator, path: []const u8, timeout_ms: i32) RuntimeError!bool {
+        try validateSocketPath(path);
+        const s = self.sessions.get(path) orelse return RuntimeError.SessionNotFound;
+
+        var pfd = c.struct_pollfd{ .fd = s.listener_fd, .events = c.POLLIN, .revents = 0 };
+        const pr = c.poll(&pfd, 1, timeout_ms);
+        if (pr < 0) {
+            const e = std.c.errno(-1);
+            if (e == .INTR) return false;
+            return RuntimeError.InvalidArgs;
+        }
+        if (pr == 0) return false;
+
+        const client_fd = c.accept(s.listener_fd, null, null);
+        if (client_fd < 0) return RuntimeError.InvalidArgs;
+        defer _ = c.close(client_fd);
+
+        const req_bytes = rpc.readFrame(allocator, client_fd, 64 * 1024) catch return RuntimeError.InvalidArgs;
+        defer allocator.free(req_bytes);
+
+        const req = rpc.parseControlReq(allocator, req_bytes) catch return RuntimeError.InvalidArgs;
+
+        var res = rpc.ControlRes{ .ok = false, .err = .{ .code = "unsupported" } };
+        if (std.mem.eql(u8, req.op, "exists")) {
+            const qpath = req.path orelse path;
+            const ok = self.exists(qpath) catch false;
+            res = .{ .ok = true, .exists = ok };
+        }
+
+        const res_bytes = rpc.encodeControlRes(allocator, res) catch return RuntimeError.InvalidArgs;
+        defer allocator.free(res_bytes);
+        rpc.writeFrame(client_fd, res_bytes) catch return RuntimeError.InvalidArgs;
+        return true;
     }
 };
 
