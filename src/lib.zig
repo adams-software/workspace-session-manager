@@ -146,14 +146,23 @@ pub const Runtime = struct {
         }
 
         if (c.bind(fd, @as(*const c.struct_sockaddr, @ptrCast(&addr)), @intCast(@sizeOf(c.struct_sockaddr_un))) != 0) {
+            const e = std.c.errno(-1);
             _ = c.close(fd);
-            return RuntimeError.InvalidArgs;
+            return switch (e) {
+                .ADDRINUSE => RuntimeError.SessionAlreadyRunning,
+                .ACCES => RuntimeError.PermissionDenied,
+                else => RuntimeError.InvalidArgs,
+            };
         }
 
         if (c.listen(fd, 16) != 0) {
+            const e = std.c.errno(-1);
             _ = c.close(fd);
             unlinkBestEffort(path);
-            return RuntimeError.InvalidArgs;
+            return switch (e) {
+                .ACCES => RuntimeError.PermissionDenied,
+                else => RuntimeError.InvalidArgs,
+            };
         }
 
         return fd;
@@ -340,14 +349,28 @@ pub const Runtime = struct {
             .ws_ypixel = 0,
         };
 
-        if (c.ioctl(s.master_fd, c.TIOCSWINSZ, &ws) != 0) return RuntimeError.InvalidArgs;
+        if (c.ioctl(s.master_fd, c.TIOCSWINSZ, &ws) != 0) {
+            const e = std.c.errno(-1);
+            return switch (e) {
+                .ACCES => RuntimeError.PermissionDenied,
+                .INTR => RuntimeError.InvalidArgs,
+                else => RuntimeError.InvalidArgs,
+            };
+        }
     }
 
     pub fn terminate(self: *Runtime, path: []const u8, signal: ?[]const u8) RuntimeError!void {
         try validateSocketPath(path);
 
         const s = self.sessions.get(path) orelse return RuntimeError.SessionNotFound;
-        if (c.kill(s.pid, signalFromName(signal)) != 0) return RuntimeError.InvalidArgs;
+        if (c.kill(s.pid, signalFromName(signal)) != 0) {
+            const e = std.c.errno(-1);
+            return switch (e) {
+                .SRCH => RuntimeError.SessionNotFound,
+                .PERM => RuntimeError.PermissionDenied,
+                else => RuntimeError.InvalidArgs,
+            };
+        }
     }
 
     pub fn wait(self: *Runtime, path: []const u8) RuntimeError!ExitStatus {
@@ -355,8 +378,18 @@ pub const Runtime = struct {
 
         const s = self.sessions.get(path) orelse return RuntimeError.SessionNotFound;
         var status: c_int = 0;
-        const got = c.waitpid(s.pid, &status, 0);
-        if (got < 0) return RuntimeError.InvalidArgs;
+        var got: c.pid_t = -1;
+        while (true) {
+            got = c.waitpid(s.pid, &status, 0);
+            if (got >= 0) break;
+            const e = std.c.errno(-1);
+            if (e == .INTR) continue;
+            return switch (e) {
+                .CHILD => RuntimeError.SessionNotFound,
+                .PERM => RuntimeError.PermissionDenied,
+                else => RuntimeError.InvalidArgs,
+            };
+        }
 
         var out = ExitStatus{};
         if (c.WIFEXITED(status)) {
