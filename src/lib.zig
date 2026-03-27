@@ -296,8 +296,19 @@ pub const Runtime = struct {
         s.attached = true;
         defer s.attached = false;
 
+        const client_fd = c.accept(s.listener_fd, null, null);
+        if (client_fd < 0) {
+            const e = std.c.errno(-1);
+            return switch (e) {
+                .INTR => RuntimeError.InvalidArgs,
+                .ACCES => RuntimeError.PermissionDenied,
+                else => RuntimeError.InvalidArgs,
+            };
+        }
+        defer _ = c.close(client_fd);
+
         var fds = [2]c.struct_pollfd{
-            .{ .fd = c.STDIN_FILENO, .events = c.POLLIN, .revents = 0 },
+            .{ .fd = client_fd, .events = c.POLLIN, .revents = 0 },
             .{ .fd = s.master_fd, .events = c.POLLIN, .revents = 0 },
         };
         var buf: [4096]u8 = undefined;
@@ -311,13 +322,13 @@ pub const Runtime = struct {
             }
 
             if ((fds[0].revents & c.POLLIN) != 0) {
-                const n = c.read(c.STDIN_FILENO, &buf, buf.len);
+                const n = c.read(client_fd, &buf, buf.len);
                 if (n < 0) {
                     const e = std.c.errno(-1);
                     if (e == .INTR or e == .AGAIN) continue;
                     return RuntimeError.InvalidArgs;
                 }
-                if (n == 0) return; // input side detached
+                if (n == 0) return; // client detached
                 try writeAll(s.master_fd, buf[0..@intCast(n)]);
             }
 
@@ -329,7 +340,7 @@ pub const Runtime = struct {
                     return RuntimeError.InvalidArgs;
                 }
                 if (n == 0) return; // session ended
-                try writeAll(c.STDOUT_FILENO, buf[0..@intCast(n)]);
+                try writeAll(client_fd, buf[0..@intCast(n)]);
             }
 
             if ((fds[1].revents & (c.POLLHUP | c.POLLERR | c.POLLNVAL)) != 0) return;
