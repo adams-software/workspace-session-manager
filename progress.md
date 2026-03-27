@@ -11,5 +11,9 @@
 - Implemented first Slice B step:
   - `create` now spawns detached same-binary `_host` process (`fork` + `execvp`) and waits for socket readiness.
   - `_host` still owns runtime lifecycle (`create` + `wait`).
+- Added protocol scaffolding in `src/rpc.zig`:
+  - length-prefixed frame read/write
+  - control request/response envelope encode/decode helpers
+  - unit tests for framing + request roundtrip
 - Verified with `zig build test` and `zig build run -- --help`.
-- Note: remote control forwarding for `resize/terminate/wait` to host is not wired yet.
+- Note: host control-loop wiring and CLI command forwarding to RPC are next.

@@ -39,9 +39,20 @@ pub fn build(b: *std.Build) void {
         .root_module = test_root,
     });
 
+    const rpc_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/rpc.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+
     const run_lib_tests = b.addRunArtifact(lib_tests);
+    const run_rpc_tests = b.addRunArtifact(rpc_tests);
     const test_step = b.step("test", "Run library tests");
     test_step.dependOn(&run_lib_tests.step);
+    test_step.dependOn(&run_rpc_tests.step);
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
