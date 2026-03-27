@@ -110,6 +110,27 @@ pub const Runtime = struct {
         }.call, .{});
     }
 
+    fn isStaleSocket(path: []const u8) RuntimeError!bool {
+        var addr: c.struct_sockaddr_un = undefined;
+        @memset(std.mem.asBytes(&addr), 0);
+        addr.sun_family = c.AF_UNIX;
+        std.mem.copyForwards(u8, addr.sun_path[0..path.len], path);
+        addr.sun_path[path.len] = 0;
+
+        const fd = c.socket(c.AF_UNIX, c.SOCK_STREAM, 0);
+        if (fd < 0) return RuntimeError.InvalidArgs;
+        defer _ = c.close(fd);
+
+        const rc = c.connect(fd, @as(*const c.struct_sockaddr, @ptrCast(&addr)), @intCast(@sizeOf(c.struct_sockaddr_un)));
+        if (rc == 0) return false; // live listener exists
+
+        const e = std.c.errno(-1);
+        if (e == .CONNREFUSED or e == .NOENT) return true;
+        if (e == .ACCES) return RuntimeError.PermissionDenied;
+        // Conservative: unknown failure means don't treat as stale.
+        return false;
+    }
+
     fn createListener(path: []const u8) RuntimeError!c_int {
         var addr: c.struct_sockaddr_un = undefined;
         @memset(std.mem.asBytes(&addr), 0);
@@ -120,7 +141,9 @@ pub const Runtime = struct {
         const fd = c.socket(c.AF_UNIX, c.SOCK_STREAM, 0);
         if (fd < 0) return RuntimeError.InvalidArgs;
 
-        unlinkBestEffort(path);
+        if (try isStaleSocket(path)) {
+            unlinkBestEffort(path);
+        }
 
         if (c.bind(fd, @as(*const c.struct_sockaddr, @ptrCast(&addr)), @intCast(@sizeOf(c.struct_sockaddr_un))) != 0) {
             _ = c.close(fd);
@@ -217,7 +240,7 @@ pub const Runtime = struct {
             .ACCMODE = .RDONLY,
             .CLOEXEC = true,
         }, 0) catch |err| switch (err) {
-            error.FileNotFound => return false,
+            error.FileNotFound, error.NoDevice => return false,
             error.AccessDenied => return RuntimeError.PermissionDenied,
             else => return RuntimeError.InvalidArgs,
         };
@@ -403,6 +426,32 @@ test "create + wait: child exits with status" {
     try rt.create(path, opts);
     const status = try rt.wait(path);
     try std.testing.expectEqual(@as(?i32, 7), status.code);
+    try std.testing.expectEqual(false, try rt.exists(path));
+}
+
+test "create: stale socket path is reclaimed" {
+    var rt = Runtime.init(std.testing.allocator);
+    defer rt.deinit();
+
+    const path = "/tmp/msr-stale-reclaim-test.sock";
+    Runtime.unlinkBestEffort(path);
+
+    // Create a stale socket node: bind/listen then close without unlink.
+    var addr: c.struct_sockaddr_un = undefined;
+    @memset(std.mem.asBytes(&addr), 0);
+    addr.sun_family = c.AF_UNIX;
+    std.mem.copyForwards(u8, addr.sun_path[0..path.len], path);
+    addr.sun_path[path.len] = 0;
+
+    const stale_fd = c.socket(c.AF_UNIX, c.SOCK_STREAM, 0);
+    try std.testing.expect(stale_fd >= 0);
+    try std.testing.expectEqual(@as(c_int, 0), c.bind(stale_fd, @as(*const c.struct_sockaddr, @ptrCast(&addr)), @intCast(@sizeOf(c.struct_sockaddr_un))));
+    try std.testing.expectEqual(@as(c_int, 0), c.listen(stale_fd, 1));
+    _ = c.close(stale_fd);
+
+    const opts = SpawnOptions{ .argv = &.{ "/bin/sh", "-c", "exit 0" } };
+    try rt.create(path, opts);
+    _ = try rt.wait(path);
     try std.testing.expectEqual(false, try rt.exists(path));
 }
 
