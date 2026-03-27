@@ -511,6 +511,28 @@ test "resize: success on running session" {
     _ = try rt.wait(path);
 }
 
+test "lifecycle smoke: create resize terminate wait cleanup" {
+    var rt = Runtime.init(std.testing.allocator);
+    defer rt.deinit();
+
+    const path = "/tmp/msr-lifecycle-smoke-test.sock";
+    Runtime.unlinkBestEffort(path);
+
+    const opts = SpawnOptions{ .argv = &.{ "/bin/sh", "-c", "sleep 5" } };
+    try rt.create(path, opts);
+    try std.testing.expectEqual(true, try rt.exists(path));
+
+    try rt.resize(path, 120, 40);
+    try rt.terminate(path, "TERM");
+
+    const st = try rt.wait(path);
+    // Terminated by signal or exits with shell-dependent code; both are acceptable.
+    try std.testing.expect(st.signal != null or st.code != null);
+
+    try std.testing.expectEqual(false, try rt.exists(path));
+    try std.testing.expectError(RuntimeError.SessionNotFound, rt.wait(path));
+}
+
 test "attach: invalid args and not found" {
     var rt = Runtime.init(std.testing.allocator);
     defer rt.deinit();
