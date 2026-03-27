@@ -558,3 +558,24 @@ test "attach: exclusive returns busy when already attached" {
     try rt.terminate(path, "KILL");
     _ = try rt.wait(path);
 }
+
+test "attach: exclusive busy is stable across repeated attempts" {
+    var rt = Runtime.init(std.testing.allocator);
+    defer rt.deinit();
+
+    const path = "/tmp/msr-attach-busy-repeat-test.sock";
+    Runtime.unlinkBestEffort(path);
+
+    const opts = SpawnOptions{ .argv = &.{ "/bin/sh", "-c", "sleep 1" } };
+    try rt.create(path, opts);
+    rt.sessions.getPtr(path).?.attached = true;
+
+    var i: usize = 0;
+    while (i < 5) : (i += 1) {
+        try std.testing.expectError(RuntimeError.SessionRunning, rt.attach(path, .exclusive));
+    }
+
+    rt.sessions.getPtr(path).?.attached = false;
+    try rt.terminate(path, "KILL");
+    _ = try rt.wait(path);
+}
