@@ -552,6 +552,60 @@ test "attach: invalid args and not found" {
     try std.testing.expectError(RuntimeError.SessionNotFound, rt.attach("/tmp/msr-none.sock", .exclusive));
 }
 
+const AttachThreadCtx = struct {
+    rt: *Runtime,
+    path: []const u8,
+    result: ?RuntimeError!void = null,
+};
+
+fn attachThreadMain(ctx: *AttachThreadCtx) void {
+    ctx.result = ctx.rt.attach(ctx.path, .exclusive);
+}
+
+fn connectUnix(path: []const u8) !c_int {
+    var addr: c.struct_sockaddr_un = undefined;
+    @memset(std.mem.asBytes(&addr), 0);
+    addr.sun_family = c.AF_UNIX;
+    std.mem.copyForwards(u8, addr.sun_path[0..path.len], path);
+    addr.sun_path[path.len] = 0;
+
+    const fd = c.socket(c.AF_UNIX, c.SOCK_STREAM, 0);
+    if (fd < 0) return error.ConnectFailed;
+
+    if (c.connect(fd, @as(*const c.struct_sockaddr, @ptrCast(&addr)), @intCast(@sizeOf(c.struct_sockaddr_un))) != 0) {
+        _ = c.close(fd);
+        return error.ConnectFailed;
+    }
+    return fd;
+}
+
+test "attach: socket client connect/disconnect roundtrip" {
+    var rt = Runtime.init(std.testing.allocator);
+    defer rt.deinit();
+
+    const path = "/tmp/msr-attach-roundtrip-test.sock";
+    Runtime.unlinkBestEffort(path);
+
+    const opts = SpawnOptions{ .argv = &.{ "/bin/sh", "-c", "sleep 2" } };
+    try rt.create(path, opts);
+
+    var ctx = AttachThreadCtx{ .rt = &rt, .path = path };
+    const th = try std.Thread.spawn(.{}, attachThreadMain, .{&ctx});
+
+    // Give attach thread a moment to enter accept().
+    _ = c.usleep(20_000);
+
+    const client_fd = try connectUnix(path);
+    _ = c.close(client_fd);
+
+    th.join();
+    try std.testing.expect(ctx.result != null);
+    try ctx.result.?;
+
+    try rt.terminate(path, "KILL");
+    _ = try rt.wait(path);
+}
+
 test "attach: exclusive returns busy when already attached" {
     var rt = Runtime.init(std.testing.allocator);
     defer rt.deinit();
