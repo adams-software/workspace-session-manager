@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 pub const ExitStatus = struct {
     code: ?i32 = null,
@@ -77,8 +78,14 @@ pub const Runtime = struct {
     }
 
     pub fn create(self: *Runtime, path: []const u8, opts: SpawnOptions) RuntimeError!void {
-        _ = self;
-        if (path.len == 0 or opts.argv.len == 0) return RuntimeError.InvalidArgs;
+        if (opts.argv.len == 0) return RuntimeError.InvalidArgs;
+        const already = try self.exists(path);
+        if (already) return RuntimeError.SessionAlreadyRunning;
+
+        // Placeholder for runtime bootstrap:
+        // - create/bind/listen unix socket at `path`
+        // - spawn child with forkpty using opts
+        // - enter event loop
         return RuntimeError.Unsupported;
     }
 
@@ -126,4 +133,25 @@ test "exists: path too long" {
 test "exists: false for missing path" {
     var rt = Runtime.init(std.testing.allocator);
     try std.testing.expectEqual(false, try rt.exists("/tmp/this-should-not-exist-msr-test.sock"));
+}
+
+test "create: invalid args" {
+    var rt = Runtime.init(std.testing.allocator);
+    const opts = SpawnOptions{ .argv = &.{} };
+    try std.testing.expectError(RuntimeError.InvalidArgs, rt.create("/tmp/msr-test.sock", opts));
+}
+
+test "create: already exists" {
+    var rt = Runtime.init(std.testing.allocator);
+
+    const path = "/tmp/msr-create-exists-test.sock";
+    const fd = try std.posix.openat(std.posix.AT.FDCWD, path, .{
+        .ACCMODE = .WRONLY,
+        .CREAT = true,
+        .TRUNC = true,
+        .CLOEXEC = true,
+    }, 0o600);
+    _ = fd;
+    const opts = SpawnOptions{ .argv = &.{"sh"} };
+    try std.testing.expectError(RuntimeError.SessionAlreadyRunning, rt.create(path, opts));
 }
