@@ -5,6 +5,7 @@ const c = @cImport({
     @cInclude("sys/un.h");
     @cInclude("sys/wait.h");
     @cInclude("sys/ioctl.h");
+    @cInclude("poll.h");
     @cInclude("signal.h");
     @cInclude("unistd.h");
     @cInclude("string.h");
@@ -60,6 +61,7 @@ const Session = struct {
     listener_fd: c_int,
     master_fd: c_int,
     pid: c.pid_t,
+    attached: bool,
 };
 
 /// MSR v0 runtime surface (single-session primitive).
@@ -193,6 +195,16 @@ pub const Runtime = struct {
         return c.SIGTERM;
     }
 
+    fn writeAll(fd: c_int, bytes: []const u8) RuntimeError!void {
+        var off: usize = 0;
+        while (off < bytes.len) {
+            const n = c.write(fd, bytes.ptr + off, bytes.len - off);
+            if (n < 0) return RuntimeError.InvalidArgs;
+            if (n == 0) return RuntimeError.InvalidArgs;
+            off += @intCast(n);
+        }
+    }
+
     pub fn exists(self: *Runtime, path: []const u8) RuntimeError!bool {
         try validateSocketPath(path);
         if (self.sessions.contains(path)) return true;
@@ -228,6 +240,7 @@ pub const Runtime = struct {
             .listener_fd = listener_fd,
             .master_fd = child.master_fd,
             .pid = child.pid,
+            .attached = false,
         }) catch {
             _ = c.kill(child.pid, c.SIGKILL);
             _ = c.close(child.master_fd);
@@ -239,10 +252,41 @@ pub const Runtime = struct {
     }
 
     pub fn attach(self: *Runtime, path: []const u8, mode: AttachMode) RuntimeError!void {
-        _ = self;
-        _ = mode;
-        if (path.len == 0) return RuntimeError.InvalidArgs;
-        return RuntimeError.Unsupported;
+        try validateSocketPath(path);
+
+        var s = self.sessions.getPtr(path) orelse return RuntimeError.SessionNotFound;
+        if (s.attached and mode == .exclusive) return RuntimeError.SessionRunning;
+        // In takeover mode we allow replacing logical ownership.
+        s.attached = true;
+        defer s.attached = false;
+
+        var fds = [2]c.struct_pollfd{
+            .{ .fd = c.STDIN_FILENO, .events = c.POLLIN, .revents = 0 },
+            .{ .fd = s.master_fd, .events = c.POLLIN, .revents = 0 },
+        };
+        var buf: [4096]u8 = undefined;
+
+        while (true) {
+            const pr = c.poll(&fds, 2, -1);
+            if (pr < 0) return RuntimeError.InvalidArgs;
+
+            if ((fds[0].revents & c.POLLIN) != 0) {
+                const n = c.read(c.STDIN_FILENO, &buf, buf.len);
+                if (n < 0) return RuntimeError.InvalidArgs;
+                if (n == 0) return;
+                try writeAll(s.master_fd, buf[0..@intCast(n)]);
+            }
+
+            if ((fds[1].revents & c.POLLIN) != 0) {
+                const n = c.read(s.master_fd, &buf, buf.len);
+                if (n < 0) return RuntimeError.InvalidArgs;
+                if (n == 0) return;
+                try writeAll(c.STDOUT_FILENO, buf[0..@intCast(n)]);
+            }
+
+            if ((fds[1].revents & (c.POLLHUP | c.POLLERR)) != 0) return;
+            if ((fds[0].revents & (c.POLLHUP | c.POLLERR)) != 0) return;
+        }
     }
 
     pub fn resize(self: *Runtime, path: []const u8, cols: u16, rows: u16) RuntimeError!void {
@@ -367,4 +411,12 @@ test "resize: success on running session" {
     try rt.resize(path, 100, 30);
     try rt.terminate(path, "KILL");
     _ = try rt.wait(path);
+}
+
+test "attach: invalid args and not found" {
+    var rt = Runtime.init(std.testing.allocator);
+    defer rt.deinit();
+
+    try std.testing.expectError(RuntimeError.InvalidArgs, rt.attach("", .exclusive));
+    try std.testing.expectError(RuntimeError.SessionNotFound, rt.attach("/tmp/msr-none.sock", .exclusive));
 }
