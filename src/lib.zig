@@ -199,7 +199,11 @@ pub const Runtime = struct {
         var off: usize = 0;
         while (off < bytes.len) {
             const n = c.write(fd, bytes.ptr + off, bytes.len - off);
-            if (n < 0) return RuntimeError.InvalidArgs;
+            if (n < 0) {
+                const e = std.c.errno(-1);
+                if (e == .INTR or e == .AGAIN) continue;
+                return RuntimeError.InvalidArgs;
+            }
             if (n == 0) return RuntimeError.InvalidArgs;
             off += @intCast(n);
         }
@@ -268,24 +272,36 @@ pub const Runtime = struct {
 
         while (true) {
             const pr = c.poll(&fds, 2, -1);
-            if (pr < 0) return RuntimeError.InvalidArgs;
+            if (pr < 0) {
+                const e = std.c.errno(-1);
+                if (e == .INTR) continue;
+                return RuntimeError.InvalidArgs;
+            }
 
             if ((fds[0].revents & c.POLLIN) != 0) {
                 const n = c.read(c.STDIN_FILENO, &buf, buf.len);
-                if (n < 0) return RuntimeError.InvalidArgs;
-                if (n == 0) return;
+                if (n < 0) {
+                    const e = std.c.errno(-1);
+                    if (e == .INTR or e == .AGAIN) continue;
+                    return RuntimeError.InvalidArgs;
+                }
+                if (n == 0) return; // input side detached
                 try writeAll(s.master_fd, buf[0..@intCast(n)]);
             }
 
             if ((fds[1].revents & c.POLLIN) != 0) {
                 const n = c.read(s.master_fd, &buf, buf.len);
-                if (n < 0) return RuntimeError.InvalidArgs;
-                if (n == 0) return;
+                if (n < 0) {
+                    const e = std.c.errno(-1);
+                    if (e == .INTR or e == .AGAIN) continue;
+                    return RuntimeError.InvalidArgs;
+                }
+                if (n == 0) return; // session ended
                 try writeAll(c.STDOUT_FILENO, buf[0..@intCast(n)]);
             }
 
-            if ((fds[1].revents & (c.POLLHUP | c.POLLERR)) != 0) return;
-            if ((fds[0].revents & (c.POLLHUP | c.POLLERR)) != 0) return;
+            if ((fds[1].revents & (c.POLLHUP | c.POLLERR | c.POLLNVAL)) != 0) return;
+            if ((fds[0].revents & (c.POLLHUP | c.POLLERR | c.POLLNVAL)) != 0) return;
         }
     }
 
@@ -419,4 +435,22 @@ test "attach: invalid args and not found" {
 
     try std.testing.expectError(RuntimeError.InvalidArgs, rt.attach("", .exclusive));
     try std.testing.expectError(RuntimeError.SessionNotFound, rt.attach("/tmp/msr-none.sock", .exclusive));
+}
+
+test "attach: exclusive returns busy when already attached" {
+    var rt = Runtime.init(std.testing.allocator);
+    defer rt.deinit();
+
+    const path = "/tmp/msr-attach-busy-test.sock";
+    Runtime.unlinkBestEffort(path);
+
+    const opts = SpawnOptions{ .argv = &.{ "/bin/sh", "-c", "sleep 1" } };
+    try rt.create(path, opts);
+    rt.sessions.getPtr(path).?.attached = true;
+
+    try std.testing.expectError(RuntimeError.SessionRunning, rt.attach(path, .exclusive));
+    rt.sessions.getPtr(path).?.attached = false;
+
+    try rt.terminate(path, "KILL");
+    _ = try rt.wait(path);
 }
