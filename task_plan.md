@@ -9,6 +9,7 @@ Define a minimal single-binary design and user-facing CLI surface for `msr` that
 | Draft v0 CLI + process model spec | complete | Drafted in `docs/specs/msr-binary-interface-v0.md` |
 | Review/adjust command surface | in_progress | Added first CLI skeleton in `src/main.zig`; validate names/flags |
 | Define implementation slices | complete | Included slices A-E in spec |
+| Slice B host-mode wiring | in_progress | `create` now spawns detached `_host`; control forwarding still pending |
 
 ## Success criteria
 - A single markdown spec exists with:

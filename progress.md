@@ -8,4 +8,8 @@
   - command parser/dispatch for `create|attach|resize|terminate|wait|exists|_host`
   - help/usage output
   - placeholder create/_host wiring to current in-process runtime
+- Implemented first Slice B step:
+  - `create` now spawns detached same-binary `_host` process (`fork` + `execvp`) and waits for socket readiness.
+  - `_host` still owns runtime lifecycle (`create` + `wait`).
 - Verified with `zig build test` and `zig build run -- --help`.
+- Note: remote control forwarding for `resize/terminate/wait` to host is not wired yet.

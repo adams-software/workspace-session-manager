@@ -1,5 +1,9 @@
 const std = @import("std");
 const msr = @import("msr");
+const c = @cImport({
+    @cInclude("unistd.h");
+    @cInclude("stdlib.h");
+});
 
 fn usage() void {
     std.debug.print(
@@ -20,6 +24,46 @@ fn usage() void {
 
 fn parseU16(s: []const u8) !u16 {
     return std.fmt.parseInt(u16, s, 10);
+}
+
+fn spawnHostDetached(argv0: []const u8, path: []const u8, child_argv: []const []const u8) !void {
+    const pid = c.fork();
+    if (pid < 0) return error.ForkFailed;
+
+    if (pid == 0) {
+        _ = c.setsid();
+
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+
+        const n = 4 + child_argv.len + 1;
+        const av = a.alloc(?[*:0]u8, n) catch c._exit(127);
+
+        av[0] = (a.dupeZ(u8, argv0) catch c._exit(127)).ptr;
+        av[1] = (a.dupeZ(u8, "_host") catch c._exit(127)).ptr;
+        av[2] = (a.dupeZ(u8, path) catch c._exit(127)).ptr;
+        av[3] = (a.dupeZ(u8, "--") catch c._exit(127)).ptr;
+        for (child_argv, 0..) |arg, i| {
+            av[4 + i] = (a.dupeZ(u8, arg) catch c._exit(127)).ptr;
+        }
+        av[n - 1] = null;
+
+        _ = c.execvp(av[0].?, @ptrCast(av.ptr));
+        c._exit(127);
+    }
+}
+
+fn waitForReady(rt: *msr.Runtime, path: []const u8, timeout_ms: u32) bool {
+    const step_us: u32 = 10_000;
+    const loops = timeout_ms / 10;
+    var i: u32 = 0;
+    while (i < loops) : (i += 1) {
+        const ok = rt.exists(path) catch false;
+        if (ok) return true;
+        _ = c.usleep(step_us);
+    }
+    return false;
 }
 
 pub fn main(init: std.process.Init) !u8 {
@@ -99,7 +143,6 @@ pub fn main(init: std.process.Init) !u8 {
         return 0;
     }
 
-    // Skeleton only for now: detached host plumbing lands in next slice.
     if (std.mem.eql(u8, cmd, "create") or std.mem.eql(u8, cmd, "_host")) {
         if (argv.items.len < 5) {
             usage();
@@ -107,12 +150,17 @@ pub fn main(init: std.process.Init) !u8 {
         }
         if (!std.mem.eql(u8, argv.items[3], "--")) return 1;
 
+        const path = argv.items[2];
         const child_argv = argv.items[4..];
-        try rt.create(argv.items[2], .{ .argv = child_argv });
 
         if (std.mem.eql(u8, cmd, "_host")) {
-            _ = try rt.wait(argv.items[2]);
+            try rt.create(path, .{ .argv = child_argv });
+            _ = try rt.wait(path);
+            return 0;
         }
+
+        spawnHostDetached(argv.items[0], path, child_argv) catch return 1;
+        if (!waitForReady(&rt, path, 2000)) return 1;
         return 0;
     }
 
