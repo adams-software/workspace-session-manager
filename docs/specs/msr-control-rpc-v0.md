@@ -54,37 +54,42 @@ This preserves architecture boundaries:
 ### Envelope
 All messages use one envelope shape:
 ```json
-{ "type": "control_req|control_res|data|event", "id": 1, "payload": { } }
+{ "type": "control_req|control_res|data", "payload": { } }
 ```
 
 Rules:
-- `id` is required for `control_req` and `control_res`.
-- For v0 control lane, only one request may be in-flight at a time (serialized req/res).
+- No request IDs in v0 (strict serialized req/res per lane).
+- Per lane, only one request may be in-flight at a time.
 - `data` frames carry PTY bytes (base64 in JSON for v0 simplicity).
 
 Examples:
 ```json
-{ "type": "control_req", "id": 1, "payload": { "op": "resize", "cols": 120, "rows": 40 } }
-{ "type": "control_res", "id": 1, "payload": { "ok": true } }
+{ "type": "control_req", "payload": { "op": "resize", "cols": 120, "rows": 40 } }
+{ "type": "control_res", "payload": { "ok": true, "value": {} } }
+{ "type": "control_res", "payload": { "ok": false, "err": { "code": "session_not_found" } } }
 { "type": "data", "payload": { "stream": "stdin", "bytes_b64": "..." } }
-{ "type": "event", "payload": { "kind": "session_exit", "code": 0 } }
 ```
 
 ## 6) Operations
 
-Control operations (serialized req/res):
-- `exists`
-- `resize`
-- `terminate`
-- `wait`
-- `attach` (enables data forwarding semantics for the connection)
+Control operations (serialized req/res, mirrored to runtime API):
+- `exists(path)`
+- `create(path, opts)` *(host/admin lane)*
+- `attach(path, mode)`
+- `resize(path, cols, rows)`
+- `terminate(path, signal?)`
+- `wait(path)`
 
 Optional (internal/debug):
-- `ping`
+- `ping()`
 
 Data operations:
 - `data` frames from client -> host map to PTY stdin writes
 - `data` frames from host -> client map to PTY stdout/stderr bytes
+
+Response shape:
+- success: `control_res { ok: true, value: <function return> }`
+- error: `control_res { ok: false, err: { code, message? } }`
 
 ## 7) Error mapping (protocol-level)
 
@@ -103,16 +108,20 @@ CLI prints human-readable messages, exits non-zero.
 
 For each accepted connection:
 1. keep connection open
-2. parse framed messages continuously
-3. route by envelope type:
-   - `control_req` -> execute runtime op -> emit `control_res`
+2. establish two logical control lanes (strict req/res each):
+   - **client-initiated control lane** (client sends req, host responds)
+   - **server-initiated control lane** (host sends req, client responds)
+3. parse framed messages continuously
+4. route by envelope type:
+   - `control_req` -> execute op -> emit `control_res`
    - `data` -> write bytes to PTY stdin (when attached)
-4. while attached, forward PTY output as `data` frames
-5. optionally emit `event` frames (e.g. session_exit)
+5. while attached, forward PTY output as `data` frames
 6. close on socket hangup/error
 
-Control lane rule:
-- one in-flight control request per connection (serialized req/res)
+Lane rules:
+- no request IDs
+- one in-flight request per lane
+- server-initiated control requests replace free-form event messages while preserving strict req/res semantics
 
 This keeps implementation simple and nested usage viable (control + data over one socket).
 
@@ -121,7 +130,8 @@ This keeps implementation simple and nested usage viable (control + data over on
 - `msr create` still spawns `_host` and waits for ready.
 - `msr exists/resize/terminate/wait` send serialized control requests to `<path>`.
 - `msr attach [--takeover]` sends control attach request and starts data-frame bridging.
-- Nested `msr` usage is supported because control and data can coexist on one persistent connection.
+- Client must also service the server-initiated control lane (strict req/res) while attached.
+- Nested `msr` usage is supported because control and data coexist on one persistent connection.
 
 ## 10) Why this is the best fit now
 
