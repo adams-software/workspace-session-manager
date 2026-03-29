@@ -18,11 +18,13 @@ This spec covers:
 - Single binary (`msr`) for both control and host runtime.
 - Minimal command surface for real usage.
 - Behavior aligned with current runtime primitives:
+  - exists
   - create
   - attach
   - resize
   - terminate
   - wait
+  - status
 - Keep single-attacher default semantics.
 
 ### Non-goals (v0)
@@ -58,8 +60,12 @@ Design principle: **thin passthrough layers**.
 ### Attach flow
 `msr attach <path>`:
 - connects to socket at `<path>`
+- performs an explicit attach handshake over the same socket
+- on success, upgrades that one socket into attached streaming mode
 - bridges caller stdio <-> host session socket
 - exits on detach/session end/connection close
+
+Important CLI semantic: stdin is optional. If stdin reaches EOF immediately, `msr attach` should stop forwarding input but continue consuming remote session output until the host closes or the session ends.
 
 This keeps one binary while preserving daemon-like persistence.
 
@@ -73,6 +79,7 @@ This keeps one binary while preserving daemon-like persistence.
 - `msr terminate <path> [TERM|INT|KILL]`
 - `msr wait <path>`
 - `msr exists <path>`
+- `msr status <path>`
 
 Internal (not documented in normal help):
 - `msr _host <path> -- <cmd...>`
@@ -90,11 +97,16 @@ Internal (not documented in normal help):
 - Stale socket reclaim policy: connect-check before unlink.
 
 ### 5.2 attach
-- Exactly one active attacher unless takeover mode.
-- Detach conditions (v0):
-  - client disconnect
+- Exactly one active **attached owner connection** unless takeover mode.
+- Uses the same Unix socket as control ops, but only after an explicit attach handshake upgrades the connection into attached mode.
+- Exclusive attach succeeds only when no owner connection is currently installed.
+- `--takeover` replaces the current owner connection.
+- CLI stdin is optional; local stdin EOF alone does not end the attachment.
+- Detach / exit conditions (v0):
+  - explicit client disconnect / socket close
   - session PTY end
-  - I/O hangup/error
+  - host socket close
+  - fatal I/O/protocol error
 
 ### 5.3 resize
 - Applies `TIOCSWINSZ` to PTY.
@@ -105,10 +117,22 @@ Internal (not documented in normal help):
 - `TERM` default.
 
 ### 5.5 wait
-- Returns exit status (code or signal) and performs cleanup.
+- `wait` is a **host-lifetime** primitive in v0.
+- If the host/session is currently live, `wait` blocks until child exit, returns exit status (code or signal), and finalizes cleanup.
+- If the host/session has already fully exited and cleaned up before `wait` begins, `wait` returns session-not-found.
+- v0 does **not** guarantee durable post-cleanup exit-status retrieval.
 
 ### 5.6 exists
 - true if active session or valid socket endpoint exists.
+
+### 5.7 status
+- Returns a minimal lifecycle status enum for the session path.
+- Proposed v0 status set:
+  - `not_found`
+  - `running`
+  - `exited_pending_wait`
+  - `stale`
+- `status` is intentionally descriptive and carries no extra payload in v0.
 
 ## 6) Exit Codes (proposed minimal)
 
@@ -148,7 +172,7 @@ User-visible classes:
 - create -> attach -> detach -> reattach -> terminate -> wait.
 
 ## 9) Open questions
-- Should `wait` operate remotely via control socket or only host-local?
+- Should exited-pending-wait sessions have any bounded linger timeout, or remain host-resident until `wait` consumes cleanup?
 - Should `create` block until command exits if host spawn fails after ready window?
 - Do we expose `_host` in help with “internal” warning, or hide fully?
 

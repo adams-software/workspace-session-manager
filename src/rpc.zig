@@ -7,6 +7,7 @@ pub const MsgType = enum {
     control_req,
     control_res,
     data,
+    event,
 };
 
 pub const ControlReq = struct {
@@ -29,6 +30,17 @@ pub const ControlRes = struct {
         code: []const u8,
         message: ?[]const u8 = null,
     };
+};
+
+pub const DataMsg = struct {
+    stream: []const u8,
+    bytes_b64: []const u8,
+};
+
+pub const EventMsg = struct {
+    kind: []const u8,
+    code: ?i32 = null,
+    signal: ?[]const u8 = null,
 };
 
 pub fn writeFrame(fd: c_int, bytes: []const u8) !void {
@@ -79,6 +91,38 @@ pub fn parseControlRes(allocator: std.mem.Allocator, bytes: []const u8) !Control
     var parsed = try std.json.parseFromSlice(Env, allocator, bytes, .{ .ignore_unknown_fields = true });
     defer parsed.deinit();
     if (!std.mem.eql(u8, parsed.value.type, "control_res")) return error.BadMessageType;
+    return parsed.value.payload;
+}
+
+pub fn encodeDataMsg(allocator: std.mem.Allocator, msg: DataMsg) ![]u8 {
+    const env = .{ .type = "data", .payload = msg };
+    return std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(env, .{})});
+}
+
+pub fn parseDataMsg(allocator: std.mem.Allocator, bytes: []const u8) !DataMsg {
+    const Env = struct {
+        type: []const u8,
+        payload: DataMsg,
+    };
+    var parsed = try std.json.parseFromSlice(Env, allocator, bytes, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    if (!std.mem.eql(u8, parsed.value.type, "data")) return error.BadMessageType;
+    return parsed.value.payload;
+}
+
+pub fn encodeEventMsg(allocator: std.mem.Allocator, msg: EventMsg) ![]u8 {
+    const env = .{ .type = "event", .payload = msg };
+    return std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(env, .{})});
+}
+
+pub fn parseEventMsg(allocator: std.mem.Allocator, bytes: []const u8) !EventMsg {
+    const Env = struct {
+        type: []const u8,
+        payload: EventMsg,
+    };
+    var parsed = try std.json.parseFromSlice(Env, allocator, bytes, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    if (!std.mem.eql(u8, parsed.value.type, "event")) return error.BadMessageType;
     return parsed.value.payload;
 }
 
@@ -136,4 +180,24 @@ test "encode/decode control response" {
     try std.testing.expect(out.ok);
     try std.testing.expect(out.exists != null);
     try std.testing.expect(out.exists.?);
+}
+
+test "encode/decode data message" {
+    const msg = DataMsg{ .stream = "pty", .bytes_b64 = "aGVsbG8=" };
+    const payload = try encodeDataMsg(std.testing.allocator, msg);
+    defer std.testing.allocator.free(payload);
+
+    const out = try parseDataMsg(std.testing.allocator, payload);
+    try std.testing.expectEqualStrings("pty", out.stream);
+    try std.testing.expectEqualStrings("aGVsbG8=", out.bytes_b64);
+}
+
+test "encode/decode event message" {
+    const msg = EventMsg{ .kind = "session_end", .code = 0 };
+    const payload = try encodeEventMsg(std.testing.allocator, msg);
+    defer std.testing.allocator.free(payload);
+
+    const out = try parseEventMsg(std.testing.allocator, payload);
+    try std.testing.expectEqualStrings("session_end", out.kind);
+    try std.testing.expectEqual(@as(?i32, 0), out.code);
 }

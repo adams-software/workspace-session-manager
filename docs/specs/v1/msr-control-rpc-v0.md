@@ -77,7 +77,8 @@ Control operations (serialized req/res, mirrored to runtime API):
 - `attach(path, mode)`
 - `resize(path, cols, rows)`
 - `terminate(path, signal?)`
-- `wait(path)`
+- `wait(path)` *(host-lifetime only in v0; no durable post-cleanup retrieval guarantee)*
+- `status(path)`
 
 Optional (internal/debug):
 - `ping()`
@@ -120,19 +121,37 @@ Attach handshake:
 3. host sends `control_res { ok: true|false, ... }`
 4. if success: connection enters **attached mode**
 
+Implementation model (Plan B / recommended):
+- host keeps an explicit per-connection event loop, even though there is still only one session socket
+- each accepted connection is tracked as host state, not as an implicit stack-local bridge only
+- the accepted connection itself is the client identity for attached-mode behavior
+- session/path remains the target for session-scoped control ops
+- no separate global client-id scheme is required in v0
+
 In attached mode:
 - `data` frames are allowed both directions
 - host may emit `event` frames
 - control ops are intentionally narrow/minimal; non-attach control commands should use fresh control connections
 - connection closes on detach/session-end/socket error
+- host tracks one active **owner connection** for attached mode
+- exclusive attach fails if an owner connection already exists
+- takeover attach closes/replaces the prior owner connection before installing the new one
+- owner state is tied to the tracked accepted connection, not just a boolean flag
 
-This keeps attached behavior explicit and avoids turning attached clients into generic long-lived RPC peers in v0.
+Client semantics in attached mode (important for one-shot CLI usage):
+- stdin is **optional**
+- EOF on stdin must **not** be treated as detach by itself
+- after local stdin EOF, client should stop sending input frames but continue reading host `data`/`event` frames
+- client exits when the host closes the connection, sends terminal session-end event(s), or a local fatal I/O/protocol error occurs
+
+This keeps attached behavior explicit and avoids turning attached clients into generic long-lived RPC peers in v0 while still matching natural non-REPL CLI usage.
 
 ## 9) CLI / application behavior
 
 - `msr create` still spawns `_host` and waits for ready.
 - `msr exists/resize/terminate/wait` open short-lived control connections and do one req/res.
 - `msr attach [--takeover]` sends attach request and, on success, enters attached mode for data frames.
+- `msr attach` is **not** a REPL protocol client; it is a normal CLI command that may have no meaningful stdin. In that case it should still remain attached for output consumption until remote close/session-end.
 - Nested `msr` usage remains viable via explicit attached-mode behavior plus optional event notifications.
 
 ## 10) Why this is the best fit now
