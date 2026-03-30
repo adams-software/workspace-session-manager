@@ -151,10 +151,35 @@
 - Further narrowed the active v2 quality bar:
   - default `zig build test` no longer depends on legacy `lib.zig` runtime tests
   - legacy runtime tests remain available behind a dedicated step: `zig build test-legacy-runtime`
-- Active v2 module graph no longer imports `msr/lib` where not needed; `lib.zig` and `rpc.zig` are now effectively legacy/runtime-test-only assets.
+- Active v2 module graph no longer imports `msr/lib` where not needed.
+- Deleted the final old runtime residue:
+  - `src/lib.zig`
+  - `src/rpc.zig`
+- `build.zig` is now fully v2-only; there is no longer a legacy-runtime test step.
 - Added a dedicated smoke script for the v2 create path: `scripts/smoke_create_v2.sh`.
 - Goal of the smoke script: codify `create -> status -> terminate -> wait` as a reusable guardrail before more legacy deletion.
 - Clean-state verification from a cleaned environment succeeded:
   - `zig build test`
   - `zig build test-legacy-runtime`
   - `scripts/smoke_create_v2.sh`
+- Began the next product layer by authoring the first shell-first DSM wrapper: `scripts/dsm`.
+- First DSM slice includes cwd-local implementations of:
+  - `create`
+  - `attach|a`
+  - `status`
+  - `terminate`
+  - `wait`
+  - `exists`
+  - `list|ls`
+- DSM wrapper currently resolves effective directory via:
+  1. `--cwd`
+  2. `MSR_SESSION`
+  3. shell cwd
+- DSM wrapper maps session names to literal `<name>.msr` filenames in the effective directory.
+- DSM polish pass added:
+  - explicit directory existence check
+  - reusable `require_name` helper for current-session/name resolution
+  - deterministic `ls` ordering via `LC_ALL=C sort`
+  - simple session-name validation (`/` disallowed)
+  - clearer attach flag handling (`--takeover` / `--no-takeover`)
+- Re-smoked DSM core flow with multiple sessions in one cwd (`alpha`, `beta`).

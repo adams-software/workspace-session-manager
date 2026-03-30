@@ -4,6 +4,12 @@
 
 Draft RFC for review.
 
+Implementation note (current decision set)
+
+DSM operates only within the effective current directory.
+It does not recurse, does not walk parents, and does not allow nested/session-stacking behavior.
+Session files are identified by literal user-provided names with a `.msr` extension.
+
 ## Naming
 Script called directory session manager or dsm as its application name.
 

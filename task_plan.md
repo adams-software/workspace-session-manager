@@ -12,8 +12,8 @@ Realign `msr` implementation to the v2 specs, treating `docs/specs/v2/*` as sour
 | 3. Rebuild SessionHost | complete | PTY + child lifecycle extracted with tests |
 | 4. Rebuild SessionServer | complete | Coordinator/event-loop model in place with attach/takeover/detach/resize coverage |
 | 5. Rebuild SessionClient | complete | Thin endpoint client + attachment handle rebuilt with integration tests |
-| 6. Stabilize `msr` CLI | in_progress | Most user-facing commands are on v2 path; create/_host path has viable v2 serve-mode and needs final cleanup/polish |
-| 7. Remove obsolete manager/app/nav architecture | in_progress | Dead legacy cluster deleted; `lib.zig`/`rpc.zig` remain quarantined legacy runtime/test surface |
+| 6. Stabilize `msr` CLI | in_progress | Most user-facing commands are on v2 path; create/_host path has viable v2 serve-mode and remaining work is mostly polish |
+| 7. Remove obsolete manager/app/nav architecture | complete | Dead legacy cluster deleted; `lib.zig`/`rpc.zig` also removed; active repo surface is now v2-only |
 | 8. Implement DSM shell layer | todo | Shell-first single-directory workflow on top of `msr` |
 | 9. Implement WSM shell layer | todo | Recursive discovery and deterministic jump over DSM-style nodes |
 

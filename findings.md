@@ -74,7 +74,7 @@ Old app-layer architecture above manager_v2. Deleted from the active repo surfac
 Older encoded-path/navigation layer incompatible with current DSM/WSM direction. Deleted from the active repo surface during the v2 cleanup.
 
 #### `src/lib.zig` + `src/rpc.zig`
-Now legacy/quarantined. They remain only as the old runtime/test surface and are no longer part of the active v2 module graph.
+Removed. The active v2 module graph and test/build surfaces no longer depend on the old runtime/control implementation.
 
 ## Architectural diagnosis
 The repo currently contains two conflicting designs:

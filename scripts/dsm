@@ -1,0 +1,179 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+MSR_BIN="$ROOT/zig-out/bin/msr"
+
+err() { printf '%s\n' "$*" >&2; }
+out() { printf '%s\n' "$*"; }
+
+usage() {
+  cat <<'EOF'
+dsm v0
+Usage:
+  dsm [--cwd <path>] create <name> -- <cmd...>
+  dsm [--cwd <path>] attach|a [name] [--takeover|--no-takeover]
+  dsm [--cwd <path>] status [name]
+  dsm [--cwd <path>] terminate [name] [signal]
+  dsm [--cwd <path>] wait [name]
+  dsm [--cwd <path>] exists [name]
+  dsm [--cwd <path>] list|ls
+
+Resolution:
+  effective directory:
+    1. --cwd <path>
+    2. infer from MSR_SESSION
+    3. shell cwd
+
+  session path:
+    <literal-name>.msr inside the effective directory
+EOF
+}
+
+CWD_OVERRIDE=""
+if [[ $# -ge 2 && "$1" == "--cwd" ]]; then
+  CWD_OVERRIDE="$2"
+  shift 2
+fi
+
+if [[ $# -lt 1 ]]; then
+  usage
+  exit 1
+fi
+
+resolve_dir() {
+  if [[ -n "$CWD_OVERRIDE" ]]; then
+    printf '%s\n' "$CWD_OVERRIDE"
+    return
+  fi
+  if [[ -n "${MSR_SESSION:-}" ]]; then
+    dirname -- "$MSR_SESSION"
+    return
+  fi
+  pwd
+}
+
+DIR="$(resolve_dir)"
+[[ -d "$DIR" ]] || { err "dsm: directory does not exist: $DIR"; exit 1; }
+
+resolve_current_name() {
+  if [[ -n "${MSR_SESSION:-}" ]]; then
+    local base
+    base="$(basename -- "$MSR_SESSION")"
+    printf '%s\n' "${base%.msr}"
+    return
+  fi
+  return 1
+}
+
+resolve_name() {
+  if [[ $# -ge 1 && -n "$1" && "$1" != --* ]]; then
+    printf '%s\n' "$1"
+    return
+  fi
+  resolve_current_name
+}
+
+sock_for() {
+  local name="$1"
+  printf '%s/%s.msr\n' "$DIR" "$name"
+}
+
+require_name() {
+  local resolved
+  resolved="$(resolve_name "${1:-}")" || {
+    err "dsm: no target session and no MSR_SESSION context"
+    exit 1
+  }
+  printf '%s\n' "$resolved"
+}
+
+list_names() {
+  shopt -s nullglob
+  local names=()
+  local f base
+  for f in "$DIR"/*.msr; do
+    base="$(basename -- "$f")"
+    names+=("${base%.msr}")
+  done
+  if [[ ${#names[@]} -eq 0 ]]; then
+    return 0
+  fi
+  printf '%s\n' "${names[@]}" | LC_ALL=C sort
+}
+
+cmd="$1"
+shift || true
+
+case "$cmd" in
+  help|-h|--help)
+    usage
+    ;;
+
+  create)
+    [[ $# -ge 3 ]] || { usage; exit 1; }
+    name="$1"; shift
+    [[ "$1" == "--" ]] || { err "dsm: expected -- before command"; exit 1; }
+    shift
+    [[ "$name" != *"/"* ]] || { err "dsm: session name must not contain '/'"; exit 1; }
+    exec "$MSR_BIN" create "$(sock_for "$name")" -- "$@"
+    ;;
+
+  attach|a)
+    takeover=1
+    if [[ $# -ge 1 && "$1" == "--no-takeover" ]]; then
+      takeover=0
+      shift
+    fi
+    name="$(require_name "${1:-}")"
+    if [[ $# -ge 1 && "$1" != --* ]]; then shift; fi
+    if [[ $# -ge 1 && "$1" == "--takeover" ]]; then
+      takeover=1
+      shift
+    elif [[ $# -ge 1 && "$1" == "--no-takeover" ]]; then
+      takeover=0
+      shift
+    fi
+    if [[ $takeover -eq 1 ]]; then
+      exec "$MSR_BIN" attach "$(sock_for "$name")" --takeover
+    else
+      exec "$MSR_BIN" attach "$(sock_for "$name")"
+    fi
+    ;;
+
+  status)
+    name="$(require_name "${1:-}")"
+    exec "$MSR_BIN" status "$(sock_for "$name")"
+    ;;
+
+  terminate)
+    name="$(require_name "${1:-}")"
+    if [[ $# -ge 1 && "$1" != --* ]]; then shift; fi
+    sig="${1:-}"
+    if [[ -n "$sig" ]]; then
+      exec "$MSR_BIN" terminate "$(sock_for "$name")" "$sig"
+    else
+      exec "$MSR_BIN" terminate "$(sock_for "$name")"
+    fi
+    ;;
+
+  wait)
+    name="$(require_name "${1:-}")"
+    exec "$MSR_BIN" wait "$(sock_for "$name")"
+    ;;
+
+  exists)
+    name="$(require_name "${1:-}")"
+    exec "$MSR_BIN" exists "$(sock_for "$name")"
+    ;;
+
+  list|ls)
+    list_names
+    ;;
+
+  *)
+    err "dsm: unknown command: $cmd"
+    usage
+    exit 1
+    ;;
+esac
