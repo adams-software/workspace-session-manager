@@ -4,14 +4,6 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const lib = b.addModule("msr", .{
-        .root_source_file = b.path("src/lib.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    lib.linkSystemLibrary("util", .{});
-
     const host_mod = b.addModule("host", .{
         .root_source_file = b.path("src/host.zig"),
         .target = target,
@@ -62,16 +54,6 @@ pub fn build(b: *std.Build) void {
         .root_module = exe_root,
     });
     b.installArtifact(exe);
-
-    const lib_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/lib.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-        }),
-    });
-    lib_tests.root_module.linkSystemLibrary("util", .{});
 
     const host_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -131,7 +113,6 @@ pub fn build(b: *std.Build) void {
         .root_module = client_integration_root,
     });
 
-    const run_lib_tests = b.addRunArtifact(lib_tests);
     const run_host_tests = b.addRunArtifact(host_tests);
     const run_protocol_tests = b.addRunArtifact(protocol_tests);
     const run_server_tests = b.addRunArtifact(server_tests);
@@ -144,9 +125,6 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_server_tests.step);
     test_step.dependOn(&run_client_tests.step);
     test_step.dependOn(&run_client_integration_tests.step);
-
-    const test_legacy_runtime_step = b.step("test-legacy-runtime", "Run legacy lib/runtime tests");
-    test_legacy_runtime_step.dependOn(&run_lib_tests.step);
 
     const test_host_step = b.step("test-host", "Run host module tests");
     test_host_step.dependOn(&run_host_tests.step);
