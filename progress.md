@@ -1,19 +1,160 @@
-# progress.md — msr binary/interface spec
+# progress.md — msr v2 rewrite
 
-- Initialized planning artifacts: `task_plan.md`, `findings.md`, `progress.md`.
-- Drafted `docs/specs/msr-binary-interface-v0.md` with minimal single-binary + hidden host-mode design.
-- Included: goals/non-goals, command surface, lifecycle semantics, exit codes, and 5 implementation slices.
-- Updated spec with explicit layering principle: library semantics, host transport, CLI passthrough.
-- Implemented Slice A skeleton in `src/main.zig`:
-  - command parser/dispatch for `create|attach|resize|terminate|wait|exists|_host`
-  - help/usage output
-  - placeholder create/_host wiring to current in-process runtime
-- Implemented first Slice B step:
-  - `create` now spawns detached same-binary `_host` process (`fork` + `execvp`) and waits for socket readiness.
-  - `_host` still owns runtime lifecycle (`create` + `wait`).
-- Added protocol scaffolding in `src/rpc.zig`:
-  - length-prefixed frame read/write
-  - control request/response envelope encode/decode helpers
-  - unit tests for framing + request roundtrip
-- Verified with `zig build test` and `zig build run -- --help`.
-- Note: host control-loop wiring and CLI command forwarding to RPC are next.
+- User confirmed aggressive rewrite is desired.
+- User confirmed all existing code is disposable.
+- User confirmed v2 specs are source of truth.
+- Created checkpoint branch: `v1-checkpoint-2026-03-30`.
+- Found default branch is `master`, not `main`.
+- Stashed uncommitted spec work from checkpoint branch with message: `v2-spec-checkpoint-2026-03-30`.
+- Returned active worktree to `master`.
+- Reviewed current `src/` layout:
+  - `app.zig`
+  - `client.zig`
+  - `lib.zig`
+  - `main.zig`
+  - `manager.zig`
+  - `manager_v2.zig`
+  - `nav.zig`
+  - `rpc.zig`
+- Reviewed current v2 docs and compared them against implementation.
+- Conclusion: current codebase mixes two incompatible architectures; rewrite should preserve working mechanics and tests, not the current abstraction boundaries.
+- Wrote durable plan + findings to `task_plan.md` and `findings.md`.
+- Added initial v2 file skeletons:
+  - `src/host.zig`
+  - `src/server.zig`
+  - `src/protocol.zig`
+- These are intentionally minimal and non-authoritative yet; purpose is to make the new architecture concrete in the repo before extraction begins.
+- Wired `build.zig` to include new v2 test targets:
+  - `test-host`
+  - `test-server`
+  - `test-protocol`
+- Replaced the initial `host.zig` placeholder with a first real extraction of SessionHost mechanics:
+  - PTY-backed child spawn via `forkpty`
+  - resize via `TIOCSWINSZ`
+  - terminate via `kill`
+  - wait/exit-status caching
+  - explicit host lifecycle states
+- Hardened `host.zig` further with additional lifecycle coverage:
+  - cached `wait()` after exit
+  - terminate-before-start error
+  - double-start rejection
+  - close-after-exit transition
+  - idempotent close after closed
+- Added first PTY I/O surface to `SessionHost` via `pty.write(...)` and `pty.read(...)`.
+- Added host test coverage for a real PTY echo flow (`read line; printf ...`) using repeated reads until the expected output appears.
+- Verified `zig build test-host` passes after PTY I/O additions.
+- Began real `SessionServer` extraction in `src/server.zig`:
+  - listener lifecycle
+  - socket-path validation
+  - stale-socket reclaim check
+  - bind/listen creation
+  - stop/cleanup lifecycle
+- Added initial server tests for:
+  - listen success
+  - stop after listen
+  - double-listen rejection
+- Verified `zig build test-server` passes.
+- Upgraded `src/protocol.zig` from placeholder types to real framing/JSON helpers, using the old `msr-control-rpc-v0` spec and prior `rpc.zig` as reference.
+- Cleaned up control response shape to use a real success payload model:
+  - `ControlRes { ok, value?, err? }`
+  - `ControlValue` now carries op results like `exists`, `status`, `code`, and `signal`
+- Added initial control path to `SessionServer`:
+  - `serveControlOnce(timeout_ms)`
+  - minimal control request handling for `status`, `terminate`, and `wait`
+- Added integration-style server test for a real `status` request over the Unix socket.
+- Verified `zig build test-protocol` and `zig build test-server` pass after the protocol-shape cleanup.
+- Extended `SessionServer` with the first attach handshake behavior:
+  - `attach` control op
+  - exclusive attach success when unattached
+  - exclusive attach conflict when already attached
+  - attach leaves the accepted connection open on success
+- Reworked attached-mode implementation after a hang in the first attempt.
+- Exposed `SessionHost.getMasterFd()` as an internal escape hatch for server-side polling.
+- Switched the attached bridge to the old proven shape:
+  - poll `client_fd` and PTY `master_fd` directly in one loop
+  - PTY output -> `data` frames
+  - attached client `data` frames -> PTY input
+  - `session_exit` event on PTY hangup / host exit
+- Added server test coverage for PTY output streaming over attached mode.
+- Takeover work surfaced a real protocol-lifetime bug: parsed JSON slices were escaping parser-owned memory in threaded server paths.
+- Fixed protocol parsing to return owned/deep-copied message values with explicit free helpers:
+  - `freeControlReq`
+  - `freeControlRes`
+  - `freeDataMsg`
+  - `freeEventMsg`
+- Normalized takeover event handling around a simple `taken_over` event shape.
+- Updated server/tests to use the owned protocol values and free them correctly.
+- Continued takeover implementation with replacement semantics.
+- Simplified takeover to the reliable core behavior first:
+  - old owner connection is shut down
+  - new owner becomes active attached connection
+  - takeover test now asserts disconnect-and-replace semantics rather than requiring a courtesy event
+- Captured spec insight: `taken_over` event should be optional/follow-up until handoff ordering is race-safe.
+- Reviewed the new `docs/specs/v2/integration-guide.md` and decided to pivot `SessionServer` toward its recommended concurrency model.
+- New direction: a serialized coordinator/event loop should own mutable server state (owner connection, accepted connections, shutdown/exit sequencing) rather than ad hoc per-connection mutation.
+- Rationale: takeover bugs are now clearly concurrency-model bugs, not just protocol-shape bugs.
+- Started the coordinator refactor in `src/server.zig`:
+  - introduced explicit `CoordinatorState`
+  - introduced `Connection` / `ConnectionKind`
+  - narrowed attach ownership into coordinator-owned `owner_fd`
+  - introduced `step()` as the first single-authority server tick
+  - split server behavior into `acceptConnection`, `handleAcceptedConnection`, and `pumpOwnerOutput`
+- Current coordinator refactor is intentionally partial; tests initially covered only simpler listener lifecycle while the single-authority path was being established.
+- Began rebuilding socket-level control behavior on top of the new coordinator `step()` path.
+- Added first coordinator-era socket tests for `status` and `terminate` request handling.
+- Verified `zig build test-server` passes with the coordinator-era control tests in place.
+- Deleted the dead legacy cluster that no longer participates in the active v2 path:
+  - `src/app.zig`
+  - `src/manager.zig`
+  - `src/manager_v2.zig`
+  - `src/nav.zig`
+- Verified the active v2 guardrails still pass after deletion.
+- Restored single-owner attach semantics under the coordinator `step()` path.
+- Restored PTY output streaming to the attached owner under the coordinator path.
+- Restored owner input path under the coordinator path (`data` frame -> PTY stdin).
+- Added coordinator-era tests for:
+  - attach retaining an owner fd
+  - PTY output streaming as `data` frames to the owner
+  - owner input reaching the PTY and producing echoed output
+- Verified `zig build test-server` still passes after attach/stream/input restoration.
+- Reintroduced takeover on top of the coordinator-owned owner slot.
+- Added coordinator-era takeover test asserting:
+  - ownership changes to a new server-side connection
+  - prior owner receives disconnect/hup semantics
+  - new owner receives streamed PTY output
+- Verified `zig build test-server` passes with takeover restored under the coordinator model.
+- Clarified upgraded attached-mode semantics in implementation: owner connection now accepts both:
+  - `data` frames for PTY stdin
+  - owner-only `control_req` frames (currently `detach` and `resize`)
+- Restored detach and owner-only resize handling under the coordinator path.
+- Verified `zig build test-server` passes after attached-mode control routing was added.
+- Updated `docs/specs/v2/session-server.md` and `session-client.md` to document the attached-mode control-lane clarification.
+- Rebuilt `src/client.zig` toward a v2-shaped surface:
+  - `SessionClient`
+  - `SessionAttachment`
+  - `status()`
+  - `wait()`
+  - `terminate()`
+  - `attach()`
+  - attachment `write()` / `resize()` / `detach()`
+- Added initial client integration tests for:
+  - `status()` roundtrip
+  - attach/write/read/detach roundtrip
+- Verified `zig build test-client` passes after build wiring and test cleanup.
+- Simplified the build graph around the v2 path:
+  - `msr` is now the sole active binary target
+  - removed legacy `msr-app` / manager-era targets from the active build graph
+  - active test graph focuses on v2 modules (`host`, `protocol`, `server`, `client`) while legacy runtime tests are isolated separately
+- Cut simple CLI commands over to the new client surface.
+- Replaced `_host` in `main.zig` with a viable v2 serve-mode path using `SessionHost + SessionServer`.
+- Verified the v2 create-path with both manual smoke runs and the dedicated guardrail script.
+- Further narrowed the active v2 quality bar:
+  - default `zig build test` no longer depends on legacy `lib.zig` runtime tests
+  - legacy runtime tests remain available behind a dedicated step: `zig build test-legacy-runtime`
+- Active v2 module graph no longer imports `msr/lib` where not needed; `lib.zig` and `rpc.zig` are now effectively legacy/runtime-test-only assets.
+- Added a dedicated smoke script for the v2 create path: `scripts/smoke_create_v2.sh`.
+- Goal of the smoke script: codify `create -> status -> terminate -> wait` as a reusable guardrail before more legacy deletion.
+- Clean-state verification from a cleaned environment succeeded:
+  - `zig build test`
+  - `zig build test-legacy-runtime`
+  - `scripts/smoke_create_v2.sh`

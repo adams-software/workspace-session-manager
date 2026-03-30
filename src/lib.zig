@@ -1,3 +1,17 @@
+// LEGACY RUNTIME (v1/v1.5)
+//
+// This file remains only as a compatibility/quarantine surface while the v2
+// architecture is being finished. It is NOT the source of truth for active
+// design or new feature work.
+//
+// Active v2 path:
+// - src/host.zig
+// - src/protocol.zig
+// - src/server.zig
+// - src/client.zig
+// - src/main.zig
+//
+// If you are working on current architecture, start there instead of here.
 const std = @import("std");
 const _rpc = @import("rpc.zig");
 pub const rpc = _rpc;

@@ -89,6 +89,11 @@ interface SessionAttachment {
   onData(cb: (data: Uint8Array) => void): () => void;
   onClose(cb: (reason: AttachmentCloseReason) => void): () => void;
 }
+
+Protocol note:
+The upgraded attachment connection is not data-only. The attachment handle is responsible for sending both:
+- `data` frames for PTY stdin/write traffic
+- owner-only `control_req` frames for attached-scoped controls like `resize()` and `detach()`
 ```
 
 ---

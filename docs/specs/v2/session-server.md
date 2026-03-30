@@ -89,7 +89,7 @@ Scope (in)
 - enforce exclusive vs takeover attach semantics
 - forward PTY bytes between host and attached owner
 - expose session status/wait/terminate/resize/attach/detach semantics
-- notify attached owner of session exit and takeover
+- notify attached owner of terminal session events
 - keep server available after host exit until explicit cleanup
 - remove socket on final shutdown
 
@@ -212,11 +212,33 @@ attach
 
 resize
 - owner-only control
-- should be allowed only on the attached connection in v0
+- allowed on the attached upgraded connection in v0
 
 detach
 - owner-only control
+- allowed on the attached upgraded connection in v0
 - releases current attachment ownership while host keeps running
+
+---
+
+Attached mode semantics
+
+In attached mode:
+- `data` frames are allowed both directions
+- host may emit `event` frames
+- owner-only `control_req` frames are also allowed on the upgraded connection for attached-scoped controls such as `detach` and `resize`
+- non-owner or general control ops should still prefer fresh short-lived control connections
+- connection closes on detach/session-end/socket error
+- host tracks one active **owner connection** for attached mode
+- exclusive attach fails if an owner connection already exists
+- takeover attach closes/replaces the prior owner connection before installing the new one
+- owner state is tied to the tracked accepted connection, not just a boolean flag
+
+Important protocol note:
+Attached mode is not purely a data tunnel. It is a narrow upgraded channel carrying:
+- PTY stream traffic (`data`)
+- host notifications (`event`)
+- a small owner-only control lane (`control_req` for attached-scoped ops)
 
 ---
 
@@ -228,6 +250,7 @@ Acceptance criteria
 - exclusive attach fails on conflict
 - takeover revokes old owner and installs new owner
 - PTY input/output flows correctly over attached connection
+- owner-only control ops work on the upgraded connection
 - attached client does not detach on stdin EOF alone
 - host exit notifies attached owner
 - server remains available for post-exit status/wait

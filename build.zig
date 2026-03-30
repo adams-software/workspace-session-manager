@@ -12,6 +12,21 @@ pub fn build(b: *std.Build) void {
     });
     lib.linkSystemLibrary("util", .{});
 
+    const host_mod = b.addModule("host", .{
+        .root_source_file = b.path("src/host.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    host_mod.linkSystemLibrary("util", .{});
+
+    const protocol_mod = b.addModule("protocol", .{
+        .root_source_file = b.path("src/protocol.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+
     const client_mod = b.addModule("client", .{
         .root_source_file = b.path("src/client.zig"),
         .target = target,
@@ -19,7 +34,17 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     client_mod.linkSystemLibrary("util", .{});
-    client_mod.addImport("msr", lib);
+    client_mod.addImport("host", host_mod);
+    client_mod.addImport("protocol", protocol_mod);
+
+    const server_mod = b.addModule("server", .{
+        .root_source_file = b.path("src/server.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    server_mod.addImport("host", host_mod);
+    server_mod.addImport("protocol", protocol_mod);
 
     const exe_root = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -29,70 +54,53 @@ pub fn build(b: *std.Build) void {
     });
     exe_root.linkSystemLibrary("util", .{});
     exe_root.addImport("client", client_mod);
-
-    const manager_mod = b.addModule("manager", .{
-        .root_source_file = b.path("src/manager.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    manager_mod.linkSystemLibrary("util", .{});
-    manager_mod.addImport("msr", lib);
-    manager_mod.addImport("client", client_mod);
-
-    const manager_v2_mod = b.addModule("manager_v2", .{
-        .root_source_file = b.path("src/manager_v2.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    manager_v2_mod.linkSystemLibrary("util", .{});
-    manager_v2_mod.addImport("msr", lib);
-    manager_v2_mod.addImport("manager", manager_mod);
-
-    const app_exe_root = b.createModule(.{
-        .root_source_file = b.path("src/app.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    app_exe_root.addImport("msr", lib);
-    app_exe_root.addImport("client", client_mod);
-    app_exe_root.addImport("manager", manager_mod);
-    app_exe_root.addImport("manager_v2", manager_v2_mod);
-
-    const app_exe = b.addExecutable(.{
-        .name = "msr-app",
-        .root_module = app_exe_root,
-    });
-    b.installArtifact(app_exe);
+    exe_root.addImport("host", host_mod);
+    exe_root.addImport("server", server_mod);
 
     const exe = b.addExecutable(.{
         .name = "msr",
         .root_module = exe_root,
     });
-    exe.root_module.addImport("msr", lib);
     b.installArtifact(exe);
 
-    const test_root = b.createModule(.{
-        .root_source_file = b.path("src/lib.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    test_root.linkSystemLibrary("util", .{});
-
     const lib_tests = b.addTest(.{
-        .root_module = test_root,
-    });
-
-    const rpc_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/rpc.zig"),
+            .root_source_file = b.path("src/lib.zig"),
             .target = target,
             .optimize = optimize,
             .link_libc = true,
         }),
+    });
+    lib_tests.root_module.linkSystemLibrary("util", .{});
+
+    const host_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/host.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+
+    const protocol_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/protocol.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+
+    const server_test_root = b.createModule(.{
+        .root_source_file = b.path("src/server.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    server_test_root.addImport("host", host_mod);
+    server_test_root.addImport("protocol", protocol_mod);
+    const server_tests = b.addTest(.{
+        .root_module = server_test_root,
     });
 
     const client_test_root = b.createModule(.{
@@ -102,85 +110,61 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     client_test_root.linkSystemLibrary("util", .{});
-    client_test_root.addImport("msr", lib);
-
+    client_test_root.addImport("host", host_mod);
+    client_test_root.addImport("protocol", protocol_mod);
     const client_tests = b.addTest(.{
         .root_module = client_test_root,
     });
 
-    const nav_test_root = b.createModule(.{
-        .root_source_file = b.path("src/nav.zig"),
+    const client_integration_root = b.createModule(.{
+        .root_source_file = b.path("src/client_integration_test.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
-
-    const nav_tests = b.addTest(.{
-        .root_module = nav_test_root,
+    client_integration_root.linkSystemLibrary("util", .{});
+    client_integration_root.addImport("client", client_mod);
+    client_integration_root.addImport("server", server_mod);
+    client_integration_root.addImport("host", host_mod);
+    client_integration_root.addImport("protocol", protocol_mod);
+    const client_integration_tests = b.addTest(.{
+        .root_module = client_integration_root,
     });
-
-    const manager_test_root = b.createModule(.{
-        .root_source_file = b.path("src/manager.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    manager_test_root.linkSystemLibrary("util", .{});
-    manager_test_root.addImport("msr", lib);
-    manager_test_root.addImport("client", client_mod);
-    manager_test_root.addImport("manager", manager_mod);
-
-    const manager_tests = b.addTest(.{
-        .root_module = manager_test_root,
-    });
-
-    const manager_v2_test_root = b.createModule(.{
-        .root_source_file = b.path("src/manager_v2.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    manager_v2_test_root.linkSystemLibrary("util", .{});
-    manager_v2_test_root.addImport("msr", lib);
-    manager_v2_test_root.addImport("manager", manager_mod);
-
-    const manager_v2_tests = b.addTest(.{
-        .root_module = manager_v2_test_root,
-    });
-
-    nav_test_root.addImport("manager", manager_mod);
-    nav_test_root.addImport("msr", lib);
 
     const run_lib_tests = b.addRunArtifact(lib_tests);
-    const run_rpc_tests = b.addRunArtifact(rpc_tests);
+    const run_host_tests = b.addRunArtifact(host_tests);
+    const run_protocol_tests = b.addRunArtifact(protocol_tests);
+    const run_server_tests = b.addRunArtifact(server_tests);
     const run_client_tests = b.addRunArtifact(client_tests);
-    const run_nav_tests = b.addRunArtifact(nav_tests);
-    const run_manager_tests = b.addRunArtifact(manager_tests);
-    const run_manager_v2_tests = b.addRunArtifact(manager_v2_tests);
-    const test_step = b.step("test", "Run library tests");
-    test_step.dependOn(&run_lib_tests.step);
-    test_step.dependOn(&run_rpc_tests.step);
-    test_step.dependOn(&run_client_tests.step);
-    test_step.dependOn(&run_nav_tests.step);
-    test_step.dependOn(&run_manager_tests.step);
-    test_step.dependOn(&run_manager_v2_tests.step);
+    const run_client_integration_tests = b.addRunArtifact(client_integration_tests);
 
-    const test_manager_step = b.step("test-manager", "Run manager module tests");
-    test_manager_step.dependOn(&run_manager_tests.step);
+    const test_step = b.step("test", "Run v2 tests");
+    test_step.dependOn(&run_host_tests.step);
+    test_step.dependOn(&run_protocol_tests.step);
+    test_step.dependOn(&run_server_tests.step);
+    test_step.dependOn(&run_client_tests.step);
+    test_step.dependOn(&run_client_integration_tests.step);
+
+    const test_legacy_runtime_step = b.step("test-legacy-runtime", "Run legacy lib/runtime tests");
+    test_legacy_runtime_step.dependOn(&run_lib_tests.step);
+
+    const test_host_step = b.step("test-host", "Run host module tests");
+    test_host_step.dependOn(&run_host_tests.step);
+
+    const test_server_step = b.step("test-server", "Run server module tests");
+    test_server_step.dependOn(&run_server_tests.step);
+
+    const test_protocol_step = b.step("test-protocol", "Run protocol module tests");
+    test_protocol_step.dependOn(&run_protocol_tests.step);
 
     const test_client_step = b.step("test-client", "Run client module tests");
     test_client_step.dependOn(&run_client_tests.step);
-
-    const test_nav_step = b.step("test-nav", "Run nav module tests");
-    test_nav_step.dependOn(&run_nav_tests.step);
-
-    const test_manager_v2_step = b.step("test-manager-v2", "Run manager v2 module tests");
-    test_manager_v2_step.dependOn(&run_manager_v2_tests.step);
+    test_client_step.dependOn(&run_client_integration_tests.step);
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_cmd.addArgs(args);
 
-    const run_step = b.step("run", "Run the demo executable");
+    const run_step = b.step("run", "Run the msr executable");
     run_step.dependOn(&run_cmd.step);
 }

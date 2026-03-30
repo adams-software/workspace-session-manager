@@ -1,35 +1,44 @@
 const std = @import("std");
-const msr = @import("msr");
-const rpc = msr.rpc;
+const host = @import("host");
+const server = @import("server");
 const client = @import("client");
 const c = @cImport({
     @cInclude("unistd.h");
     @cInclude("stdlib.h");
+    @cInclude("stdio.h");
     @cInclude("sys/socket.h");
     @cInclude("sys/un.h");
     @cInclude("poll.h");
 });
 
 fn usage() void {
-    std.debug.print(
-        \\msr v0 (draft)
-        \\Usage:
-        \\  msr create <path> -- <cmd...>
-        \\  msr attach <path> [--takeover]
-        \\  msr resize <path> <cols> <rows>
-        \\  msr terminate <path> [TERM|INT|KILL]
-        \\  msr wait <path>
-        \\  msr exists <path>
-        \\
-        \\Notes:
-        \\  - attach uses one socket plus an explicit attach handshake.
-        \\  - attach stdin is optional; EOF on stdin does not detach by itself.
-        \\  - wait is host-lifetime only in v0; no durable post-cleanup retrieval.
-        \\
-        \\Internal:
-        \\  msr _host <path> -- <cmd...>
-        \\
-    , .{});
+    out(
+        "msr v0 (draft)\n" ++
+            "Usage:\n" ++
+            "  msr create <path> -- <cmd...>\n" ++
+            "  msr attach <path> [--takeover]\n" ++
+            "  msr resize <path> <cols> <rows> [--takeover]\n" ++
+            "  msr terminate <path> [TERM|INT|KILL]\n" ++
+            "  msr wait <path>\n" ++
+            "  msr status <path>\n" ++
+            "  msr exists <path>\n\n" ++
+            "Notes:\n" ++
+            "  - attach uses one socket plus an explicit attach handshake.\n" ++
+            "  - attach stdin is optional; EOF on stdin does not detach by itself.\n" ++
+            "  - wait is host-lifetime only in v0; no durable post-cleanup retrieval.\n" ++
+            "  - resize is owner-scoped and may require --takeover to claim ownership.\n\n" ++
+            "Internal:\n" ++
+            "  msr _host <path> -- <cmd...>\n",
+        .{},
+    );
+}
+
+fn out(comptime fmt: []const u8, args: anytype) void {
+    std.debug.print(fmt, args);
+}
+
+fn err(comptime fmt: []const u8, args: anytype) void {
+    std.debug.print(fmt, args);
 }
 
 fn parseU16(s: []const u8) !u16 {
@@ -64,13 +73,12 @@ fn spawnHostDetached(argv0: []const u8, path: []const u8, child_argv: []const []
     }
 }
 
-fn waitForReady(rt: *msr.Runtime, path: []const u8, timeout_ms: u32) bool {
-    _ = rt;
+fn waitForReady(path: []const u8, timeout_ms: u32) bool {
     const step_us: u32 = 10_000;
     const loops = timeout_ms / 10;
     var i: u32 = 0;
     while (i < loops) : (i += 1) {
-        const fd = connectUnix(path) catch {
+        const fd = client.connectUnix(path) catch {
             _ = c.usleep(step_us);
             continue;
         };
@@ -80,42 +88,45 @@ fn waitForReady(rt: *msr.Runtime, path: []const u8, timeout_ms: u32) bool {
     return false;
 }
 
-fn rpcCall(allocator: std.mem.Allocator, path: []const u8, req_msg: rpc.ControlReq) !rpc.ControlRes {
-    return client.rpcCall(allocator, path, req_msg);
-}
+fn attachBridge(allocator: std.mem.Allocator, attachment: *client.SessionAttachment, in_fd: c_int, out_fd: c_int) !void {
+    var stdin_open = true;
+    var pfd = c.struct_pollfd{ .fd = in_fd, .events = c.POLLIN, .revents = 0 };
+    var in_buf: [4096]u8 = undefined;
 
-fn freeControlRes(allocator: std.mem.Allocator, res: *rpc.ControlRes) void {
-    if (res.signal) |s| allocator.free(@constCast(s));
-    if (res.err) |*e| {
-        allocator.free(@constCast(e.code));
-        if (e.message) |m| allocator.free(@constCast(m));
+    while (true) {
+        if (stdin_open) {
+            const pr = c.poll(&pfd, 1, 10);
+            if (pr < 0) return error.IoError;
+            if (pr > 0 and (pfd.revents & c.POLLIN) != 0) {
+                const n = c.read(in_fd, &in_buf, in_buf.len);
+                if (n < 0) return error.IoError;
+                if (n == 0) {
+                    stdin_open = false;
+                } else {
+                    try attachment.write(in_buf[0..@intCast(n)]);
+                }
+            }
+            if ((pfd.revents & (c.POLLHUP | c.POLLERR | c.POLLNVAL)) != 0) stdin_open = false;
+        }
+
+        const decoded = attachment.readDataFrame() catch |e| switch (e) {
+            error.UnexpectedEof => return,
+            else => return e,
+        };
+        defer allocator.free(decoded);
+        _ = c.write(out_fd, decoded.ptr, decoded.len);
     }
 }
 
-fn connectUnix(path: []const u8) !c_int {
-    return client.connectUnix(path);
+fn openAttachmentForOwnerScopedOp(path: []const u8, takeover: bool) !struct { cli: client.SessionClient, att: client.SessionAttachment } {
+    var cli = try client.SessionClient.init(std.heap.page_allocator, path);
+    errdefer cli.deinit();
+    const att = cli.attach(if (takeover) .takeover else .exclusive) catch |e| {
+        cli.deinit();
+        return e;
+    };
+    return .{ .cli = cli, .att = att };
 }
-
-fn rpcExists(allocator: std.mem.Allocator, path: []const u8) !bool {
-    return client.rpcExists(allocator, path);
-}
-
-fn printRpcError(res: rpc.ControlRes) void {
-    const code = if (res.err) |e| e.code else "error";
-    const code_s = code;
-    if (std.mem.eql(u8, code_s, "session_not_found")) {
-        std.debug.print("msr: session not found\n", .{});
-    } else if (std.mem.eql(u8, code_s, "session_running")) {
-        std.debug.print("msr: session already attached (use --takeover to replace)\n", .{});
-    } else if (std.mem.eql(u8, code_s, "permission_denied")) {
-        std.debug.print("msr: permission denied\n", .{});
-    } else if (std.mem.eql(u8, code_s, "invalid_args")) {
-        std.debug.print("msr: invalid arguments\n", .{});
-    } else {
-        std.debug.print("msr: {s}\n", .{code_s});
-    }
-}
-
 
 pub fn main(init: std.process.Init) !u8 {
     var it = std.process.Args.Iterator.init(init.minimal.args);
@@ -131,22 +142,9 @@ pub fn main(init: std.process.Init) !u8 {
 
     const cmd = argv.items[1];
 
-    var rt = msr.Runtime.init(std.heap.page_allocator);
-    defer rt.deinit();
-
     if (std.mem.eql(u8, cmd, "help") or std.mem.eql(u8, cmd, "--help") or std.mem.eql(u8, cmd, "-h")) {
         usage();
         return 0;
-    }
-
-    if (std.mem.eql(u8, cmd, "exists")) {
-        if (argv.items.len != 3) {
-            usage();
-            return 1;
-        }
-        const ok = rpcExists(std.heap.page_allocator, argv.items[2]) catch false;
-        std.debug.print("{s}\n", .{if (ok) "true" else "false"});
-        return if (ok) 0 else 1;
     }
 
     if (std.mem.eql(u8, cmd, "status")) {
@@ -154,32 +152,18 @@ pub fn main(init: std.process.Init) !u8 {
             usage();
             return 1;
         }
-        if (rt.status(argv.items[2])) |st| {
-            std.debug.print("{s}\n", .{@tagName(st)});
-            return if (st == .running or st == .exited_pending_wait or st == .stale) 0 else 1;
-        } else |_| {
-            std.debug.print("msr: invalid arguments\n", .{});
-            return 1;
-        }
-    }
-
-    if (std.mem.eql(u8, cmd, "resize")) {
-        if (argv.items.len != 5) {
-            usage();
-            return 1;
-        }
-        const cols = parseU16(argv.items[3]) catch return 1;
-        const rows = parseU16(argv.items[4]) catch return 1;
-        var res = rpcCall(std.heap.page_allocator, argv.items[2], .{ .op = "resize", .path = argv.items[2], .cols = cols, .rows = rows }) catch {
-            std.debug.print("msr: failed to contact session\n", .{});
+        var cli = client.SessionClient.init(std.heap.page_allocator, argv.items[2]) catch {
+            err("msr: failed to create client\n", .{});
             return 1;
         };
-        defer freeControlRes(std.heap.page_allocator, &res);
-        if (!res.ok) {
-            printRpcError(res);
+        defer cli.deinit();
+        const st = cli.status() catch {
+            err("msr: failed to contact session\n", .{});
             return 1;
-        }
-        return 0;
+        };
+        defer std.heap.page_allocator.free(@constCast(st.status));
+        out("{s}\n", .{st.status});
+        return if (std.mem.eql(u8, st.status, "running") or std.mem.eql(u8, st.status, "starting") or std.mem.eql(u8, st.status, "exited")) 0 else 1;
     }
 
     if (std.mem.eql(u8, cmd, "terminate")) {
@@ -188,15 +172,12 @@ pub fn main(init: std.process.Init) !u8 {
             return 1;
         }
         const sig = if (argv.items.len == 4) argv.items[3] else null;
-        var res = rpcCall(std.heap.page_allocator, argv.items[2], .{ .op = "terminate", .path = argv.items[2], .signal = sig }) catch {
-            std.debug.print("msr: failed to contact session\n", .{});
+        var cli = client.SessionClient.init(std.heap.page_allocator, argv.items[2]) catch return 1;
+        defer cli.deinit();
+        cli.terminate(sig) catch {
+            err("msr: failed to contact session\n", .{});
             return 1;
         };
-        defer freeControlRes(std.heap.page_allocator, &res);
-        if (!res.ok) {
-            printRpcError(res);
-            return 1;
-        }
         return 0;
     }
 
@@ -205,21 +186,19 @@ pub fn main(init: std.process.Init) !u8 {
             usage();
             return 1;
         }
-        var res = rpcCall(std.heap.page_allocator, argv.items[2], .{ .op = "wait", .path = argv.items[2] }) catch {
-            std.debug.print("msr: failed to contact session\n", .{});
+        var cli = client.SessionClient.init(std.heap.page_allocator, argv.items[2]) catch return 1;
+        defer cli.deinit();
+        const st = cli.wait() catch {
+            err("msr: failed to contact session\n", .{});
             return 1;
         };
-        defer freeControlRes(std.heap.page_allocator, &res);
-        if (!res.ok) {
-            printRpcError(res);
-            return 1;
-        }
+        defer if (st.signal) |s| std.heap.page_allocator.free(@constCast(s));
 
-        if (res.code) |code| {
-            std.debug.print("exit_code={d}\n", .{code});
+        if (st.code) |code| {
+            out("exit_code={d}\n", .{code});
             return @intCast(@min(@as(i32, 255), @max(@as(i32, 0), code)));
         }
-        std.debug.print("exit_signal={s}\n", .{res.signal orelse "unknown"});
+        out("exit_signal={s}\n", .{st.signal orelse "unknown"});
         return 1;
     }
 
@@ -228,26 +207,55 @@ pub fn main(init: std.process.Init) !u8 {
             usage();
             return 1;
         }
-        const mode = if (argv.items.len == 4 and std.mem.eql(u8, argv.items[3], "--takeover")) msr.AttachMode.takeover else msr.AttachMode.exclusive;
-        client.attachPath(std.heap.page_allocator, argv.items[2], mode, c.STDIN_FILENO, c.STDOUT_FILENO) catch |e| {
-            switch (e) {
-                error.ConnectFailed => {
-                    std.debug.print("msr: failed to contact session\n", .{});
-                    return 1;
-                },
-                error.AttachRejected => {
-                    // Don't make a second RPC call here; the session may reject attach for many reasons.
-                    // Keep the error boundary simple and avoid relying on parsing/freeing details.
-                    std.debug.print("msr: attach rejected\n", .{});
-                    return 1;
-                },
-                error.UnexpectedEof => return 0,
-                else => {
-                    std.debug.print("msr: attach stream failed\n", .{});
-                    return 1;
-                },
-            }
+        const mode = if (argv.items.len == 4 and std.mem.eql(u8, argv.items[3], "--takeover")) client.AttachMode.takeover else client.AttachMode.exclusive;
+        var cli = client.SessionClient.init(std.heap.page_allocator, argv.items[2]) catch return 1;
+        defer cli.deinit();
+        var att = cli.attach(mode) catch {
+            err("msr: attach rejected\n", .{});
+            return 1;
         };
+        defer att.close();
+        attachBridge(std.heap.page_allocator, &att, c.STDIN_FILENO, c.STDOUT_FILENO) catch {
+            err("msr: attach stream failed\n", .{});
+            return 1;
+        };
+        return 0;
+    }
+
+    if (std.mem.eql(u8, cmd, "resize")) {
+        if (argv.items.len != 5 and argv.items.len != 6) {
+            usage();
+            return 1;
+        }
+        const cols = parseU16(argv.items[3]) catch return 1;
+        const rows = parseU16(argv.items[4]) catch return 1;
+        const takeover = argv.items.len == 6 and std.mem.eql(u8, argv.items[5], "--takeover");
+
+        var owner = openAttachmentForOwnerScopedOp(argv.items[2], takeover) catch {
+            err("msr: resize requires current ownership or --takeover\n", .{});
+            return 1;
+        };
+        defer owner.att.close();
+        defer owner.cli.deinit();
+
+        owner.att.resize(cols, rows) catch {
+            err("msr: resize failed\n", .{});
+            return 1;
+        };
+        return 0;
+    }
+
+    if (std.mem.eql(u8, cmd, "exists")) {
+        if (argv.items.len != 3) {
+            usage();
+            return 1;
+        }
+        const fd = client.connectUnix(argv.items[2]) catch {
+            out("false\n", .{});
+            return 1;
+        };
+        _ = c.close(fd);
+        out("true\n", .{});
         return 0;
     }
 
@@ -262,23 +270,30 @@ pub fn main(init: std.process.Init) !u8 {
         const child_argv = argv.items[4..];
 
         if (std.mem.eql(u8, cmd, "_host")) {
-            try rt.create(path, .{ .argv = child_argv });
+            var session_host = try host.SessionHost.init(std.heap.page_allocator, .{ .argv = child_argv });
+            defer session_host.deinit();
+            try session_host.start();
+
+            var session_server = server.SessionServer.init(std.heap.page_allocator, &session_host);
+            defer session_server.deinit();
+            try session_server.listen(path);
 
             while (true) {
-                _ = rt.serveControlOnce(std.heap.page_allocator, path, 100) catch {};
-
-                _ = rt.pollExit(path) catch |e| switch (e) {
-                    msr.RuntimeError.SessionNotFound => break,
-                    else => null,
-                };
-
-                if (!rt.sessions.contains(path)) break;
+                _ = session_server.step() catch {};
+                switch (session_host.getState()) {
+                    .running, .starting => {
+                        _ = c.usleep(10_000);
+                        continue;
+                    },
+                    .exited => break,
+                    .idle, .closed => break,
+                }
             }
             return 0;
         }
 
         spawnHostDetached(argv.items[0], path, child_argv) catch return 1;
-        if (!waitForReady(&rt, path, 2000)) return 1;
+        if (!waitForReady(path, 2000)) return 1;
         return 0;
     }
 

@@ -1,6 +1,5 @@
 const std = @import("std");
-const session = @import("msr");
-const rpc = session.rpc;
+const protocol = @import("protocol");
 const c = @cImport({
     @cInclude("unistd.h");
     @cInclude("sys/socket.h");
@@ -15,6 +14,135 @@ pub const Error = error{
     ProtocolError,
     UnexpectedEof,
     OutOfMemory,
+};
+
+pub const AttachMode = enum {
+    exclusive,
+    takeover,
+};
+
+pub const RemoteStatus = struct {
+    status: []const u8,
+};
+
+pub const ExitStatus = struct {
+    code: ?i32 = null,
+    signal: ?[]const u8 = null,
+};
+
+pub const SessionClient = struct {
+    allocator: std.mem.Allocator,
+    socket_path: []u8,
+
+    pub fn init(allocator: std.mem.Allocator, socket_path: []const u8) !SessionClient {
+        return .{
+            .allocator = allocator,
+            .socket_path = try allocator.dupe(u8, socket_path),
+        };
+    }
+
+    pub fn deinit(self: *SessionClient) void {
+        self.allocator.free(self.socket_path);
+    }
+
+    pub fn status(self: *SessionClient) !RemoteStatus {
+        var res = try rpcCall(self.allocator, self.socket_path, .{ .op = "status" });
+        defer protocol.freeControlRes(self.allocator, &res);
+        if (!res.ok) return Error.ProtocolError;
+        return .{ .status = try self.allocator.dupe(u8, res.value.?.status orelse "unknown") };
+    }
+
+    pub fn wait(self: *SessionClient) !ExitStatus {
+        var res = try rpcCall(self.allocator, self.socket_path, .{ .op = "wait" });
+        defer protocol.freeControlRes(self.allocator, &res);
+        if (!res.ok) return Error.ProtocolError;
+        return .{ .code = if (res.value) |v| v.code else null, .signal = if (res.value) |v| if (v.signal) |s| try self.allocator.dupe(u8, s) else null else null };
+    }
+
+    pub fn terminate(self: *SessionClient, signal: ?[]const u8) !void {
+        var res = try rpcCall(self.allocator, self.socket_path, .{ .op = "terminate", .signal = signal });
+        defer protocol.freeControlRes(self.allocator, &res);
+        if (!res.ok) return Error.ProtocolError;
+    }
+
+    pub fn attach(self: *SessionClient, mode: AttachMode) !SessionAttachment {
+        const fd = try connectUnix(self.socket_path);
+        errdefer _ = c.close(fd);
+
+        const mode_str = switch (mode) {
+            .exclusive => "exclusive",
+            .takeover => "takeover",
+        };
+        const req = try protocol.encodeControlReq(self.allocator, .{ .op = "attach", .mode = mode_str });
+        defer self.allocator.free(req);
+        try protocol.writeFrame(fd, req);
+
+        const res_bytes = try protocol.readFrame(self.allocator, fd, 64 * 1024);
+        defer self.allocator.free(res_bytes);
+        var res = try protocol.parseControlRes(self.allocator, res_bytes);
+        defer protocol.freeControlRes(self.allocator, &res);
+        if (!res.ok) return Error.AttachRejected;
+
+        return .{ .allocator = self.allocator, .fd = fd };
+    }
+};
+
+pub const SessionAttachment = struct {
+    allocator: std.mem.Allocator,
+    fd: c_int,
+
+    pub fn close(self: *SessionAttachment) void {
+        _ = c.close(self.fd);
+    }
+
+    pub fn readDataFrame(self: *SessionAttachment) ![]u8 {
+        const frame = try self.readFrameOwned();
+        errdefer self.allocator.free(frame);
+        var msg = try protocol.parseDataMsg(self.allocator, frame);
+        defer protocol.freeDataMsg(self.allocator, &msg);
+        const decoded_len = try std.base64.standard.Decoder.calcSizeForSlice(msg.bytes_b64);
+        const decoded = try self.allocator.alloc(u8, decoded_len);
+        errdefer self.allocator.free(decoded);
+        try std.base64.standard.Decoder.decode(decoded, msg.bytes_b64);
+        self.allocator.free(frame);
+        return decoded;
+    }
+
+    pub fn write(self: *SessionAttachment, data: []const u8) !void {
+        const enc_len = std.base64.standard.Encoder.calcSize(data.len);
+        const b64 = try self.allocator.alloc(u8, enc_len);
+        defer self.allocator.free(b64);
+        _ = std.base64.standard.Encoder.encode(b64, data);
+        const payload = try protocol.encodeDataMsg(self.allocator, .{ .stream = "stdin", .bytes_b64 = b64 });
+        defer self.allocator.free(payload);
+        try protocol.writeFrame(self.fd, payload);
+    }
+
+    pub fn resize(self: *SessionAttachment, cols: u16, rows: u16) !void {
+        const req = try protocol.encodeControlReq(self.allocator, .{ .op = "resize", .cols = cols, .rows = rows });
+        defer self.allocator.free(req);
+        try protocol.writeFrame(self.fd, req);
+        const res_bytes = try protocol.readFrame(self.allocator, self.fd, 64 * 1024);
+        defer self.allocator.free(res_bytes);
+        var res = try protocol.parseControlRes(self.allocator, res_bytes);
+        defer protocol.freeControlRes(self.allocator, &res);
+        if (!res.ok) return Error.ProtocolError;
+    }
+
+    pub fn detach(self: *SessionAttachment) !void {
+        const req = try protocol.encodeControlReq(self.allocator, .{ .op = "detach" });
+        defer self.allocator.free(req);
+        try protocol.writeFrame(self.fd, req);
+        const res_bytes = try protocol.readFrame(self.allocator, self.fd, 64 * 1024);
+        defer self.allocator.free(res_bytes);
+        var res = try protocol.parseControlRes(self.allocator, res_bytes);
+        defer protocol.freeControlRes(self.allocator, &res);
+        if (!res.ok) return Error.ProtocolError;
+    }
+
+    pub fn readFrameOwned(self: *SessionAttachment) ![]u8 {
+        return try protocol.readFrame(self.allocator, self.fd, 256 * 1024);
+    }
 };
 
 pub fn connectUnix(path: []const u8) Error!c_int {
@@ -34,143 +162,20 @@ pub fn connectUnix(path: []const u8) Error!c_int {
     return fd;
 }
 
-pub fn rpcCall(allocator: std.mem.Allocator, path: []const u8, req_msg: rpc.ControlReq) Error!rpc.ControlRes {
+pub fn rpcCall(allocator: std.mem.Allocator, path: []const u8, req_msg: protocol.ControlReq) Error!protocol.ControlRes {
     const fd = try connectUnix(path);
     defer _ = c.close(fd);
 
-    const req = rpc.encodeControlReq(allocator, req_msg) catch return error.ProtocolError;
+    const req = protocol.encodeControlReq(allocator, req_msg) catch return error.ProtocolError;
     defer allocator.free(req);
-    rpc.writeFrame(fd, req) catch return error.IoError;
+    protocol.writeFrame(fd, req) catch return error.IoError;
 
-    const res_bytes = rpc.readFrame(allocator, fd, 64 * 1024) catch |e| switch (e) {
+    const res_bytes = protocol.readFrame(allocator, fd, 64 * 1024) catch |e| switch (e) {
         error.UnexpectedEof => return error.UnexpectedEof,
         else => return error.ProtocolError,
     };
     defer allocator.free(res_bytes);
 
-    // NOTE: std.json.parseFromSlice allocates backing storage owned by the Parsed value.
-    // Returning slices out of it would be use-after-free if we deinit(). So keep the
-    // parsed object alive for this function and deep-copy the result.
-    const Env = struct { type: []const u8, payload: rpc.ControlRes };
-    var parsed = std.json.parseFromSlice(Env, allocator, res_bytes, .{ .ignore_unknown_fields = true }) catch return error.ProtocolError;
-    defer parsed.deinit();
-    if (!std.mem.eql(u8, parsed.value.type, "control_res")) return error.ProtocolError;
-
-    // Deep copy the payload (strings) so caller can safely use it after we deinit.
-    const p = parsed.value.payload;
-    var out: rpc.ControlRes = .{ .ok = p.ok };
-    out.exists = p.exists;
-    out.code = p.code;
-    if (p.signal) |sig| out.signal = try allocator.dupe(u8, sig) else out.signal = null;
-    if (p.err) |eb| {
-        var err_body: rpc.ControlRes.ErrBody = .{ .code = try allocator.dupe(u8, eb.code), .message = null };
-        if (eb.message) |m| err_body.message = try allocator.dupe(u8, m);
-        out.err = err_body;
-    }
-    return out;
+    return protocol.parseControlRes(allocator, res_bytes) catch return error.ProtocolError;
 }
 
-pub fn rpcExists(allocator: std.mem.Allocator, path: []const u8) Error!bool {
-    const res = try rpcCall(allocator, path, .{ .op = "exists", .path = path });
-    if (!res.ok) return error.AttachRejected;
-    return res.exists orelse false;
-}
-
-fn writeAll(fd: c_int, bytes: []const u8) Error!void {
-    var off: usize = 0;
-    while (off < bytes.len) {
-        const n = c.write(fd, bytes.ptr + off, bytes.len - off);
-        if (n < 0) return error.IoError;
-        if (n == 0) return error.IoError;
-        off += @intCast(n);
-    }
-}
-
-pub fn bridgeAttachClient(allocator: std.mem.Allocator, fd: c_int, in_fd: c_int, out_fd: c_int) Error!void {
-    var stdin_open = true;
-    var fds = [2]c.struct_pollfd{
-        .{ .fd = in_fd, .events = c.POLLIN, .revents = 0 },
-        .{ .fd = fd, .events = c.POLLIN, .revents = 0 },
-    };
-    var stdin_buf: [4096]u8 = undefined;
-    var b64_buf: [8192]u8 = undefined;
-
-    while (true) {
-        fds[0].events = if (stdin_open) c.POLLIN else 0;
-        const pr = c.poll(&fds, 2, -1);
-        if (pr < 0) return error.IoError;
-
-        if (stdin_open and (fds[0].revents & c.POLLIN) != 0) {
-            const n = c.read(in_fd, &stdin_buf, stdin_buf.len);
-            if (n < 0) return error.IoError;
-            if (n == 0) {
-                stdin_open = false;
-            } else {
-                const enc_len = std.base64.standard.Encoder.calcSize(@intCast(n));
-                _ = std.base64.standard.Encoder.encode(b64_buf[0..enc_len], stdin_buf[0..@intCast(n)]);
-                const payload = rpc.encodeDataMsg(allocator, .{ .stream = "stdin", .bytes_b64 = b64_buf[0..enc_len] }) catch return error.ProtocolError;
-                defer allocator.free(payload);
-                rpc.writeFrame(fd, payload) catch return error.IoError;
-            }
-        }
-
-        if ((fds[1].revents & c.POLLIN) != 0) {
-            const frame = rpc.readFrame(allocator, fd, 256 * 1024) catch |e| switch (e) {
-                error.UnexpectedEof => return error.UnexpectedEof,
-                else => return error.ProtocolError,
-            };
-            defer allocator.free(frame);
-
-            const parsed = std.json.parseFromSlice(struct {
-                type: []const u8,
-            }, allocator, frame, .{ .ignore_unknown_fields = true }) catch return error.ProtocolError;
-            defer parsed.deinit();
-
-            if (std.mem.eql(u8, parsed.value.type, "data")) {
-                const msg = rpc.parseDataMsg(allocator, frame) catch return error.ProtocolError;
-                const decoded_len = std.base64.standard.Decoder.calcSizeForSlice(msg.bytes_b64) catch return error.ProtocolError;
-                const decoded = allocator.alloc(u8, decoded_len) catch return error.ProtocolError;
-                defer allocator.free(decoded);
-                std.base64.standard.Decoder.decode(decoded, msg.bytes_b64) catch return error.ProtocolError;
-                try writeAll(out_fd, decoded);
-            } else if (std.mem.eql(u8, parsed.value.type, "event")) {
-                const ev = rpc.parseEventMsg(allocator, frame) catch return error.ProtocolError;
-                if (std.mem.eql(u8, ev.kind, "session_end")) return;
-            } else {
-                return error.ProtocolError;
-            }
-        }
-
-        if (stdin_open and (fds[0].revents & (c.POLLHUP | c.POLLERR | c.POLLNVAL)) != 0) {
-            stdin_open = false;
-        }
-        if ((fds[1].revents & (c.POLLHUP | c.POLLERR | c.POLLNVAL)) != 0) return;
-    }
-}
-
-pub fn attachPath(allocator: std.mem.Allocator, path: []const u8, mode: session.AttachMode, in_fd: c_int, out_fd: c_int) Error!void {
-    const mode_str = switch (mode) {
-        .exclusive => "exclusive",
-        .takeover => "takeover",
-    };
-
-    const fd = try connectUnix(path);
-    defer _ = c.close(fd);
-
-    const req = rpc.encodeControlReq(allocator, .{ .op = "attach", .path = path, .mode = mode_str }) catch return error.ProtocolError;
-    defer allocator.free(req);
-    rpc.writeFrame(fd, req) catch return error.IoError;
-
-    const res_bytes = rpc.readFrame(allocator, fd, 64 * 1024) catch |e| switch (e) {
-        error.UnexpectedEof => return error.UnexpectedEof,
-        else => return error.ProtocolError,
-    };
-    defer allocator.free(res_bytes);
-    var parsed = std.json.parseFromSlice(struct { type: []const u8, payload: rpc.ControlRes }, allocator, res_bytes, .{ .ignore_unknown_fields = true }) catch return error.ProtocolError;
-    defer parsed.deinit();
-    if (!std.mem.eql(u8, parsed.value.type, "control_res")) return error.ProtocolError;
-    const res = parsed.value.payload;
-    if (!res.ok) return error.AttachRejected;
-
-    try bridgeAttachClient(allocator, fd, in_fd, out_fd);
-}
