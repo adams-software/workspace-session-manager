@@ -92,7 +92,10 @@ pub const SessionAttachment = struct {
     fd: c_int,
 
     pub fn close(self: *SessionAttachment) void {
-        _ = c.close(self.fd);
+        if (self.fd >= 0) {
+            _ = c.close(self.fd);
+            self.fd = -1;
+        }
     }
 
     pub fn readDataFrame(self: *SessionAttachment) ![]u8 {
@@ -138,6 +141,7 @@ pub const SessionAttachment = struct {
         var res = try protocol.parseControlRes(self.allocator, res_bytes);
         defer protocol.freeControlRes(self.allocator, &res);
         if (!res.ok) return Error.ProtocolError;
+        self.close();
     }
 
     pub fn readFrameOwned(self: *SessionAttachment) ![]u8 {

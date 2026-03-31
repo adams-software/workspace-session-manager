@@ -38,6 +38,16 @@ pub fn build(b: *std.Build) void {
     server_mod.addImport("host", host_mod);
     server_mod.addImport("protocol", protocol_mod);
 
+    const attach_runtime_mod = b.addModule("attach_runtime", .{
+        .root_source_file = b.path("src/attach_runtime.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    attach_runtime_mod.linkSystemLibrary("util", .{});
+    attach_runtime_mod.addImport("client", client_mod);
+    attach_runtime_mod.addImport("protocol", protocol_mod);
+
     const exe_root = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
@@ -48,6 +58,7 @@ pub fn build(b: *std.Build) void {
     exe_root.addImport("client", client_mod);
     exe_root.addImport("host", host_mod);
     exe_root.addImport("server", server_mod);
+    exe_root.addImport("attach_runtime", attach_runtime_mod);
 
     const exe = b.addExecutable(.{
         .name = "msr",
@@ -109,8 +120,23 @@ pub fn build(b: *std.Build) void {
     client_integration_root.addImport("server", server_mod);
     client_integration_root.addImport("host", host_mod);
     client_integration_root.addImport("protocol", protocol_mod);
+    client_integration_root.addImport("attach_runtime", attach_runtime_mod);
     const client_integration_tests = b.addTest(.{
         .root_module = client_integration_root,
+    });
+
+    const attach_runtime_logic_root = b.createModule(.{
+        .root_source_file = b.path("src/attach_runtime_logic_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    attach_runtime_logic_root.linkSystemLibrary("util", .{});
+    attach_runtime_logic_root.addImport("client", client_mod);
+    attach_runtime_logic_root.addImport("protocol", protocol_mod);
+    attach_runtime_logic_root.addImport("attach_runtime", attach_runtime_mod);
+    const attach_runtime_logic_tests = b.addTest(.{
+        .root_module = attach_runtime_logic_root,
     });
 
     const run_host_tests = b.addRunArtifact(host_tests);
@@ -118,6 +144,7 @@ pub fn build(b: *std.Build) void {
     const run_server_tests = b.addRunArtifact(server_tests);
     const run_client_tests = b.addRunArtifact(client_tests);
     const run_client_integration_tests = b.addRunArtifact(client_integration_tests);
+    const run_attach_runtime_logic_tests = b.addRunArtifact(attach_runtime_logic_tests);
 
     const test_step = b.step("test", "Run v2 tests");
     test_step.dependOn(&run_host_tests.step);
@@ -125,6 +152,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_server_tests.step);
     test_step.dependOn(&run_client_tests.step);
     test_step.dependOn(&run_client_integration_tests.step);
+    test_step.dependOn(&run_attach_runtime_logic_tests.step);
 
     const test_host_step = b.step("test-host", "Run host module tests");
     test_host_step.dependOn(&run_host_tests.step);
@@ -138,6 +166,9 @@ pub fn build(b: *std.Build) void {
     const test_client_step = b.step("test-client", "Run client module tests");
     test_client_step.dependOn(&run_client_tests.step);
     test_client_step.dependOn(&run_client_integration_tests.step);
+
+    const test_attach_runtime_logic_step = b.step("test-attach-runtime", "Run attach runtime logic tests");
+    test_attach_runtime_logic_step.dependOn(&run_attach_runtime_logic_tests.step);
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());

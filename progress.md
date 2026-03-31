@@ -183,3 +183,51 @@
   - simple session-name validation (`/` disallowed)
   - clearer attach flag handling (`--takeover` / `--no-takeover`)
 - Re-smoked DSM core flow with multiple sessions in one cwd (`alpha`, `beta`).
+- Ready for checkpoint: runtime cleanup is effectively done; first DSM shell slice is real, documented, and smoke-tested.
+- Began the next primitive needed for traversal/switching work by exposing public `msr detach <path>` over the existing attachment-level detach operation.
+- `msr detach <path>` now reuses the existing owner-scoped attachment path in the CLI, giving users an explicit "leave session without terminating it" primitive.
+- Added `docs/specs/v2/control-rpc.md` describing the currently implemented framed JSON control RPC as-built (operations, envelopes, ownership rules, and CLI mapping).
+- Revised `docs/specs/v2/session-nested-client.md` to fit the existing protocol: reuse `control_req` / `control_res` for nested passthrough where possible, keep routed ops minimal (`owner_attach`, `owner_detach`), and document server/outer-client implementation guidance.
+- Updated `docs/specs/v2/control-rpc.md` to call out nested passthrough (`owner_attach`, `owner_detach`) as the recommended next protocol extension while keeping implemented vs proposed-next behavior explicit.
+- Began Slice A for nested passthrough by wiring `owner_attach` / `owner_detach` into the existing control RPC/server path with explicit stubbed unsupported behavior on the owner side.
+- Moving into Slice B: first owner-side routed control path over existing `control_req` / `control_res`, starting with narrow forwarded ops and an attached-client state machine rather than inventing a second protocol family.
+- After exploring Slice B, pivoted the recommended design toward minimal explicit lane messaging for routed bidirectional control. Updated v2 docs to keep current transport/framing/PTy data and simple one-shot control RPC, while introducing lanes only for owner-control/nested passthrough where the old ad hoc control model became too muddy.
+- Started the lane pivot in code by adding minimal lane request/response envelopes plus encode/decode tests in `src/protocol.zig`.
+- Added the first lane-aware server scaffold: accepted connections now detect `lane_req` frames and return a structured `lane_res(error=lane_unsupported)` response, giving us a clean validated base before real `owner_control` routing.
+- Extended the lane scaffold so `owner_control` lanes now distinguish:
+  - `no_owner_client` when no owner exists
+  - `owner_control_unsupported` when an owner exists but routing/execution is not yet implemented
+- Began a real owner_control routing scaffold in the server with a minimal pending-lane slot and explicit `owner_control_routing_pending` response, so lane requests are now tracked as routed work instead of being treated like generic unsupported traffic.
+- Pushed the first true routed lane flow: server now forwards `owner_control` lane requests to the owner connection and relays a returned `lane_res` back to the requester; owner attach loop currently answers with structured `owner_control_execute_pending` while execution semantics are still being implemented.
+- Starting the first real owner_control execution path with `detach`, since it proves routed lane execution end-to-end without mixing in reattach/switch semantics yet.
+- Implemented first real owner_control execution in the owner attach loop: routed lane `method=detach` now performs detach and returns lane `return {}` end-to-end.
+- Next focus: harden routed detach cleanup/validation, then implement real owner_control `attach` using the same routed lane path.
+- Added explicit owner_control lane validation (`invalid_args`, `unsupported_method`) and began real owner_control `attach` execution in the owner loop using parsed lane args + takeover attach.
+- Switching to targeted routed-lane tests now (especially `owner_control.detach` then `owner_control.attach`) and explicitly avoiding wedged aggregate `zig build` runs as the primary feedback loop.
+- Hardened integration tests against hangs by adding bounded server-step threads and `readFrameWithTimeout(...)` so routed-lane failures should surface as explicit timeouts instead of wedging indefinitely.
+- Debugging routed detach sequencing: owner now writes lane `return {}` before executing `detach()`, since detaching first likely tears down the channel before the server can relay the lane response.
+- Tightening server relay ordering so readable owner data/lane responses are processed before owner HUP cleanup wins when a pending lane exists.
+- Identified a test harness gap: routed lane tests were forwarding to an attached owner fd, but not running the real owner-side bridge loop. Next step is to factor that loop out of `main.zig` into a reusable helper so CLI and tests exercise the same owner-side lane consumer.
+- After extracting the shared attach runtime, next debugging focus is test cleanup/lifecycle after a successful routed detach, since the trace now shows the lane flow itself completing through server -> owner -> server -> requester.
+- Routed detach is now functionally proven; immediate follow-up is cleaning the remaining owner-client test leak so `test-client` can go fully green before adding routed `attach` coverage.
+- Per latest decision, moving ahead on the routed `owner_control.attach` vertical slice now, while explicitly isolating the known post-detach client cleanup bug for later cleanup-focused work.
+- Hardening client attachment lifecycle now: make `SessionAttachment.close()` idempotent and ensure `detach()` invalidates the fd, since post-detach/double-close semantics are a likely source of the current cleanup bugs and stuck tests.
+- Hardening routed attach lifecycle now: ensure temporary target `SessionClient` wrappers are deinit'd after handoff, and keep the routed attach test bounded around the still-running owner runtime so it doesn't wedge indefinitely while we debug post-switch cleanup.
+- Started the testability refactor: split `attach_runtime` into smaller helpers (`decodeDataFrame`, lane reply helpers, owner-control dispatcher) so lane execution/cleanup behavior is easier to test and reason about without one giant monolithic loop.
+- Confirmed a real friction point with the Zig test/build harness in this environment. Response: double down on testability-first design (smaller runtime seams, fewer giant live-loop tests, clearer lifecycle ownership) rather than layering on more opaque integration hacks.
+- Continuing the testability refactor by exposing smaller attach-runtime lane handlers directly, so we can start writing narrower logic tests against owner-control behavior without always going through the full bridge loop.
+- Next immediate step: wire `attach_runtime_logic_test.zig` into `build.zig` as a first-class test target and expand the narrow runtime logic layer before adding more feature complexity.
+- `test-attach-runtime` is now wired and giving useful signal. Next focus is to fix narrow attach-invalid-args behavior there before returning to the heavier integration path.
+- Expanded the narrow runtime logic layer with more attach validation coverage (including empty-path rejection) so we can keep moving checks downward out of the flaky heavy integration path.
+- Added a narrower detach contract test at the runtime seam (`should_exit == true` and attachment invalidated) so we can verify detach lifecycle behavior without needing the full routed integration path every time.
+- Narrow logic tests exposed the next missing seam: owner-control decision logic is still too coupled to concrete live detach RPC behavior. Next refactor is to separate lane decision/response flow from the concrete attachment operations so the middle test layer can stay truly narrow.
+- That decision/execution split is now in `attach_runtime.zig`; current focus is to drive `test-attach-runtime` to green so the new middle layer becomes the default place to debug owner-control behavior.
+- Continuing operational cleanup in parallel: regularly killing stale Zig build/test processes so the environment stays usable while we iterate on the narrower middle test layer.
+- Checkpoint summary:
+  - lane-based nested owner-control direction remains the chosen architecture
+  - routed `owner_control.detach` is functionally proven through the real runtime path
+  - routed `owner_control.attach` exists but is not yet stabilized end-to-end
+  - `attach_runtime` has been extracted and partially split into decision vs execution seams
+  - a new narrow middle test layer exists (`test-attach-runtime`) and is becoming the preferred debugging surface over the heavier integration path
+  - Zig build/test harness behavior in this environment is a real friction point and should influence how we structure future tests
+- Tightening the routed attach test to make runtime exit deterministic: tear down the switched-to target first, then join the owner runtime, instead of leaving an unbounded final join with no explicit reason to exit.

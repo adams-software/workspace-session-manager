@@ -81,6 +81,10 @@ interface SessionClient {
   attach(mode?: AttachMode): Promise<SessionAttachment>;
 }
 
+CLI note:
+- the public `msr` CLI may expose a convenience `detach <path>` command implemented by opening an owner-scoped attachment and issuing `detach()` on that attachment.
+- this is a user-facing primitive for leaving a live session without terminating it; it does not by itself define multi-session switching semantics.
+
 interface SessionAttachment {
   write(data: Uint8Array): Promise<void>;
   resize(cols: number, rows: number): Promise<void>;

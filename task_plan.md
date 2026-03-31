@@ -14,8 +14,9 @@ Realign `msr` implementation to the v2 specs, treating `docs/specs/v2/*` as sour
 | 5. Rebuild SessionClient | complete | Thin endpoint client + attachment handle rebuilt with integration tests |
 | 6. Stabilize `msr` CLI | in_progress | Most user-facing commands are on v2 path; create/_host path has viable v2 serve-mode and remaining work is mostly polish |
 | 7. Remove obsolete manager/app/nav architecture | complete | Dead legacy cluster deleted; `lib.zig`/`rpc.zig` also removed; active repo surface is now v2-only |
-| 8. Implement DSM shell layer | todo | Shell-first single-directory workflow on top of `msr` |
+| 8. Implement DSM shell layer | in_progress | Core wrapper exists and is smoke-tested; traversal/nested-switch semantics remain open pending better runtime state modeling |
 | 9. Implement WSM shell layer | todo | Recursive discovery and deterministic jump over DSM-style nodes |
+| 10. Research spike: attach runtime state machine + testing strategy | in_progress | Pause feature grind and explicitly model attach-runtime states/transitions + layered test strategy before pushing further on routed attach |
 
 ## Success criteria
 - Code structure matches v2 docs rather than the older runtime/manager/app split.

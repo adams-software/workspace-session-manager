@@ -2,13 +2,13 @@ const std = @import("std");
 const host = @import("host");
 const server = @import("server");
 const client = @import("client");
+const attach_runtime = @import("attach_runtime");
 const c = @cImport({
     @cInclude("unistd.h");
     @cInclude("stdlib.h");
     @cInclude("stdio.h");
     @cInclude("sys/socket.h");
     @cInclude("sys/un.h");
-    @cInclude("poll.h");
 });
 
 fn usage() void {
@@ -17,6 +17,7 @@ fn usage() void {
             "Usage:\n" ++
             "  msr create <path> -- <cmd...>\n" ++
             "  msr attach <path> [--takeover]\n" ++
+            "  msr detach <path>\n" ++
             "  msr resize <path> <cols> <rows> [--takeover]\n" ++
             "  msr terminate <path> [TERM|INT|KILL]\n" ++
             "  msr wait <path>\n" ++
@@ -86,36 +87,6 @@ fn waitForReady(path: []const u8, timeout_ms: u32) bool {
         return true;
     }
     return false;
-}
-
-fn attachBridge(allocator: std.mem.Allocator, attachment: *client.SessionAttachment, in_fd: c_int, out_fd: c_int) !void {
-    var stdin_open = true;
-    var pfd = c.struct_pollfd{ .fd = in_fd, .events = c.POLLIN, .revents = 0 };
-    var in_buf: [4096]u8 = undefined;
-
-    while (true) {
-        if (stdin_open) {
-            const pr = c.poll(&pfd, 1, 10);
-            if (pr < 0) return error.IoError;
-            if (pr > 0 and (pfd.revents & c.POLLIN) != 0) {
-                const n = c.read(in_fd, &in_buf, in_buf.len);
-                if (n < 0) return error.IoError;
-                if (n == 0) {
-                    stdin_open = false;
-                } else {
-                    try attachment.write(in_buf[0..@intCast(n)]);
-                }
-            }
-            if ((pfd.revents & (c.POLLHUP | c.POLLERR | c.POLLNVAL)) != 0) stdin_open = false;
-        }
-
-        const decoded = attachment.readDataFrame() catch |e| switch (e) {
-            error.UnexpectedEof => return,
-            else => return e,
-        };
-        defer allocator.free(decoded);
-        _ = c.write(out_fd, decoded.ptr, decoded.len);
-    }
 }
 
 fn openAttachmentForOwnerScopedOp(path: []const u8, takeover: bool) !struct { cli: client.SessionClient, att: client.SessionAttachment } {
@@ -215,8 +186,27 @@ pub fn main(init: std.process.Init) !u8 {
             return 1;
         };
         defer att.close();
-        attachBridge(std.heap.page_allocator, &att, c.STDIN_FILENO, c.STDOUT_FILENO) catch {
+        attach_runtime.runAttachBridge(std.heap.page_allocator, &att, c.STDIN_FILENO, c.STDOUT_FILENO) catch {
             err("msr: attach stream failed\n", .{});
+            return 1;
+        };
+        return 0;
+    }
+
+    if (std.mem.eql(u8, cmd, "detach")) {
+        if (argv.items.len != 3) {
+            usage();
+            return 1;
+        }
+        var owner = openAttachmentForOwnerScopedOp(argv.items[2], false) catch {
+            err("msr: detach requires current ownership\n", .{});
+            return 1;
+        };
+        defer owner.att.close();
+        defer owner.cli.deinit();
+
+        owner.att.detach() catch {
+            err("msr: detach failed\n", .{});
             return 1;
         };
         return 0;

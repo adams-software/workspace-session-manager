@@ -41,6 +41,25 @@ pub const EventMsg = struct {
     signal: ?[]const u8 = null,
 };
 
+pub const LaneReqMsg = struct {
+    lane_id: []const u8,
+    lane_kind: []const u8,
+    req_type: []const u8,
+    seq: u32,
+    method: ?[]const u8 = null,
+    args_json: ?[]const u8 = null,
+};
+
+pub const LaneResMsg = struct {
+    lane_id: []const u8,
+    res_type: []const u8,
+    seq: u32,
+    value_json: ?[]const u8 = null,
+    error_json: ?[]const u8 = null,
+    meta_json: ?[]const u8 = null,
+    chunk_json: ?[]const u8 = null,
+};
+
 pub fn freeControlReq(allocator: std.mem.Allocator, req: *ControlReq) void {
     allocator.free(@constCast(req.op));
     if (req.path) |v| allocator.free(@constCast(v));
@@ -67,6 +86,23 @@ pub fn freeDataMsg(allocator: std.mem.Allocator, msg: *DataMsg) void {
 pub fn freeEventMsg(allocator: std.mem.Allocator, msg: *EventMsg) void {
     allocator.free(@constCast(msg.kind));
     if (msg.signal) |s| allocator.free(@constCast(s));
+}
+
+pub fn freeLaneReqMsg(allocator: std.mem.Allocator, msg: *LaneReqMsg) void {
+    allocator.free(@constCast(msg.lane_id));
+    allocator.free(@constCast(msg.lane_kind));
+    allocator.free(@constCast(msg.req_type));
+    if (msg.method) |v| allocator.free(@constCast(v));
+    if (msg.args_json) |v| allocator.free(@constCast(v));
+}
+
+pub fn freeLaneResMsg(allocator: std.mem.Allocator, msg: *LaneResMsg) void {
+    allocator.free(@constCast(msg.lane_id));
+    allocator.free(@constCast(msg.res_type));
+    if (msg.value_json) |v| allocator.free(@constCast(v));
+    if (msg.error_json) |v| allocator.free(@constCast(v));
+    if (msg.meta_json) |v| allocator.free(@constCast(v));
+    if (msg.chunk_json) |v| allocator.free(@constCast(v));
 }
 
 pub fn writeFrame(fd: c_int, bytes: []const u8) !void {
@@ -171,6 +207,16 @@ pub fn encodeEventMsg(allocator: std.mem.Allocator, msg: EventMsg) ![]u8 {
     return std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(env, .{})});
 }
 
+pub fn encodeLaneReqMsg(allocator: std.mem.Allocator, msg: LaneReqMsg) ![]u8 {
+    const env = .{ .type = "lane_req", .payload = msg };
+    return std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(env, .{})});
+}
+
+pub fn encodeLaneResMsg(allocator: std.mem.Allocator, msg: LaneResMsg) ![]u8 {
+    const env = .{ .type = "lane_res", .payload = msg };
+    return std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(env, .{})});
+}
+
 pub fn parseEventMsg(allocator: std.mem.Allocator, bytes: []const u8) !EventMsg {
     const Env = struct {
         type: []const u8,
@@ -184,6 +230,45 @@ pub fn parseEventMsg(allocator: std.mem.Allocator, bytes: []const u8) !EventMsg 
         .kind = try allocator.dupe(u8, p.kind),
         .code = p.code,
         .signal = if (p.signal) |s| try allocator.dupe(u8, s) else null,
+    };
+}
+
+pub fn parseLaneReqMsg(allocator: std.mem.Allocator, bytes: []const u8) !LaneReqMsg {
+    const Env = struct {
+        type: []const u8,
+        payload: LaneReqMsg,
+    };
+    var parsed = try std.json.parseFromSlice(Env, allocator, bytes, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    if (!std.mem.eql(u8, parsed.value.type, "lane_req")) return error.BadMessageType;
+    const p = parsed.value.payload;
+    return .{
+        .lane_id = try allocator.dupe(u8, p.lane_id),
+        .lane_kind = try allocator.dupe(u8, p.lane_kind),
+        .req_type = try allocator.dupe(u8, p.req_type),
+        .seq = p.seq,
+        .method = if (p.method) |v| try allocator.dupe(u8, v) else null,
+        .args_json = if (p.args_json) |v| try allocator.dupe(u8, v) else null,
+    };
+}
+
+pub fn parseLaneResMsg(allocator: std.mem.Allocator, bytes: []const u8) !LaneResMsg {
+    const Env = struct {
+        type: []const u8,
+        payload: LaneResMsg,
+    };
+    var parsed = try std.json.parseFromSlice(Env, allocator, bytes, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    if (!std.mem.eql(u8, parsed.value.type, "lane_res")) return error.BadMessageType;
+    const p = parsed.value.payload;
+    return .{
+        .lane_id = try allocator.dupe(u8, p.lane_id),
+        .res_type = try allocator.dupe(u8, p.res_type),
+        .seq = p.seq,
+        .value_json = if (p.value_json) |v| try allocator.dupe(u8, v) else null,
+        .error_json = if (p.error_json) |v| try allocator.dupe(u8, v) else null,
+        .meta_json = if (p.meta_json) |v| try allocator.dupe(u8, v) else null,
+        .chunk_json = if (p.chunk_json) |v| try allocator.dupe(u8, v) else null,
     };
 }
 
@@ -257,4 +342,31 @@ test "protocol encode/decode event message" {
     defer freeEventMsg(std.testing.allocator, &out);
     try std.testing.expectEqualStrings("session_exit", out.kind);
     try std.testing.expectEqual(@as(?i32, 0), out.code);
+}
+
+test "protocol encode/decode lane request message" {
+    const msg = LaneReqMsg{ .lane_id = "l1", .lane_kind = "owner_control", .req_type = "call", .seq = 1, .method = "attach", .args_json = "{\"path\":\"/tmp/target.msr\"}" };
+    const payload = try encodeLaneReqMsg(std.testing.allocator, msg);
+    defer std.testing.allocator.free(payload);
+
+    var out = try parseLaneReqMsg(std.testing.allocator, payload);
+    defer freeLaneReqMsg(std.testing.allocator, &out);
+    try std.testing.expectEqualStrings("l1", out.lane_id);
+    try std.testing.expectEqualStrings("owner_control", out.lane_kind);
+    try std.testing.expectEqualStrings("call", out.req_type);
+    try std.testing.expectEqual(@as(u32, 1), out.seq);
+    try std.testing.expectEqualStrings("attach", out.method.?);
+}
+
+test "protocol encode/decode lane response message" {
+    const msg = LaneResMsg{ .lane_id = "l1", .res_type = "return", .seq = 1, .value_json = "{}" };
+    const payload = try encodeLaneResMsg(std.testing.allocator, msg);
+    defer std.testing.allocator.free(payload);
+
+    var out = try parseLaneResMsg(std.testing.allocator, payload);
+    defer freeLaneResMsg(std.testing.allocator, &out);
+    try std.testing.expectEqualStrings("l1", out.lane_id);
+    try std.testing.expectEqualStrings("return", out.res_type);
+    try std.testing.expectEqual(@as(u32, 1), out.seq);
+    try std.testing.expectEqualStrings("{}", out.value_json.?);
 }
