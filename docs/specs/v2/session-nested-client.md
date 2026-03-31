@@ -2,9 +2,14 @@
 
 ## Status
 
-Draft RFC for review.
+Current working v0 direction.
 
-Revised to fit the existing MSR framed JSON transport while pivoting routed nested control toward a minimal explicit lane layer rather than ad hoc forwarded control ops.
+This document now reflects the simplified routed owner-control path that matches the implementation:
+
+- short-lived requester RPC via `control_req { op: "owner_forward", request_id, action }`
+- routed owner-stream request via `owner_control_req`
+- owner reply via `owner_control_res`
+- final requester completion via `control_res`
 
 ---
 
@@ -19,7 +24,7 @@ This layer exists to solve one specific problem:
 
 Nested passthrough is therefore a small control-routing extension over the existing session socket protocol.
 
-The current recommendation is to implement that extension using a narrow lane-based control layer, while preserving the existing transport, framing, PTY `data` stream, and simple one-shot control RPC.
+For v0, do not use generic lanes. Keep the protocol narrow and explicit around routed owner control.
 
 ---
 
@@ -31,7 +36,7 @@ The current recommendation is to implement that extension using a narrow lane-ba
 - passthrough semantics for `attach <target>`
 - passthrough semantics for `detach`
 - routing through the current session server to the current outer attached client
-- recommended protocol adaptation using a narrow lane layer over the existing transport
+- routed owner-control over the existing transport
 - implementation guidance for server and outer attached client behavior
 
 ### Out of scope
@@ -42,7 +47,6 @@ The current recommendation is to implement that extension using a narrow lane-ba
 - `create`
 - history/back/forward
 - broad multiparty routing abstractions
-- general lane algebra
 - workspace/global discovery beyond already-resolved target sockets
 
 ---
@@ -146,11 +150,11 @@ Normal behavior:
 Passthrough behavior:
 
 1. connect to the current session server from `MSR_SESSION`
-2. open an `owner_control` lane to the current session server
-3. send a lane `call` requesting attach to the resolved target socket path
-4. current session server opens/routes a corresponding `owner_control` lane to the current outer attached client
-5. outer attached client detaches from current session and attaches to target session
-6. nested command exits after lane acknowledgment
+2. send `control_req { op: "owner_forward", request_id, action: { op: "attach", path: target } }`
+3. current session server forwards `owner_control_req` to the current outer attached client
+4. outer attached client detaches from current session and attaches to target session
+5. outer attached client replies with `owner_control_res`
+6. server returns final `control_res` to the nested requester
 
 This is effectively a switch, but the visible command remains `attach`.
 
@@ -159,11 +163,11 @@ This is effectively a switch, but the visible command remains `attach`.
 Passthrough behavior:
 
 1. connect to current session server
-2. open an `owner_control` lane to current session server
-3. send a lane `call` requesting detach
-4. current session server opens/routes a corresponding `owner_control` lane to the current outer attached client
-5. outer attached client detaches its current top-level attachment
-6. nested command exits after lane acknowledgment
+2. send `control_req { op: "owner_forward", request_id, action: { op: "detach" } }`
+3. current session server forwards `owner_control_req` to the current outer attached client
+4. outer attached client detaches its current top-level attachment
+5. outer attached client replies with `owner_control_res`
+6. server returns final `control_res` to the nested requester
 
 ---
 
@@ -211,11 +215,11 @@ Prefer:
 - existing framing
 - existing PTY `data` messages
 - existing one-shot `control_req` / `control_res`
-- a narrow explicit lane layer for routed bidirectional control
+- a narrow explicit routed owner-control message flow
 
 ---
 
-# 7. Recommended routed owner-control protocol
+# 7. Routed owner-control protocol
 
 ## 7.1 Transport
 
@@ -232,11 +236,9 @@ Same framing as the main session protocol:
 - 4-byte little-endian length prefix
 - UTF-8 JSON payload
 
-## 7.3 Lane recommendation
+## 7.3 Recommendation
 
-### Recommendation
-
-Use an explicit lane message layer for routed bidirectional control.
+Use a narrow routed owner-control request/response flow.
 
 This keeps:
 
@@ -439,7 +441,7 @@ interface NestedClient {
 #### `attach(targetSocketPath)`
 
 - connects to `currentSocketPath`
-- sends `control_req { op: "owner_attach", path: targetSocketPath }`
+- sends `control_req { op: "owner_forward", request_id, action: { op: "attach", path: targetSocketPath } }`
 - waits for `control_res`
 - resolves on success
 - rejects on failure
@@ -447,7 +449,7 @@ interface NestedClient {
 #### `detach()`
 
 - connects to `currentSocketPath`
-- sends `control_req { op: "owner_detach" }`
+- sends `control_req { op: "owner_forward", request_id, action: { op: "detach" } }`
 - waits for `control_res`
 - resolves on success
 - rejects on failure
@@ -491,7 +493,7 @@ Use nested passthrough behavior:
 
 1. resolve target socket path
 2. create nested client using `MSR_SESSION`
-3. send `owner_attach`
+3. send `owner_forward(attach(target))`
 4. do not attempt direct nested attach if passthrough fails
 
 ## `msr detach`
@@ -505,7 +507,7 @@ Use direct/non-nested detach semantics if supported by the CLI surface.
 Use nested passthrough behavior:
 
 1. create nested client using `MSR_SESSION`
-2. send `owner_detach`
+2. send `owner_forward(detach)`
 3. do not fall back to anything that creates a nested interactive bridge
 
 ---
@@ -550,22 +552,22 @@ The session server currently knows:
 
 To support nested passthrough, extend it to:
 
-- recognize `owner_attach` and `owner_detach` on non-owner control connections
-- reject them with `no_owner_client` if no owner exists
-- route the request to the owner connection
-- wait for the forwarded result
-- return a `control_res` to the nested requester
+- recognize `control_req { op: "owner_forward", request_id, action }` on non-owner control connections
+- reject with `no_owner_client` if no owner exists
+- forward `owner_control_req` to the attached owner connection
+- wait for `owner_control_res`
+- return a final `control_res` to the nested requester
 
 ## 13.2 Correlation strategy
 
-Lane-local sequencing replaces the earlier ad hoc no-request-id routing idea.
+For v0, use a narrow routed owner-control request id on the short-lived requester RPC:
 
-Recommended v0 constraints:
+- requester sends `request_id`
+- server forwards that `request_id` inside `owner_control_req`
+- owner replies with matching `owner_control_res.request_id`
+- server resolves the pending routed request and returns final `control_res`
 
-- support multiple lanes in principle
-- but keep first implementation scope narrow to one lane kind: `owner_control`
-- preserve per-lane sequencing exactly as defined in `lane-messaging-protocol.md`
-- avoid broad routing concurrency until the first owner_control path is working cleanly
+Do not use generic lane sequencing for v0.
 
 This gives us explicit correlation without overbuilding the first implementation.
 

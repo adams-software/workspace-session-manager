@@ -224,10 +224,14 @@
 - That decision/execution split is now in `attach_runtime.zig`; current focus is to drive `test-attach-runtime` to green so the new middle layer becomes the default place to debug owner-control behavior.
 - Continuing operational cleanup in parallel: regularly killing stale Zig build/test processes so the environment stays usable while we iterate on the narrower middle test layer.
 - Checkpoint summary:
-  - lane-based nested owner-control direction remains the chosen architecture
-  - routed `owner_control.detach` is functionally proven through the real runtime path
-  - routed `owner_control.attach` exists but is not yet stabilized end-to-end
+  - generic lanes are no longer the preferred v0 architecture
+  - v0 should reset around one explicit owner + PTY stream + short-lived control RPC + narrow routed owner-control for nested `attach(target)` / `detach`
+  - routed `owner_control.detach` is functionally proven through the current prototype path
+  - routed `owner_control.attach` exists in prototype form but is not yet stabilized and should be reconsidered under the reset architecture
   - `attach_runtime` has been extracted and partially split into decision vs execution seams
   - a new narrow middle test layer exists (`test-attach-runtime`) and is becoming the preferred debugging surface over the heavier integration path
   - Zig build/test harness behavior in this environment is a real friction point and should influence how we structure future tests
 - Tightening the routed attach test to make runtime exit deterministic: tear down the switched-to target first, then join the owner runtime, instead of leaving an unbounded final join with no explicit reason to exit.
+- New pivot after the routed-attach hang: pause heavy end-to-end debugging and extract a model-first server transition layer for explicit owner/routed-request lifecycle tests, following the `server-implementation-feedback.md` recommendation to separate protocol/state decisions from socket/PTY IO.
+- Routed attach/detach now pass in the focused client integration target after tightening server/client/runtime boundaries, fixing the destination-server `no master fd while owner attached` bug, and fixing the routed-attach test harness so the runtime exclusively owns the attachment stream and the test observes output through a separate pipe.
+- Server now uses `server_model.Model` as canonical owner/pending state, old lane protocol code/spec has been removed from this repo, and the main v2 docs now present the routed owner-control v0 path instead of the earlier lane-first plan.

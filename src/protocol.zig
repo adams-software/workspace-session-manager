@@ -3,6 +3,11 @@ const c = @cImport({
     @cInclude("unistd.h");
 });
 
+pub const OwnerAction = struct {
+    op: []const u8,
+    path: ?[]const u8 = null,
+};
+
 pub const ControlReq = struct {
     op: []const u8,
     path: ?[]const u8 = null,
@@ -10,6 +15,8 @@ pub const ControlReq = struct {
     rows: ?u16 = null,
     signal: ?[]const u8 = null,
     mode: ?[]const u8 = null,
+    request_id: ?u32 = null,
+    action: ?OwnerAction = null,
 };
 
 pub const ControlValue = struct {
@@ -30,6 +37,17 @@ pub const ControlRes = struct {
     };
 };
 
+pub const OwnerControlReq = struct {
+    request_id: u32,
+    action: OwnerAction,
+};
+
+pub const OwnerControlRes = struct {
+    request_id: u32,
+    ok: bool,
+    err: ?ControlRes.ErrBody = null,
+};
+
 pub const DataMsg = struct {
     stream: []const u8,
     bytes_b64: []const u8,
@@ -41,30 +59,37 @@ pub const EventMsg = struct {
     signal: ?[]const u8 = null,
 };
 
-pub const LaneReqMsg = struct {
-    lane_id: []const u8,
-    lane_kind: []const u8,
-    req_type: []const u8,
-    seq: u32,
-    method: ?[]const u8 = null,
-    args_json: ?[]const u8 = null,
+pub const Message = union(enum) {
+    control_req: ControlReq,
+    control_res: ControlRes,
+    owner_control_req: OwnerControlReq,
+    owner_control_res: OwnerControlRes,
+    data: DataMsg,
+    event: EventMsg,
+
+    pub fn deinit(self: *Message, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .control_req => |*msg| freeControlReq(allocator, msg),
+            .control_res => |*msg| freeControlRes(allocator, msg),
+            .owner_control_req => |*msg| freeOwnerControlReq(allocator, msg),
+            .owner_control_res => |*msg| freeOwnerControlRes(allocator, msg),
+            .data => |*msg| freeDataMsg(allocator, msg),
+            .event => |*msg| freeEventMsg(allocator, msg),
+        }
+    }
 };
 
-pub const LaneResMsg = struct {
-    lane_id: []const u8,
-    res_type: []const u8,
-    seq: u32,
-    value_json: ?[]const u8 = null,
-    error_json: ?[]const u8 = null,
-    meta_json: ?[]const u8 = null,
-    chunk_json: ?[]const u8 = null,
-};
+pub fn freeOwnerAction(allocator: std.mem.Allocator, action: *OwnerAction) void {
+    allocator.free(@constCast(action.op));
+    if (action.path) |v| allocator.free(@constCast(v));
+}
 
 pub fn freeControlReq(allocator: std.mem.Allocator, req: *ControlReq) void {
     allocator.free(@constCast(req.op));
     if (req.path) |v| allocator.free(@constCast(v));
     if (req.signal) |v| allocator.free(@constCast(v));
     if (req.mode) |v| allocator.free(@constCast(v));
+    if (req.action) |*action| freeOwnerAction(allocator, action);
 }
 
 pub fn freeControlRes(allocator: std.mem.Allocator, res: *ControlRes) void {
@@ -72,6 +97,17 @@ pub fn freeControlRes(allocator: std.mem.Allocator, res: *ControlRes) void {
         if (v.status) |s| allocator.free(@constCast(s));
         if (v.signal) |s| allocator.free(@constCast(s));
     }
+    if (res.err) |*e| {
+        allocator.free(@constCast(e.code));
+        if (e.message) |m| allocator.free(@constCast(m));
+    }
+}
+
+pub fn freeOwnerControlReq(allocator: std.mem.Allocator, req: *OwnerControlReq) void {
+    freeOwnerAction(allocator, &req.action);
+}
+
+pub fn freeOwnerControlRes(allocator: std.mem.Allocator, res: *OwnerControlRes) void {
     if (res.err) |*e| {
         allocator.free(@constCast(e.code));
         if (e.message) |m| allocator.free(@constCast(m));
@@ -86,23 +122,6 @@ pub fn freeDataMsg(allocator: std.mem.Allocator, msg: *DataMsg) void {
 pub fn freeEventMsg(allocator: std.mem.Allocator, msg: *EventMsg) void {
     allocator.free(@constCast(msg.kind));
     if (msg.signal) |s| allocator.free(@constCast(s));
-}
-
-pub fn freeLaneReqMsg(allocator: std.mem.Allocator, msg: *LaneReqMsg) void {
-    allocator.free(@constCast(msg.lane_id));
-    allocator.free(@constCast(msg.lane_kind));
-    allocator.free(@constCast(msg.req_type));
-    if (msg.method) |v| allocator.free(@constCast(v));
-    if (msg.args_json) |v| allocator.free(@constCast(v));
-}
-
-pub fn freeLaneResMsg(allocator: std.mem.Allocator, msg: *LaneResMsg) void {
-    allocator.free(@constCast(msg.lane_id));
-    allocator.free(@constCast(msg.res_type));
-    if (msg.value_json) |v| allocator.free(@constCast(v));
-    if (msg.error_json) |v| allocator.free(@constCast(v));
-    if (msg.meta_json) |v| allocator.free(@constCast(v));
-    if (msg.chunk_json) |v| allocator.free(@constCast(v));
 }
 
 pub fn writeFrame(fd: c_int, bytes: []const u8) !void {
@@ -125,47 +144,159 @@ pub fn readFrame(allocator: std.mem.Allocator, fd: c_int, max_len: usize) ![]u8 
 }
 
 pub fn encodeControlReq(allocator: std.mem.Allocator, req: ControlReq) ![]u8 {
-    const env = .{ .type = "control_req", .payload = req };
-    return std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(env, .{})});
+    return encodeMessage(allocator, .{ .control_req = req });
 }
 
 pub fn encodeControlRes(allocator: std.mem.Allocator, res: ControlRes) ![]u8 {
-    const env = .{ .type = "control_res", .payload = res };
-    return std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(env, .{})});
+    return encodeMessage(allocator, .{ .control_res = res });
+}
+
+pub fn encodeOwnerControlReq(allocator: std.mem.Allocator, req: OwnerControlReq) ![]u8 {
+    return encodeMessage(allocator, .{ .owner_control_req = req });
+}
+
+pub fn encodeOwnerControlRes(allocator: std.mem.Allocator, res: OwnerControlRes) ![]u8 {
+    return encodeMessage(allocator, .{ .owner_control_res = res });
+}
+
+pub fn encodeDataMsg(allocator: std.mem.Allocator, msg: DataMsg) ![]u8 {
+    return encodeMessage(allocator, .{ .data = msg });
+}
+
+pub fn encodeEventMsg(allocator: std.mem.Allocator, msg: EventMsg) ![]u8 {
+    return encodeMessage(allocator, .{ .event = msg });
 }
 
 pub fn parseControlReq(allocator: std.mem.Allocator, bytes: []const u8) !ControlReq {
-    const Env = struct {
-        type: []const u8,
-        payload: ControlReq,
-    };
-    var parsed = try std.json.parseFromSlice(Env, allocator, bytes, .{ .ignore_unknown_fields = true });
-    defer parsed.deinit();
-    if (!std.mem.eql(u8, parsed.value.type, "control_req")) return error.BadMessageType;
-
-    const p = parsed.value.payload;
-    return .{
-        .op = try allocator.dupe(u8, p.op),
-        .path = if (p.path) |v| try allocator.dupe(u8, v) else null,
-        .cols = p.cols,
-        .rows = p.rows,
-        .signal = if (p.signal) |v| try allocator.dupe(u8, v) else null,
-        .mode = if (p.mode) |v| try allocator.dupe(u8, v) else null,
+    var msg = try parseMessage(allocator, bytes);
+    errdefer msg.deinit(allocator);
+    return switch (msg) {
+        .control_req => |req| req,
+        else => error.BadMessageType,
     };
 }
 
 pub fn parseControlRes(allocator: std.mem.Allocator, bytes: []const u8) !ControlRes {
+    var msg = try parseMessage(allocator, bytes);
+    errdefer msg.deinit(allocator);
+    return switch (msg) {
+        .control_res => |res| res,
+        else => error.BadMessageType,
+    };
+}
+
+pub fn parseOwnerControlReq(allocator: std.mem.Allocator, bytes: []const u8) !OwnerControlReq {
+    var msg = try parseMessage(allocator, bytes);
+    errdefer msg.deinit(allocator);
+    return switch (msg) {
+        .owner_control_req => |req| req,
+        else => error.BadMessageType,
+    };
+}
+
+pub fn parseOwnerControlRes(allocator: std.mem.Allocator, bytes: []const u8) !OwnerControlRes {
+    var msg = try parseMessage(allocator, bytes);
+    errdefer msg.deinit(allocator);
+    return switch (msg) {
+        .owner_control_res => |res| res,
+        else => error.BadMessageType,
+    };
+}
+
+pub fn parseDataMsg(allocator: std.mem.Allocator, bytes: []const u8) !DataMsg {
+    var msg = try parseMessage(allocator, bytes);
+    errdefer msg.deinit(allocator);
+    return switch (msg) {
+        .data => |data| data,
+        else => error.BadMessageType,
+    };
+}
+
+pub fn parseEventMsg(allocator: std.mem.Allocator, bytes: []const u8) !EventMsg {
+    var msg = try parseMessage(allocator, bytes);
+    errdefer msg.deinit(allocator);
+    return switch (msg) {
+        .event => |event| event,
+        else => error.BadMessageType,
+    };
+}
+
+pub fn encodeMessage(allocator: std.mem.Allocator, msg: Message) ![]u8 {
+    return switch (msg) {
+        .control_req => |payload| encodeEnvelope(allocator, "control_req", payload),
+        .control_res => |payload| encodeEnvelope(allocator, "control_res", payload),
+        .owner_control_req => |payload| encodeEnvelope(allocator, "owner_control_req", payload),
+        .owner_control_res => |payload| encodeEnvelope(allocator, "owner_control_res", payload),
+        .data => |payload| encodeEnvelope(allocator, "data", payload),
+        .event => |payload| encodeEnvelope(allocator, "event", payload),
+    };
+}
+
+pub fn parseMessage(allocator: std.mem.Allocator, bytes: []const u8) !Message {
+    const EnvType = struct { type: []const u8 };
+    var parsed = try std.json.parseFromSlice(EnvType, allocator, bytes, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+
+    if (std.mem.eql(u8, parsed.value.type, "control_req")) {
+        return .{ .control_req = try parseEnvelopePayload(ControlReq, cloneControlReq, allocator, bytes, "control_req") };
+    }
+    if (std.mem.eql(u8, parsed.value.type, "control_res")) {
+        return .{ .control_res = try parseEnvelopePayload(ControlRes, cloneControlRes, allocator, bytes, "control_res") };
+    }
+    if (std.mem.eql(u8, parsed.value.type, "owner_control_req")) {
+        return .{ .owner_control_req = try parseEnvelopePayload(OwnerControlReq, cloneOwnerControlReq, allocator, bytes, "owner_control_req") };
+    }
+    if (std.mem.eql(u8, parsed.value.type, "owner_control_res")) {
+        return .{ .owner_control_res = try parseEnvelopePayload(OwnerControlRes, cloneOwnerControlRes, allocator, bytes, "owner_control_res") };
+    }
+    if (std.mem.eql(u8, parsed.value.type, "data")) {
+        return .{ .data = try parseEnvelopePayload(DataMsg, cloneDataMsg, allocator, bytes, "data") };
+    }
+    if (std.mem.eql(u8, parsed.value.type, "event")) {
+        return .{ .event = try parseEnvelopePayload(EventMsg, cloneEventMsg, allocator, bytes, "event") };
+    }
+    return error.BadMessageType;
+}
+
+fn encodeEnvelope(allocator: std.mem.Allocator, comptime type_name: []const u8, payload: anytype) ![]u8 {
+    const env = .{ .type = type_name, .payload = payload };
+    return std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(env, .{})});
+}
+
+fn parseEnvelopePayload(comptime T: type, comptime cloneFn: fn (std.mem.Allocator, T) anyerror!T, allocator: std.mem.Allocator, bytes: []const u8, comptime expected_type: []const u8) !T {
     const Env = struct {
         type: []const u8,
-        payload: ControlRes,
+        payload: T,
     };
     var parsed = try std.json.parseFromSlice(Env, allocator, bytes, .{ .ignore_unknown_fields = true });
     defer parsed.deinit();
-    if (!std.mem.eql(u8, parsed.value.type, "control_res")) return error.BadMessageType;
+    if (!std.mem.eql(u8, parsed.value.type, expected_type)) return error.BadMessageType;
+    return try cloneFn(allocator, parsed.value.payload);
+}
 
-    const p = parsed.value.payload;
-    var out: ControlRes = .{ .ok = p.ok, .value = null, .err = null };
-    if (p.value) |v| {
+fn cloneOwnerAction(allocator: std.mem.Allocator, action: OwnerAction) !OwnerAction {
+    return .{
+        .op = try allocator.dupe(u8, action.op),
+        .path = if (action.path) |v| try allocator.dupe(u8, v) else null,
+    };
+}
+
+fn cloneControlReq(allocator: std.mem.Allocator, req: ControlReq) !ControlReq {
+    return .{
+        .op = try allocator.dupe(u8, req.op),
+        .path = if (req.path) |v| try allocator.dupe(u8, v) else null,
+        .cols = req.cols,
+        .rows = req.rows,
+        .signal = if (req.signal) |v| try allocator.dupe(u8, v) else null,
+        .mode = if (req.mode) |v| try allocator.dupe(u8, v) else null,
+        .request_id = req.request_id,
+        .action = if (req.action) |action| try cloneOwnerAction(allocator, action) else null,
+    };
+}
+
+fn cloneControlRes(allocator: std.mem.Allocator, res: ControlRes) !ControlRes {
+    var out: ControlRes = .{ .ok = res.ok, .value = null, .err = null };
+    if (res.value) |v| {
         out.value = .{
             .exists = v.exists,
             .status = if (v.status) |s| try allocator.dupe(u8, s) else null,
@@ -173,7 +304,7 @@ pub fn parseControlRes(allocator: std.mem.Allocator, bytes: []const u8) !Control
             .signal = if (v.signal) |s| try allocator.dupe(u8, s) else null,
         };
     }
-    if (p.err) |e| {
+    if (res.err) |e| {
         out.err = .{
             .code = try allocator.dupe(u8, e.code),
             .message = if (e.message) |m| try allocator.dupe(u8, m) else null,
@@ -182,93 +313,36 @@ pub fn parseControlRes(allocator: std.mem.Allocator, bytes: []const u8) !Control
     return out;
 }
 
-pub fn encodeDataMsg(allocator: std.mem.Allocator, msg: DataMsg) ![]u8 {
-    const env = .{ .type = "data", .payload = msg };
-    return std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(env, .{})});
-}
-
-pub fn parseDataMsg(allocator: std.mem.Allocator, bytes: []const u8) !DataMsg {
-    const Env = struct {
-        type: []const u8,
-        payload: DataMsg,
-    };
-    var parsed = try std.json.parseFromSlice(Env, allocator, bytes, .{ .ignore_unknown_fields = true });
-    defer parsed.deinit();
-    if (!std.mem.eql(u8, parsed.value.type, "data")) return error.BadMessageType;
-    const p = parsed.value.payload;
+fn cloneOwnerControlReq(allocator: std.mem.Allocator, req: OwnerControlReq) !OwnerControlReq {
     return .{
-        .stream = try allocator.dupe(u8, p.stream),
-        .bytes_b64 = try allocator.dupe(u8, p.bytes_b64),
+        .request_id = req.request_id,
+        .action = try cloneOwnerAction(allocator, req.action),
     };
 }
 
-pub fn encodeEventMsg(allocator: std.mem.Allocator, msg: EventMsg) ![]u8 {
-    const env = .{ .type = "event", .payload = msg };
-    return std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(env, .{})});
-}
-
-pub fn encodeLaneReqMsg(allocator: std.mem.Allocator, msg: LaneReqMsg) ![]u8 {
-    const env = .{ .type = "lane_req", .payload = msg };
-    return std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(env, .{})});
-}
-
-pub fn encodeLaneResMsg(allocator: std.mem.Allocator, msg: LaneResMsg) ![]u8 {
-    const env = .{ .type = "lane_res", .payload = msg };
-    return std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(env, .{})});
-}
-
-pub fn parseEventMsg(allocator: std.mem.Allocator, bytes: []const u8) !EventMsg {
-    const Env = struct {
-        type: []const u8,
-        payload: EventMsg,
-    };
-    var parsed = try std.json.parseFromSlice(Env, allocator, bytes, .{ .ignore_unknown_fields = true });
-    defer parsed.deinit();
-    if (!std.mem.eql(u8, parsed.value.type, "event")) return error.BadMessageType;
-    const p = parsed.value.payload;
+fn cloneOwnerControlRes(allocator: std.mem.Allocator, res: OwnerControlRes) !OwnerControlRes {
     return .{
-        .kind = try allocator.dupe(u8, p.kind),
-        .code = p.code,
-        .signal = if (p.signal) |s| try allocator.dupe(u8, s) else null,
+        .request_id = res.request_id,
+        .ok = res.ok,
+        .err = if (res.err) |e| .{
+            .code = try allocator.dupe(u8, e.code),
+            .message = if (e.message) |m| try allocator.dupe(u8, m) else null,
+        } else null,
     };
 }
 
-pub fn parseLaneReqMsg(allocator: std.mem.Allocator, bytes: []const u8) !LaneReqMsg {
-    const Env = struct {
-        type: []const u8,
-        payload: LaneReqMsg,
-    };
-    var parsed = try std.json.parseFromSlice(Env, allocator, bytes, .{ .ignore_unknown_fields = true });
-    defer parsed.deinit();
-    if (!std.mem.eql(u8, parsed.value.type, "lane_req")) return error.BadMessageType;
-    const p = parsed.value.payload;
+fn cloneDataMsg(allocator: std.mem.Allocator, msg: DataMsg) !DataMsg {
     return .{
-        .lane_id = try allocator.dupe(u8, p.lane_id),
-        .lane_kind = try allocator.dupe(u8, p.lane_kind),
-        .req_type = try allocator.dupe(u8, p.req_type),
-        .seq = p.seq,
-        .method = if (p.method) |v| try allocator.dupe(u8, v) else null,
-        .args_json = if (p.args_json) |v| try allocator.dupe(u8, v) else null,
+        .stream = try allocator.dupe(u8, msg.stream),
+        .bytes_b64 = try allocator.dupe(u8, msg.bytes_b64),
     };
 }
 
-pub fn parseLaneResMsg(allocator: std.mem.Allocator, bytes: []const u8) !LaneResMsg {
-    const Env = struct {
-        type: []const u8,
-        payload: LaneResMsg,
-    };
-    var parsed = try std.json.parseFromSlice(Env, allocator, bytes, .{ .ignore_unknown_fields = true });
-    defer parsed.deinit();
-    if (!std.mem.eql(u8, parsed.value.type, "lane_res")) return error.BadMessageType;
-    const p = parsed.value.payload;
+fn cloneEventMsg(allocator: std.mem.Allocator, msg: EventMsg) !EventMsg {
     return .{
-        .lane_id = try allocator.dupe(u8, p.lane_id),
-        .res_type = try allocator.dupe(u8, p.res_type),
-        .seq = p.seq,
-        .value_json = if (p.value_json) |v| try allocator.dupe(u8, v) else null,
-        .error_json = if (p.error_json) |v| try allocator.dupe(u8, v) else null,
-        .meta_json = if (p.meta_json) |v| try allocator.dupe(u8, v) else null,
-        .chunk_json = if (p.chunk_json) |v| try allocator.dupe(u8, v) else null,
+        .kind = try allocator.dupe(u8, msg.kind),
+        .code = msg.code,
+        .signal = if (msg.signal) |s| try allocator.dupe(u8, s) else null,
     };
 }
 
@@ -318,6 +392,21 @@ test "protocol encode/decode control request" {
     try std.testing.expectEqualStrings("/tmp/s1.sock", out.path.?);
 }
 
+test "protocol encode/decode owner_forward control request" {
+    const req = ControlReq{ .op = "owner_forward", .request_id = 42, .action = .{ .op = "attach", .path = "/tmp/target.msr" } };
+    const payload = try encodeControlReq(std.testing.allocator, req);
+    defer std.testing.allocator.free(payload);
+
+    var out = try parseControlReq(std.testing.allocator, payload);
+    defer freeControlReq(std.testing.allocator, &out);
+    try std.testing.expectEqualStrings("owner_forward", out.op);
+    try std.testing.expectEqual(@as(?u32, 42), out.request_id);
+    try std.testing.expect(out.action != null);
+    try std.testing.expectEqualStrings("attach", out.action.?.op);
+    try std.testing.expect(out.action.?.path != null);
+    try std.testing.expectEqualStrings("/tmp/target.msr", out.action.?.path.?);
+}
+
 test "protocol encode/decode control response with value" {
     const res = ControlRes{ .ok = true, .value = .{ .exists = true, .status = "running" } };
     const payload = try encodeControlRes(std.testing.allocator, res);
@@ -333,6 +422,46 @@ test "protocol encode/decode control response with value" {
     try std.testing.expectEqualStrings("running", out.value.?.status.?);
 }
 
+test "protocol encode/decode owner control request" {
+    const msg = OwnerControlReq{ .request_id = 7, .action = .{ .op = "detach" } };
+    const payload = try encodeOwnerControlReq(std.testing.allocator, msg);
+    defer std.testing.allocator.free(payload);
+
+    var out = try parseOwnerControlReq(std.testing.allocator, payload);
+    defer freeOwnerControlReq(std.testing.allocator, &out);
+    try std.testing.expectEqual(@as(u32, 7), out.request_id);
+    try std.testing.expectEqualStrings("detach", out.action.op);
+}
+
+test "protocol encode/decode owner control response" {
+    const msg = OwnerControlRes{ .request_id = 7, .ok = false, .err = .{ .code = "attach_conflict", .message = "owner already attached" } };
+    const payload = try encodeOwnerControlRes(std.testing.allocator, msg);
+    defer std.testing.allocator.free(payload);
+
+    var out = try parseOwnerControlRes(std.testing.allocator, payload);
+    defer freeOwnerControlRes(std.testing.allocator, &out);
+    try std.testing.expectEqual(@as(u32, 7), out.request_id);
+    try std.testing.expect(!out.ok);
+    try std.testing.expect(out.err != null);
+    try std.testing.expectEqualStrings("attach_conflict", out.err.?.code);
+    try std.testing.expectEqualStrings("owner already attached", out.err.?.message.?);
+}
+
+test "protocol parseMessage identifies unified message variants" {
+    const payload = try encodeOwnerControlReq(std.testing.allocator, .{ .request_id = 9, .action = .{ .op = "detach" } });
+    defer std.testing.allocator.free(payload);
+
+    var msg = try parseMessage(std.testing.allocator, payload);
+    defer msg.deinit(std.testing.allocator);
+    switch (msg) {
+        .owner_control_req => |req| {
+            try std.testing.expectEqual(@as(u32, 9), req.request_id);
+            try std.testing.expectEqualStrings("detach", req.action.op);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
 test "protocol encode/decode event message" {
     const msg = EventMsg{ .kind = "session_exit", .code = 0 };
     const payload = try encodeEventMsg(std.testing.allocator, msg);
@@ -342,31 +471,4 @@ test "protocol encode/decode event message" {
     defer freeEventMsg(std.testing.allocator, &out);
     try std.testing.expectEqualStrings("session_exit", out.kind);
     try std.testing.expectEqual(@as(?i32, 0), out.code);
-}
-
-test "protocol encode/decode lane request message" {
-    const msg = LaneReqMsg{ .lane_id = "l1", .lane_kind = "owner_control", .req_type = "call", .seq = 1, .method = "attach", .args_json = "{\"path\":\"/tmp/target.msr\"}" };
-    const payload = try encodeLaneReqMsg(std.testing.allocator, msg);
-    defer std.testing.allocator.free(payload);
-
-    var out = try parseLaneReqMsg(std.testing.allocator, payload);
-    defer freeLaneReqMsg(std.testing.allocator, &out);
-    try std.testing.expectEqualStrings("l1", out.lane_id);
-    try std.testing.expectEqualStrings("owner_control", out.lane_kind);
-    try std.testing.expectEqualStrings("call", out.req_type);
-    try std.testing.expectEqual(@as(u32, 1), out.seq);
-    try std.testing.expectEqualStrings("attach", out.method.?);
-}
-
-test "protocol encode/decode lane response message" {
-    const msg = LaneResMsg{ .lane_id = "l1", .res_type = "return", .seq = 1, .value_json = "{}" };
-    const payload = try encodeLaneResMsg(std.testing.allocator, msg);
-    defer std.testing.allocator.free(payload);
-
-    var out = try parseLaneResMsg(std.testing.allocator, payload);
-    defer freeLaneResMsg(std.testing.allocator, &out);
-    try std.testing.expectEqualStrings("l1", out.lane_id);
-    try std.testing.expectEqualStrings("return", out.res_type);
-    try std.testing.expectEqual(@as(u32, 1), out.seq);
-    try std.testing.expectEqualStrings("{}", out.value_json.?);
 }

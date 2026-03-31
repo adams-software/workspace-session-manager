@@ -655,23 +655,20 @@ So `exists` is part of the CLI surface, but not part of the control dispatcher i
 
 ---
 
-## Recommended next protocol extensions
+## Current routed owner-control extension
 
-The currently recommended next extension is **minimal lane messaging for routed bidirectional control**, while keeping the existing transport/framing, PTY `data` messages, and one-shot `control_req` / `control_res` RPC intact.
+The current v0 extension for nested passthrough and server-routed owner control is a **narrow forwarded owner-control flow**, while keeping the existing transport/framing, PTY `data` messages, and one-shot `control_req` / `control_res` RPC intact.
 
-### Why lanes are now recommended
+### Current routed flow
 
-Nested passthrough and server->owner initiated control exposed a real limitation in the current ad hoc control model:
+- requester sends `control_req { op: "owner_forward", request_id, action }`
+- server forwards `owner_control_req` to the attached owner connection
+- owner replies with `owner_control_res`
+- server resolves the pending routed request and returns final `control_res`
 
-- PTY stream traffic is free-running
-- direct control RPC is simple request/response
-- routed owner control needs correlation, directionality, and server-initiated sub-conversations
+### Scope
 
-A minimal lane layer solves that without requiring a full protocol replacement.
-
-### Recommended scope of the lane pivot
-
-Keep unchanged for now:
+Keep unchanged:
 
 - current transport
 - current framing
@@ -681,31 +678,19 @@ Keep unchanged for now:
 
 Add narrowly:
 
-- explicit lane message envelopes for routed/bidirectional control
-- first lane kind: `owner_control`
+- routed owner-control correlation by `request_id`
+- owner-stream messages `owner_control_req` / `owner_control_res`
 
-### Recommended first lane use case
+### Current supported routed actions
 
-Nested passthrough should move to a lane-based control flow:
+For v0, routed owner control supports only:
 
-- nested client opens an `owner_control` lane to current session server
-- server opens a corresponding `owner_control` lane to the current outer attached client
-- server routes turn-based lane traffic between them
-- outer client performs attach/detach and responds on the lane
-
-### Architectural note
-
-This is still an evolution of the existing protocol, not a second protocol stack:
-
-- current transport stays
-- current framing stays
-- `data` stays the PTY stream carrier
-- `control_req` / `control_res` remain valid for simple one-shot RPC
-- lanes are added only where the old control model stops being sufficient
+- `attach(target)`
+- `detach`
 
 See also:
-- `lane-messaging-protocol.md`
 - `session-nested-client.md`
+- `routed-owner-control-v0.md`
 
 ## Non-goals / not yet implemented
 
@@ -718,8 +703,7 @@ The current control RPC does not yet define or implement:
 - control op for `exists`
 - token/session-id based ownership independent of connection fd
 - global discovery, switching, or workspace semantics
-- minimal explicit lane messaging for routed control (recommended next, but not yet implemented)
-- lane-based nested passthrough over an `owner_control` lane kind (recommended next, but not yet implemented)
+- broader multiparty routed control beyond narrow owner attach/detach
 
 ---
 

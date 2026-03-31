@@ -37,6 +37,14 @@ pub fn build(b: *std.Build) void {
     });
     server_mod.addImport("host", host_mod);
     server_mod.addImport("protocol", protocol_mod);
+    const server_model_mod = b.createModule(.{
+        .root_source_file = b.path("src/server_model.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    server_model_mod.addImport("protocol", protocol_mod);
+    server_mod.addImport("server_model", server_model_mod);
 
     const attach_runtime_mod = b.addModule("attach_runtime", .{
         .root_source_file = b.path("src/attach_runtime.zig"),
@@ -92,6 +100,7 @@ pub fn build(b: *std.Build) void {
     });
     server_test_root.addImport("host", host_mod);
     server_test_root.addImport("protocol", protocol_mod);
+    server_test_root.addImport("server_model", server_model_mod);
     const server_tests = b.addTest(.{
         .root_module = server_test_root,
     });
@@ -139,12 +148,24 @@ pub fn build(b: *std.Build) void {
         .root_module = attach_runtime_logic_root,
     });
 
+    const server_model_test_root = b.createModule(.{
+        .root_source_file = b.path("src/server_model.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    server_model_test_root.addImport("protocol", protocol_mod);
+    const server_model_tests = b.addTest(.{
+        .root_module = server_model_test_root,
+    });
+
     const run_host_tests = b.addRunArtifact(host_tests);
     const run_protocol_tests = b.addRunArtifact(protocol_tests);
     const run_server_tests = b.addRunArtifact(server_tests);
     const run_client_tests = b.addRunArtifact(client_tests);
     const run_client_integration_tests = b.addRunArtifact(client_integration_tests);
     const run_attach_runtime_logic_tests = b.addRunArtifact(attach_runtime_logic_tests);
+    const run_server_model_tests = b.addRunArtifact(server_model_tests);
 
     const test_step = b.step("test", "Run v2 tests");
     test_step.dependOn(&run_host_tests.step);
@@ -153,6 +174,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_client_tests.step);
     test_step.dependOn(&run_client_integration_tests.step);
     test_step.dependOn(&run_attach_runtime_logic_tests.step);
+    test_step.dependOn(&run_server_model_tests.step);
 
     const test_host_step = b.step("test-host", "Run host module tests");
     test_host_step.dependOn(&run_host_tests.step);
@@ -169,6 +191,9 @@ pub fn build(b: *std.Build) void {
 
     const test_attach_runtime_logic_step = b.step("test-attach-runtime", "Run attach runtime logic tests");
     test_attach_runtime_logic_step.dependOn(&run_attach_runtime_logic_tests.step);
+
+    const test_server_model_step = b.step("test-server-model", "Run server model transition tests");
+    test_server_model_step.dependOn(&run_server_model_tests.step);
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());

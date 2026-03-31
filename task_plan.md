@@ -16,7 +16,8 @@ Realign `msr` implementation to the v2 specs, treating `docs/specs/v2/*` as sour
 | 7. Remove obsolete manager/app/nav architecture | complete | Dead legacy cluster deleted; `lib.zig`/`rpc.zig` also removed; active repo surface is now v2-only |
 | 8. Implement DSM shell layer | in_progress | Core wrapper exists and is smoke-tested; traversal/nested-switch semantics remain open pending better runtime state modeling |
 | 9. Implement WSM shell layer | todo | Recursive discovery and deterministic jump over DSM-style nodes |
-| 10. Research spike: attach runtime state machine + testing strategy | in_progress | Pause feature grind and explicitly model attach-runtime states/transitions + layered test strategy before pushing further on routed attach |
+| 10. Research spike: attach runtime state machine + testing strategy | done | Completed enough to conclude v0 should drop generic lanes and reset around one owner + PTY stream + narrow routed owner-control RPC |
+| 11. Reset v0 protocol/runtime around narrow routed owner-control RPC | in_progress | Drop lanes for v0, freeze nested attach/detach only, add unified message layer, explicit owner session state, centralized owner cleanup, minimal NestedClient, and a model-first server transition layer for owner/routed-request lifecycle tests; routed detach + routed attach now pass in the focused integration path, server_model is canonical in server, and the main docs now reflect the routed owner-control v0 path |
 
 ## Success criteria
 - Code structure matches v2 docs rather than the older runtime/manager/app split.

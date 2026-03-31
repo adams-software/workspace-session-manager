@@ -65,6 +65,16 @@ pub const SessionClient = struct {
         if (!res.ok) return Error.ProtocolError;
     }
 
+    pub fn ownerForward(self: *SessionClient, action: protocol.OwnerAction) !void {
+        var res = try rpcCall(self.allocator, self.socket_path, .{ .op = "owner_forward", .request_id = 1, .action = action });
+        defer protocol.freeControlRes(self.allocator, &res);
+        if (!res.ok) return Error.ProtocolError;
+    }
+
+    pub fn requestOwnerDetach(self: *SessionClient) !void {
+        return self.ownerForward(.{ .op = "detach" });
+    }
+
     pub fn attach(self: *SessionClient, mode: AttachMode) !SessionAttachment {
         const fd = try connectUnix(self.socket_path);
         errdefer _ = c.close(fd);
@@ -99,16 +109,50 @@ pub const SessionAttachment = struct {
     }
 
     pub fn readDataFrame(self: *SessionAttachment) ![]u8 {
+        var msg = try self.readMessage();
+        errdefer msg.deinit(self.allocator);
+        return switch (msg) {
+            .data => |data_msg| blk: {
+                const decoded_len = try std.base64.standard.Decoder.calcSizeForSlice(data_msg.bytes_b64);
+                const decoded = try self.allocator.alloc(u8, decoded_len);
+                errdefer self.allocator.free(decoded);
+                try std.base64.standard.Decoder.decode(decoded, data_msg.bytes_b64);
+                break :blk decoded;
+            },
+            else => {
+                msg.deinit(self.allocator);
+                return Error.ProtocolError;
+            },
+        };
+    }
+
+    pub fn readMessage(self: *SessionAttachment) !protocol.Message {
         const frame = try self.readFrameOwned();
-        errdefer self.allocator.free(frame);
-        var msg = try protocol.parseDataMsg(self.allocator, frame);
-        defer protocol.freeDataMsg(self.allocator, &msg);
-        const decoded_len = try std.base64.standard.Decoder.calcSizeForSlice(msg.bytes_b64);
-        const decoded = try self.allocator.alloc(u8, decoded_len);
-        errdefer self.allocator.free(decoded);
-        try std.base64.standard.Decoder.decode(decoded, msg.bytes_b64);
-        self.allocator.free(frame);
-        return decoded;
+        defer self.allocator.free(frame);
+        return protocol.parseMessage(self.allocator, frame) catch return Error.ProtocolError;
+    }
+
+    pub fn readOwnerControlReq(self: *SessionAttachment) !protocol.OwnerControlReq {
+        var msg = try self.readMessage();
+        errdefer msg.deinit(self.allocator);
+        return switch (msg) {
+            .owner_control_req => |req| req,
+            else => {
+                msg.deinit(self.allocator);
+                return Error.ProtocolError;
+            },
+        };
+    }
+
+    pub fn replyOwnerControl(self: *SessionAttachment, request_id: u32, ok: bool, err_code: ?[]const u8) !void {
+        const res = protocol.OwnerControlRes{
+            .request_id = request_id,
+            .ok = ok,
+            .err = if (err_code) |code| .{ .code = code } else null,
+        };
+        const bytes = try protocol.encodeOwnerControlRes(self.allocator, res);
+        defer self.allocator.free(bytes);
+        try protocol.writeFrame(self.fd, bytes);
     }
 
     pub fn write(self: *SessionAttachment, data: []const u8) !void {
@@ -182,4 +226,3 @@ pub fn rpcCall(allocator: std.mem.Allocator, path: []const u8, req_msg: protocol
 
     return protocol.parseControlRes(allocator, res_bytes) catch return error.ProtocolError;
 }
-

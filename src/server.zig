@@ -1,6 +1,7 @@
 const std = @import("std");
 const host = @import("host");
 const protocol = @import("protocol");
+const server_model = @import("server_model");
 const c = @cImport({
     @cInclude("sys/socket.h");
     @cInclude("sys/un.h");
@@ -29,26 +30,8 @@ pub const ServerState = enum {
     stopped,
 };
 
-pub const ConnectionKind = enum {
-    control,
-    attached_owner,
-};
-
 pub const Connection = struct {
     fd: c_int,
-    kind: ConnectionKind,
-};
-
-pub const PendingLane = struct {
-    requester_fd: c_int,
-    lane_id: []u8,
-    lane_kind: []u8,
-    seq: u32,
-};
-
-pub const CoordinatorState = struct {
-    owner_fd: ?c_int = null,
-    shutting_down: bool = false,
 };
 
 pub const SessionServer = struct {
@@ -57,8 +40,8 @@ pub const SessionServer = struct {
     state: ServerState,
     listener_fd: ?c_int,
     socket_path: ?[]u8,
-    coordinator: CoordinatorState,
-    pending_lane: ?PendingLane,
+    model: server_model.Model,
+    shutting_down: bool,
 
     pub fn init(allocator: std.mem.Allocator, session_host: *host.SessionHost) SessionServer {
         return .{
@@ -67,21 +50,14 @@ pub const SessionServer = struct {
             .state = .created,
             .listener_fd = null,
             .socket_path = null,
-            .coordinator = .{},
-            .pending_lane = null,
+            .model = .{},
+            .shutting_down = false,
         };
     }
 
     pub fn deinit(self: *SessionServer) void {
-        if (self.pending_lane) |pl| {
-            self.allocator.free(pl.lane_id);
-            self.allocator.free(pl.lane_kind);
-            self.pending_lane = null;
-        }
-        if (self.coordinator.owner_fd) |fd| {
-            _ = c.close(fd);
-            self.coordinator.owner_fd = null;
-        }
+        self.dropOwner(null);
+        self.model.deinit(self.allocator);
         if (self.listener_fd) |fd| {
             _ = c.close(fd);
             self.listener_fd = null;
@@ -160,8 +136,28 @@ pub const SessionServer = struct {
         return fd;
     }
 
+    fn ownerFd(self: *const SessionServer) ?c_int {
+        return switch (self.model.owner) {
+            .none => null,
+            .attached => |owner| @intCast(owner.fd),
+        };
+    }
+
+    fn ownerPending(self: *const SessionServer) ?server_model.ForwardedOwnerReq {
+        return switch (self.model.owner) {
+            .none => null,
+            .attached => |owner| owner.pending,
+        };
+    }
+
     fn writeControlRes(allocator: std.mem.Allocator, client_fd: c_int, res: protocol.ControlRes) Error!void {
         const bytes = protocol.encodeControlRes(allocator, res) catch return Error.ProtocolError;
+        defer allocator.free(bytes);
+        protocol.writeFrame(client_fd, bytes) catch return Error.IoError;
+    }
+
+    fn writeOwnerControlReq(allocator: std.mem.Allocator, client_fd: c_int, req: protocol.OwnerControlReq) Error!void {
+        const bytes = protocol.encodeOwnerControlReq(allocator, req) catch return Error.ProtocolError;
         defer allocator.free(bytes);
         protocol.writeFrame(client_fd, bytes) catch return Error.IoError;
     }
@@ -177,16 +173,22 @@ pub const SessionServer = struct {
         protocol.writeFrame(client_fd, payload) catch return Error.IoError;
     }
 
-    fn writeLaneRes(allocator: std.mem.Allocator, client_fd: c_int, res: protocol.LaneResMsg) Error!void {
-        const bytes = protocol.encodeLaneResMsg(allocator, res) catch return Error.ProtocolError;
-        defer allocator.free(bytes);
-        protocol.writeFrame(client_fd, bytes) catch return Error.IoError;
+    fn applyModelAction(self: *SessionServer, action: server_model.Action) Error!void {
+        switch (action) {
+            .send_control_res => |payload| try writeControlRes(self.allocator, @intCast(payload.fd), payload.res),
+            .send_owner_control_req => |payload| try writeOwnerControlReq(self.allocator, @intCast(payload.fd), payload.req),
+            .close_fd => |fd| {
+                _ = c.close(@intCast(fd));
+            },
+            .install_owner => {},
+            .clear_owner => {},
+        }
     }
 
-    fn writeLaneReq(allocator: std.mem.Allocator, client_fd: c_int, req: protocol.LaneReqMsg) Error!void {
-        const bytes = protocol.encodeLaneReqMsg(allocator, req) catch return Error.ProtocolError;
-        defer allocator.free(bytes);
-        protocol.writeFrame(client_fd, bytes) catch return Error.IoError;
+    fn applyModelActions(self: *SessionServer, actions: *server_model.ActionList) Error!void {
+        for (actions.items) |*action| {
+            try self.applyModelAction(action.*);
+        }
     }
 
     fn acceptConnection(self: *SessionServer) Error!?Connection {
@@ -198,7 +200,24 @@ pub const SessionServer = struct {
 
         const fd = c.accept(listener_fd, null, null);
         if (fd < 0) return Error.IoError;
-        return .{ .fd = fd, .kind = .control };
+        return .{ .fd = fd };
+    }
+
+    fn beginOwnerForward(self: *SessionServer, client_fd: c_int, req: protocol.ControlReq) Error!bool {
+        var actions = server_model.ActionList.init(self.allocator);
+        defer server_model.deinitActionList(self.allocator, &actions);
+
+        try server_model.handleOwnerForward(&self.model, self.allocator, client_fd, req.request_id, req.action, &actions);
+        try self.applyModelActions(&actions);
+
+        for (actions.items) |action| {
+            switch (action) {
+                .send_control_res => |payload| if (payload.fd == client_fd) return true,
+                .close_fd => |fd| if (fd == client_fd) return true,
+                else => {},
+            }
+        }
+        return false;
     }
 
     fn handleControlReq(self: *SessionServer, req: protocol.ControlReq, client_fd: c_int) protocol.ControlRes {
@@ -221,29 +240,18 @@ pub const SessionServer = struct {
             return .{ .ok = true, .value = .{ .code = st.code, .signal = st.signal } };
         }
 
-        if (std.mem.eql(u8, req.op, "attach")) {
-            const mode = req.mode orelse "exclusive";
-            if (self.coordinator.owner_fd != null and std.mem.eql(u8, mode, "exclusive")) {
-                return .{ .ok = false, .err = .{ .code = "attach_conflict" } };
-            }
-            if (self.coordinator.owner_fd != null and std.mem.eql(u8, mode, "takeover")) {
-                const old_fd = self.coordinator.owner_fd.?;
-                _ = c.shutdown(old_fd, c.SHUT_RDWR);
-            }
-            self.coordinator.owner_fd = client_fd;
-            return .{ .ok = true, .value = .{} };
-        }
-
         if (std.mem.eql(u8, req.op, "detach")) {
-            if (self.coordinator.owner_fd == null or self.coordinator.owner_fd.? != client_fd) {
+            const owner_fd = self.ownerFd() orelse return .{ .ok = false, .err = .{ .code = "permission_denied" } };
+            if (owner_fd != client_fd) {
                 return .{ .ok = false, .err = .{ .code = "permission_denied" } };
             }
-            self.coordinator.owner_fd = null;
+            self.model.owner = .none;
             return .{ .ok = true, .value = .{} };
         }
 
         if (std.mem.eql(u8, req.op, "resize")) {
-            if (self.coordinator.owner_fd == null or self.coordinator.owner_fd.? != client_fd) {
+            const owner_fd = self.ownerFd() orelse return .{ .ok = false, .err = .{ .code = "permission_denied" } };
+            if (owner_fd != client_fd) {
                 return .{ .ok = false, .err = .{ .code = "permission_denied" } };
             }
             const cols = req.cols orelse 0;
@@ -254,11 +262,9 @@ pub const SessionServer = struct {
             return .{ .ok = true, .value = .{} };
         }
 
-        if (std.mem.eql(u8, req.op, "owner_attach") or std.mem.eql(u8, req.op, "owner_detach")) {
-            if (self.coordinator.owner_fd == null) {
-                return .{ .ok = false, .err = .{ .code = "no_owner_client" } };
-            }
-            return .{ .ok = false, .err = .{ .code = "owner_control_unsupported" } };
+        if (std.mem.eql(u8, req.op, "owner_forward")) {
+            _ = self.beginOwnerForward(client_fd, req) catch |e| return .{ .ok = false, .err = .{ .code = @errorName(e) } };
+            return .{ .ok = true, .value = .{} };
         }
 
         return .{ .ok = false, .err = .{ .code = "unsupported" } };
@@ -271,118 +277,80 @@ pub const SessionServer = struct {
         };
         defer self.allocator.free(req_bytes);
 
-        const EnvType = struct { type: []const u8 };
-        var parsed = std.json.parseFromSlice(EnvType, self.allocator, req_bytes, .{ .ignore_unknown_fields = true }) catch {
+        var msg = protocol.parseMessage(self.allocator, req_bytes) catch {
             _ = c.close(conn.fd);
             return Error.ProtocolError;
         };
-        defer parsed.deinit();
+        defer msg.deinit(self.allocator);
 
-        if (std.mem.eql(u8, parsed.value.type, "lane_req")) {
-            var lane_req = protocol.parseLaneReqMsg(self.allocator, req_bytes) catch {
-                _ = c.close(conn.fd);
-                return Error.ProtocolError;
-            };
-            defer protocol.freeLaneReqMsg(self.allocator, &lane_req);
+        switch (msg) {
+            .control_req => |req| {
+                if (std.mem.eql(u8, req.op, "attach")) {
+                    const mode = req.mode orelse "exclusive";
+                    var actions = server_model.ActionList.init(self.allocator);
+                    defer server_model.deinitActionList(self.allocator, &actions);
 
-            if (std.mem.eql(u8, lane_req.lane_kind, "owner_control")) {
-                if (self.coordinator.owner_fd == null) {
-                    const lane_res = protocol.LaneResMsg{
-                        .lane_id = lane_req.lane_id,
-                        .res_type = "error",
-                        .seq = lane_req.seq,
-                        .error_json = "{\"code\":\"no_owner_client\"}",
-                    };
-                    const res_bytes = protocol.encodeLaneResMsg(self.allocator, lane_res) catch {
+                    server_model.handleAttach(&self.model, self.allocator, conn.fd, mode, &actions) catch {
+                        try writeControlRes(self.allocator, conn.fd, .{ .ok = false, .err = .{ .code = "invalid_args" } });
                         _ = c.close(conn.fd);
-                        return Error.ProtocolError;
+                        return;
                     };
-                    defer self.allocator.free(res_bytes);
-                    protocol.writeFrame(conn.fd, res_bytes) catch {
-                        _ = c.close(conn.fd);
-                        return Error.IoError;
-                    };
-                    _ = c.close(conn.fd);
+
+                    try self.applyModelActions(&actions);
                     return;
                 }
 
-                if (self.pending_lane != null) {
-                    const lane_res = protocol.LaneResMsg{
-                        .lane_id = lane_req.lane_id,
-                        .res_type = "error",
-                        .seq = lane_req.seq,
-                        .error_json = "{\"code\":\"lane_busy\"}",
-                    };
-                    const res_bytes = protocol.encodeLaneResMsg(self.allocator, lane_res) catch {
-                        _ = c.close(conn.fd);
-                        return Error.ProtocolError;
-                    };
-                    defer self.allocator.free(res_bytes);
-                    protocol.writeFrame(conn.fd, res_bytes) catch {
-                        _ = c.close(conn.fd);
-                        return Error.IoError;
-                    };
-                    _ = c.close(conn.fd);
+                if (std.mem.eql(u8, req.op, "owner_forward")) {
+                    const closed = try self.beginOwnerForward(conn.fd, req);
+                    if (!closed) return;
                     return;
                 }
 
-                std.debug.print("[lane] server accepted requester lane kind={s} id={s} seq={d}\n", .{ lane_req.lane_kind, lane_req.lane_id, lane_req.seq });
-                self.pending_lane = .{
-                    .requester_fd = conn.fd,
-                    .lane_id = try self.allocator.dupe(u8, lane_req.lane_id),
-                    .lane_kind = try self.allocator.dupe(u8, lane_req.lane_kind),
-                    .seq = lane_req.seq,
-                };
+                const res = self.handleControlReq(req, conn.fd);
+                try writeControlRes(self.allocator, conn.fd, res);
 
-                const owner_fd = self.coordinator.owner_fd.?;
-                std.debug.print("[lane] server forwarding lane to owner fd={d} id={s}\n", .{ owner_fd, lane_req.lane_id });
-                try writeLaneReq(self.allocator, owner_fd, .{
-                    .lane_id = lane_req.lane_id,
-                    .lane_kind = lane_req.lane_kind,
-                    .req_type = lane_req.req_type,
-                    .seq = lane_req.seq,
-                    .method = lane_req.method,
-                    .args_json = lane_req.args_json,
-                });
-                return;
-            }
-
-            const lane_res = protocol.LaneResMsg{
-                .lane_id = lane_req.lane_id,
-                .res_type = "error",
-                .seq = lane_req.seq,
-                .error_json = "{\"code\":\"lane_unsupported\"}",
-            };
-            const res_bytes = protocol.encodeLaneResMsg(self.allocator, lane_res) catch {
+                if (!(std.mem.eql(u8, req.op, "attach") and res.ok)) {
+                    _ = c.close(conn.fd);
+                }
+            },
+            else => {
                 _ = c.close(conn.fd);
                 return Error.ProtocolError;
-            };
-            defer self.allocator.free(res_bytes);
-            protocol.writeFrame(conn.fd, res_bytes) catch {
-                _ = c.close(conn.fd);
-                return Error.IoError;
-            };
-            _ = c.close(conn.fd);
-            return;
-        }
-
-        var req = protocol.parseControlReq(self.allocator, req_bytes) catch {
-            _ = c.close(conn.fd);
-            return Error.ProtocolError;
-        };
-        defer protocol.freeControlReq(self.allocator, &req);
-
-        const res = self.handleControlReq(req, conn.fd);
-        try writeControlRes(self.allocator, conn.fd, res);
-
-        if (!(std.mem.eql(u8, req.op, "attach") and res.ok)) {
-            _ = c.close(conn.fd);
+            },
         }
     }
 
+    fn resolveOwnerControlRes(self: *SessionServer, owner_res: protocol.OwnerControlRes) Error!void {
+        var actions = server_model.ActionList.init(self.allocator);
+        defer server_model.deinitActionList(self.allocator, &actions);
+
+        try server_model.handleOwnerControlRes(&self.model, self.allocator, owner_res, &actions);
+        try self.applyModelActions(&actions);
+    }
+
+    fn dropOwner(self: *SessionServer, failure_code: ?[]const u8) void {
+        var actions = server_model.ActionList.init(self.allocator);
+        defer server_model.deinitActionList(self.allocator, &actions);
+
+        if (failure_code) |code| {
+            if (std.mem.eql(u8, code, "pty_closed")) {
+                server_model.handlePtyClosed(&self.model, self.allocator, &actions) catch return;
+            } else {
+                server_model.handleOwnerClosed(&self.model, self.allocator, &actions) catch return;
+            }
+        } else {
+            server_model.handleOwnerClosed(&self.model, self.allocator, &actions) catch return;
+        }
+
+        self.applyModelActions(&actions) catch return;
+    }
+
     fn pumpOwnerIo(self: *SessionServer) Error!void {
-        const owner_fd = self.coordinator.owner_fd orelse return;
-        const master_fd = self.session_host.getMasterFd() orelse return;
+        const owner_fd = self.ownerFd() orelse return;
+        const master_fd = self.session_host.getMasterFd() orelse {
+            self.dropOwner("pty_closed");
+            return;
+        };
 
         var pfds = [2]c.struct_pollfd{
             .{ .fd = owner_fd, .events = c.POLLIN, .revents = 0 },
@@ -396,84 +364,62 @@ pub const SessionServer = struct {
             const frame = protocol.readFrame(self.allocator, owner_fd, 256 * 1024) catch return Error.ProtocolError;
             defer self.allocator.free(frame);
 
-            const EnvType = struct { type: []const u8 };
-            var parsed = std.json.parseFromSlice(EnvType, self.allocator, frame, .{ .ignore_unknown_fields = true }) catch return Error.ProtocolError;
-            defer parsed.deinit();
+            var msg = protocol.parseMessage(self.allocator, frame) catch return Error.ProtocolError;
+            defer msg.deinit(self.allocator);
 
-            if (std.mem.eql(u8, parsed.value.type, "data")) {
-                var msg = protocol.parseDataMsg(self.allocator, frame) catch return Error.ProtocolError;
-                defer protocol.freeDataMsg(self.allocator, &msg);
-                const decoded_len = std.base64.standard.Decoder.calcSizeForSlice(msg.bytes_b64) catch return Error.ProtocolError;
-                const decoded = self.allocator.alloc(u8, decoded_len) catch return Error.OutOfMemory;
-                defer self.allocator.free(decoded);
-                std.base64.standard.Decoder.decode(decoded, msg.bytes_b64) catch return Error.ProtocolError;
-                try self.session_host.pty.write(decoded);
-            } else if (std.mem.eql(u8, parsed.value.type, "control_req")) {
-                var req = protocol.parseControlReq(self.allocator, frame) catch return Error.ProtocolError;
-                defer protocol.freeControlReq(self.allocator, &req);
-                const res = self.handleControlReq(req, owner_fd);
-                try writeControlRes(self.allocator, owner_fd, res);
-                if (std.mem.eql(u8, req.op, "detach") and res.ok) {
-                    _ = c.close(owner_fd);
-                    self.coordinator.owner_fd = null;
-                    return;
-                }
-            } else if (std.mem.eql(u8, parsed.value.type, "lane_res")) {
-                std.debug.print("[lane] server received lane_res from owner\n", .{});
-                var lane_res = protocol.parseLaneResMsg(self.allocator, frame) catch return Error.ProtocolError;
-                defer protocol.freeLaneResMsg(self.allocator, &lane_res);
-
-                if (self.pending_lane) |pl| {
-                    if (std.mem.eql(u8, lane_res.lane_id, pl.lane_id)) {
-                        std.debug.print("[lane] server relaying lane_res to requester fd={d} id={s}\n", .{ pl.requester_fd, pl.lane_id });
-                        try writeLaneRes(self.allocator, pl.requester_fd, .{
-                            .lane_id = pl.lane_id,
-                            .res_type = lane_res.res_type,
-                            .seq = lane_res.seq,
-                            .value_json = lane_res.value_json,
-                            .error_json = lane_res.error_json,
-                            .meta_json = lane_res.meta_json,
-                            .chunk_json = lane_res.chunk_json,
-                        });
-                        _ = c.close(pl.requester_fd);
-                        self.allocator.free(pl.lane_id);
-                        self.allocator.free(pl.lane_kind);
-                        self.pending_lane = null;
+            switch (msg) {
+                .data => |data_msg| {
+                    const decoded_len = std.base64.standard.Decoder.calcSizeForSlice(data_msg.bytes_b64) catch return Error.ProtocolError;
+                    const decoded = self.allocator.alloc(u8, decoded_len) catch return Error.OutOfMemory;
+                    defer self.allocator.free(decoded);
+                    std.base64.standard.Decoder.decode(decoded, data_msg.bytes_b64) catch return Error.ProtocolError;
+                    try self.session_host.pty.write(decoded);
+                },
+                .control_req => |req| {
+                    const res = self.handleControlReq(req, owner_fd);
+                    try writeControlRes(self.allocator, owner_fd, res);
+                    if (std.mem.eql(u8, req.op, "detach") and res.ok) {
+                        _ = c.close(owner_fd);
                         return;
                     }
-                }
-                return Error.ProtocolError;
-            } else {
-                return Error.ProtocolError;
+                },
+                .owner_control_res => |owner_res| {
+                    try self.resolveOwnerControlRes(owner_res);
+                },
+                else => return Error.ProtocolError,
             }
         }
 
         if ((pfds[0].revents & (c.POLLHUP | c.POLLERR | c.POLLNVAL)) != 0) {
-            if (self.pending_lane != null and (pfds[0].revents & c.POLLIN) != 0) {
-                // A pending lane response may still be readable; let the readable path win first.
+            if (self.ownerPending() != null and (pfds[0].revents & c.POLLIN) != 0) {
+                // allow readable owner response path to win first
             } else {
-                _ = c.close(owner_fd);
-                self.coordinator.owner_fd = null;
+                self.dropOwner("owner_disconnected");
                 return;
             }
+        }
+
+        if ((pfds[1].revents & (c.POLLHUP | c.POLLERR | c.POLLNVAL)) != 0) {
+            self.dropOwner("pty_closed");
+            return;
         }
 
         if ((pfds[1].revents & c.POLLIN) != 0) {
             var buf: [4096]u8 = undefined;
             const n = c.read(master_fd, &buf, buf.len);
-            if (n < 0) return Error.IoError;
+            if (n < 0) {
+                const e = std.c.errno(-1);
+                if (e == .IO) {
+                    self.dropOwner("pty_closed");
+                    return;
+                }
+                return Error.IoError;
+            }
             if (n == 0) {
-                _ = c.close(owner_fd);
-                self.coordinator.owner_fd = null;
+                self.dropOwner("pty_closed");
                 return;
             }
             try writeData(self.allocator, owner_fd, buf[0..@intCast(n)]);
-        }
-
-        if ((pfds[1].revents & (c.POLLHUP | c.POLLERR | c.POLLNVAL)) != 0) {
-            _ = c.close(owner_fd);
-            self.coordinator.owner_fd = null;
-            return;
         }
     }
 
@@ -512,11 +458,8 @@ pub const SessionServer = struct {
         return switch (self.state) {
             .created => Error.InvalidState,
             .listening => {
-                self.coordinator.shutting_down = true;
-                if (self.coordinator.owner_fd) |fd| {
-                    _ = c.close(fd);
-                    self.coordinator.owner_fd = null;
-                }
+                self.shutting_down = true;
+                self.dropOwner("server_stopped");
                 if (self.listener_fd) |fd| {
                     _ = c.close(fd);
                     self.listener_fd = null;
@@ -637,37 +580,6 @@ test "server step handles status request" {
     try h.close();
 }
 
-test "server step handles terminate request" {
-    var h = try host.SessionHost.init(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "sleep 5" } });
-    defer h.deinit();
-    try h.start();
-
-    var s = SessionServer.init(std.testing.allocator, &h);
-    defer s.deinit();
-
-    const path = "/tmp/msr-server-terminate-step-test.sock";
-    SessionServer.unlinkBestEffort(path);
-    defer SessionServer.unlinkBestEffort(path);
-    try s.listen(path);
-
-    const fd = try connectUnix(path);
-    defer _ = c.close(fd);
-    const req = try protocol.encodeControlReq(std.testing.allocator, .{ .op = "terminate", .signal = "KILL" });
-    defer std.testing.allocator.free(req);
-    try protocol.writeFrame(fd, req);
-
-    _ = try s.step();
-
-    const res_bytes = try protocol.readFrame(std.testing.allocator, fd, 64 * 1024);
-    defer std.testing.allocator.free(res_bytes);
-    var res = try protocol.parseControlRes(std.testing.allocator, res_bytes);
-    defer protocol.freeControlRes(std.testing.allocator, &res);
-    try std.testing.expect(res.ok);
-
-    _ = try h.wait();
-    try h.close();
-}
-
 test "server step attach retains single owner" {
     var h = try host.SessionHost.init(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "sleep 1" } });
     defer h.deinit();
@@ -694,171 +606,9 @@ test "server step attach retains single owner" {
     var res = try protocol.parseControlRes(std.testing.allocator, res_bytes);
     defer protocol.freeControlRes(std.testing.allocator, &res);
     try std.testing.expect(res.ok);
-    try std.testing.expect(s.coordinator.owner_fd != null);
+    try std.testing.expect(s.ownerFd() != null);
 
     _ = c.shutdown(fd, c.SHUT_RDWR);
-    _ = try h.wait();
-    try h.close();
-}
-
-test "server step pumps PTY output to attached owner" {
-    var h = try host.SessionHost.init(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "printf hello; sleep 1" } });
-    defer h.deinit();
-    try h.start();
-
-    var s = SessionServer.init(std.testing.allocator, &h);
-    defer s.deinit();
-
-    const path = "/tmp/msr-server-stream-step-test.sock";
-    SessionServer.unlinkBestEffort(path);
-    defer SessionServer.unlinkBestEffort(path);
-    try s.listen(path);
-
-    const fd = try connectUnix(path);
-    defer _ = c.close(fd);
-    const req = try protocol.encodeControlReq(std.testing.allocator, .{ .op = "attach", .mode = "exclusive" });
-    defer std.testing.allocator.free(req);
-    try protocol.writeFrame(fd, req);
-
-    _ = try s.step();
-
-    const res_bytes = try protocol.readFrame(std.testing.allocator, fd, 64 * 1024);
-    defer std.testing.allocator.free(res_bytes);
-    var res = try protocol.parseControlRes(std.testing.allocator, res_bytes);
-    defer protocol.freeControlRes(std.testing.allocator, &res);
-    try std.testing.expect(res.ok);
-
-    _ = c.usleep(20_000);
-    _ = try s.step();
-
-    const frame = try protocol.readFrame(std.testing.allocator, fd, 256 * 1024);
-    defer std.testing.allocator.free(frame);
-    var msg = try protocol.parseDataMsg(std.testing.allocator, frame);
-    defer protocol.freeDataMsg(std.testing.allocator, &msg);
-    const decoded_len = try std.base64.standard.Decoder.calcSizeForSlice(msg.bytes_b64);
-    const decoded = try std.testing.allocator.alloc(u8, decoded_len);
-    defer std.testing.allocator.free(decoded);
-    try std.base64.standard.Decoder.decode(decoded, msg.bytes_b64);
-    try std.testing.expect(std.mem.indexOf(u8, decoded, "hello") != null);
-
-    _ = try h.wait();
-    try h.close();
-}
-
-test "server step forwards owner input into PTY" {
-    var h = try host.SessionHost.init(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "read line; printf 'got:%s' \"$line\"; sleep 1" } });
-    defer h.deinit();
-    try h.start();
-
-    var s = SessionServer.init(std.testing.allocator, &h);
-    defer s.deinit();
-
-    const path = "/tmp/msr-server-input-step-test.sock";
-    SessionServer.unlinkBestEffort(path);
-    defer SessionServer.unlinkBestEffort(path);
-    try s.listen(path);
-
-    const fd = try connectUnix(path);
-    defer _ = c.close(fd);
-    const req = try protocol.encodeControlReq(std.testing.allocator, .{ .op = "attach", .mode = "exclusive" });
-    defer std.testing.allocator.free(req);
-    try protocol.writeFrame(fd, req);
-
-    _ = try s.step();
-
-    const res_bytes = try protocol.readFrame(std.testing.allocator, fd, 64 * 1024);
-    defer std.testing.allocator.free(res_bytes);
-    var res = try protocol.parseControlRes(std.testing.allocator, res_bytes);
-    defer protocol.freeControlRes(std.testing.allocator, &res);
-    try std.testing.expect(res.ok);
-
-    const input = "hello from owner\n";
-    const enc_len = std.base64.standard.Encoder.calcSize(input.len);
-    const b64 = try std.testing.allocator.alloc(u8, enc_len);
-    defer std.testing.allocator.free(b64);
-    _ = std.base64.standard.Encoder.encode(b64, input);
-    const data_frame = try protocol.encodeDataMsg(std.testing.allocator, .{ .stream = "stdin", .bytes_b64 = b64 });
-    defer std.testing.allocator.free(data_frame);
-    try protocol.writeFrame(fd, data_frame);
-
-    _ = c.usleep(20_000);
-    _ = try s.step();
-    _ = c.usleep(20_000);
-    _ = try s.step();
-
-    const frame = try protocol.readFrame(std.testing.allocator, fd, 256 * 1024);
-    defer std.testing.allocator.free(frame);
-    var msg = try protocol.parseDataMsg(std.testing.allocator, frame);
-    defer protocol.freeDataMsg(std.testing.allocator, &msg);
-    const decoded_len = try std.base64.standard.Decoder.calcSizeForSlice(msg.bytes_b64);
-    const decoded = try std.testing.allocator.alloc(u8, decoded_len);
-    defer std.testing.allocator.free(decoded);
-    try std.base64.standard.Decoder.decode(decoded, msg.bytes_b64);
-    try std.testing.expect(std.mem.indexOf(u8, decoded, "got:hello from owner") != null);
-
-    _ = try h.wait();
-    try h.close();
-}
-
-test "server step takeover replaces owner" {
-    var h = try host.SessionHost.init(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "printf hello; sleep 1" } });
-    defer h.deinit();
-    try h.start();
-
-    var s = SessionServer.init(std.testing.allocator, &h);
-    defer s.deinit();
-
-    const path = "/tmp/msr-server-takeover-step-test.sock";
-    SessionServer.unlinkBestEffort(path);
-    defer SessionServer.unlinkBestEffort(path);
-    try s.listen(path);
-
-    const fd1 = try connectUnix(path);
-    defer _ = c.close(fd1);
-    const req1 = try protocol.encodeControlReq(std.testing.allocator, .{ .op = "attach", .mode = "exclusive" });
-    defer std.testing.allocator.free(req1);
-    try protocol.writeFrame(fd1, req1);
-    _ = try s.step();
-    const res1_bytes = try protocol.readFrame(std.testing.allocator, fd1, 64 * 1024);
-    defer std.testing.allocator.free(res1_bytes);
-    var res1 = try protocol.parseControlRes(std.testing.allocator, res1_bytes);
-    defer protocol.freeControlRes(std.testing.allocator, &res1);
-    try std.testing.expect(res1.ok);
-    const owner1 = s.coordinator.owner_fd orelse return error.TestUnexpectedResult;
-    try std.testing.expect(owner1 >= 0);
-
-    const fd2 = try connectUnix(path);
-    defer _ = c.close(fd2);
-    const req2 = try protocol.encodeControlReq(std.testing.allocator, .{ .op = "attach", .mode = "takeover" });
-    defer std.testing.allocator.free(req2);
-    try protocol.writeFrame(fd2, req2);
-    _ = try s.step();
-    const res2_bytes = try protocol.readFrame(std.testing.allocator, fd2, 64 * 1024);
-    defer std.testing.allocator.free(res2_bytes);
-    var res2 = try protocol.parseControlRes(std.testing.allocator, res2_bytes);
-    defer protocol.freeControlRes(std.testing.allocator, &res2);
-    try std.testing.expect(res2.ok);
-    const owner2 = s.coordinator.owner_fd orelse return error.TestUnexpectedResult;
-    try std.testing.expect(owner2 >= 0);
-    try std.testing.expect(owner2 != owner1);
-
-    var pfd = c.struct_pollfd{ .fd = fd1, .events = 0, .revents = 0 };
-    const pr = c.poll(&pfd, 1, 1000);
-    try std.testing.expect(pr > 0);
-    try std.testing.expect((pfd.revents & (c.POLLHUP | c.POLLERR | c.POLLNVAL)) != 0);
-
-    _ = c.usleep(20_000);
-    _ = try s.step();
-    const frame2 = try protocol.readFrame(std.testing.allocator, fd2, 256 * 1024);
-    defer std.testing.allocator.free(frame2);
-    var msg2 = try protocol.parseDataMsg(std.testing.allocator, frame2);
-    defer protocol.freeDataMsg(std.testing.allocator, &msg2);
-    const decoded_len2 = try std.base64.standard.Decoder.calcSizeForSlice(msg2.bytes_b64);
-    const decoded2 = try std.testing.allocator.alloc(u8, decoded_len2);
-    defer std.testing.allocator.free(decoded2);
-    try std.base64.standard.Decoder.decode(decoded2, msg2.bytes_b64);
-    try std.testing.expect(std.mem.indexOf(u8, decoded2, "hello") != null);
-
     _ = try h.wait();
     try h.close();
 }
@@ -887,7 +637,7 @@ test "server step detach clears owner" {
     var attach_res = try protocol.parseControlRes(std.testing.allocator, attach_res_bytes);
     defer protocol.freeControlRes(std.testing.allocator, &attach_res);
     try std.testing.expect(attach_res.ok);
-    try std.testing.expect(s.coordinator.owner_fd != null);
+    try std.testing.expect(s.ownerFd() != null);
 
     const detach_req = try protocol.encodeControlReq(std.testing.allocator, .{ .op = "detach" });
     defer std.testing.allocator.free(detach_req);
@@ -898,14 +648,14 @@ test "server step detach clears owner" {
     var detach_res = try protocol.parseControlRes(std.testing.allocator, detach_res_bytes);
     defer protocol.freeControlRes(std.testing.allocator, &detach_res);
     try std.testing.expect(detach_res.ok);
-    try std.testing.expect(s.coordinator.owner_fd == null);
+    try std.testing.expect(s.ownerFd() == null);
 
     try h.terminate("KILL");
     _ = try h.wait();
     try h.close();
 }
 
-test "server step owner passthrough ops fail when no owner exists" {
+test "server step owner_forward reports no owner when absent" {
     var h = try host.SessionHost.init(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "sleep 1" } });
     defer h.deinit();
     try h.start();
@@ -913,14 +663,14 @@ test "server step owner passthrough ops fail when no owner exists" {
     var s = SessionServer.init(std.testing.allocator, &h);
     defer s.deinit();
 
-    const path = "/tmp/msr-server-owner-route-no-owner-test.sock";
+    const path = "/tmp/msr-server-owner-forward-no-owner-test.sock";
     SessionServer.unlinkBestEffort(path);
     defer SessionServer.unlinkBestEffort(path);
     try s.listen(path);
 
     const fd = try connectUnix(path);
     defer _ = c.close(fd);
-    const req = try protocol.encodeControlReq(std.testing.allocator, .{ .op = "owner_attach", .path = "/tmp/target.msr" });
+    const req = try protocol.encodeControlReq(std.testing.allocator, .{ .op = "owner_forward", .request_id = 1, .action = .{ .op = "detach" } });
     defer std.testing.allocator.free(req);
     try protocol.writeFrame(fd, req);
     _ = try s.step();
@@ -938,7 +688,7 @@ test "server step owner passthrough ops fail when no owner exists" {
     try h.close();
 }
 
-test "server step owner passthrough ops report unsupported when owner exists" {
+test "server step owner_forward sends owner_control_req to attached owner" {
     var h = try host.SessionHost.init(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "sleep 1" } });
     defer h.deinit();
     try h.start();
@@ -946,7 +696,7 @@ test "server step owner passthrough ops report unsupported when owner exists" {
     var s = SessionServer.init(std.testing.allocator, &h);
     defer s.deinit();
 
-    const path = "/tmp/msr-server-owner-route-unsupported-test.sock";
+    const path = "/tmp/msr-server-owner-forward-to-owner-test.sock";
     SessionServer.unlinkBestEffort(path);
     defer SessionServer.unlinkBestEffort(path);
     try s.listen(path);
@@ -963,27 +713,39 @@ test "server step owner passthrough ops report unsupported when owner exists" {
     defer protocol.freeControlRes(std.testing.allocator, &attach_res);
     try std.testing.expect(attach_res.ok);
 
-    const fd = try connectUnix(path);
-    defer _ = c.close(fd);
-    const req = try protocol.encodeControlReq(std.testing.allocator, .{ .op = "owner_detach" });
+    const requester_fd = try connectUnix(path);
+    defer _ = c.close(requester_fd);
+    const req = try protocol.encodeControlReq(std.testing.allocator, .{ .op = "owner_forward", .request_id = 5, .action = .{ .op = "detach" } });
     defer std.testing.allocator.free(req);
-    try protocol.writeFrame(fd, req);
+    try protocol.writeFrame(requester_fd, req);
+
     _ = try s.step();
 
-    const res_bytes = try protocol.readFrame(std.testing.allocator, fd, 64 * 1024);
-    defer std.testing.allocator.free(res_bytes);
-    var res = try protocol.parseControlRes(std.testing.allocator, res_bytes);
-    defer protocol.freeControlRes(std.testing.allocator, &res);
-    try std.testing.expect(!res.ok);
-    try std.testing.expect(res.err != null);
-    try std.testing.expectEqualStrings("owner_control_unsupported", res.err.?.code);
+    const owner_frame = try protocol.readFrame(std.testing.allocator, owner_fd, 64 * 1024);
+    defer std.testing.allocator.free(owner_frame);
+    var owner_req = try protocol.parseOwnerControlReq(std.testing.allocator, owner_frame);
+    defer protocol.freeOwnerControlReq(std.testing.allocator, &owner_req);
+    try std.testing.expectEqual(@as(u32, 5), owner_req.request_id);
+    try std.testing.expectEqualStrings("detach", owner_req.action.op);
+
+    const owner_res_bytes = try protocol.encodeOwnerControlRes(std.testing.allocator, .{ .request_id = 5, .ok = true });
+    defer std.testing.allocator.free(owner_res_bytes);
+    try protocol.writeFrame(owner_fd, owner_res_bytes);
+
+    _ = try s.step();
+
+    const requester_res_bytes = try protocol.readFrame(std.testing.allocator, requester_fd, 64 * 1024);
+    defer std.testing.allocator.free(requester_res_bytes);
+    var requester_res = try protocol.parseControlRes(std.testing.allocator, requester_res_bytes);
+    defer protocol.freeControlRes(std.testing.allocator, &requester_res);
+    try std.testing.expect(requester_res.ok);
 
     try h.terminate("KILL");
     _ = try h.wait();
     try h.close();
 }
 
-test "server step owner_control lane reports no owner when absent" {
+test "server step owner_forward reports owner_busy when pending exists" {
     var h = try host.SessionHost.init(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "sleep 1" } });
     defer h.deinit();
     try h.start();
@@ -991,49 +753,7 @@ test "server step owner_control lane reports no owner when absent" {
     var s = SessionServer.init(std.testing.allocator, &h);
     defer s.deinit();
 
-    const path = "/tmp/msr-server-owner-control-no-owner-lane-test.sock";
-    SessionServer.unlinkBestEffort(path);
-    defer SessionServer.unlinkBestEffort(path);
-    try s.listen(path);
-
-    const fd = try connectUnix(path);
-    defer _ = c.close(fd);
-    const req = try protocol.encodeLaneReqMsg(std.testing.allocator, .{
-        .lane_id = "lane-1",
-        .lane_kind = "owner_control",
-        .req_type = "call",
-        .seq = 1,
-        .method = "attach",
-        .args_json = "{\"path\":\"/tmp/target.msr\"}",
-    });
-    defer std.testing.allocator.free(req);
-    try protocol.writeFrame(fd, req);
-
-    _ = try s.step();
-
-    const res_bytes = try protocol.readFrame(std.testing.allocator, fd, 64 * 1024);
-    defer std.testing.allocator.free(res_bytes);
-    var res = try protocol.parseLaneResMsg(std.testing.allocator, res_bytes);
-    defer protocol.freeLaneResMsg(std.testing.allocator, &res);
-    try std.testing.expectEqualStrings("lane-1", res.lane_id);
-    try std.testing.expectEqualStrings("error", res.res_type);
-    try std.testing.expect(res.error_json != null);
-    try std.testing.expect(std.mem.indexOf(u8, res.error_json.?, "no_owner_client") != null);
-
-    try h.terminate("KILL");
-    _ = try h.wait();
-    try h.close();
-}
-
-test "server step owner_control lane detach succeeds when owner exists" {
-    var h = try host.SessionHost.init(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "sleep 1" } });
-    defer h.deinit();
-    try h.start();
-
-    var s = SessionServer.init(std.testing.allocator, &h);
-    defer s.deinit();
-
-    const path = "/tmp/msr-server-owner-control-unsupported-lane-test.sock";
+    const path = "/tmp/msr-server-owner-forward-busy-test.sock";
     SessionServer.unlinkBestEffort(path);
     defer SessionServer.unlinkBestEffort(path);
     try s.listen(path);
@@ -1050,125 +770,44 @@ test "server step owner_control lane detach succeeds when owner exists" {
     defer protocol.freeControlRes(std.testing.allocator, &attach_res);
     try std.testing.expect(attach_res.ok);
 
-    const fd = try connectUnix(path);
-    defer _ = c.close(fd);
-    const req = try protocol.encodeLaneReqMsg(std.testing.allocator, .{
-        .lane_id = "lane-2",
-        .lane_kind = "owner_control",
-        .req_type = "call",
-        .seq = 1,
-        .method = "detach",
-    });
-    defer std.testing.allocator.free(req);
-    try protocol.writeFrame(fd, req);
-
+    const requester1_fd = try connectUnix(path);
+    defer _ = c.close(requester1_fd);
+    const req1 = try protocol.encodeControlReq(std.testing.allocator, .{ .op = "owner_forward", .request_id = 1, .action = .{ .op = "detach" } });
+    defer std.testing.allocator.free(req1);
+    try protocol.writeFrame(requester1_fd, req1);
     _ = try s.step();
 
-    const res_bytes = try protocol.readFrame(std.testing.allocator, fd, 64 * 1024);
-    defer std.testing.allocator.free(res_bytes);
-    var res = try protocol.parseLaneResMsg(std.testing.allocator, res_bytes);
-    defer protocol.freeLaneResMsg(std.testing.allocator, &res);
-    try std.testing.expectEqualStrings("lane-2", res.lane_id);
-    try std.testing.expectEqualStrings("return", res.res_type);
-    try std.testing.expect(res.value_json != null);
-    try std.testing.expectEqualStrings("{}", res.value_json.?);
+    const owner_frame = try protocol.readFrame(std.testing.allocator, owner_fd, 64 * 1024);
+    defer std.testing.allocator.free(owner_frame);
+    var owner_req = try protocol.parseOwnerControlReq(std.testing.allocator, owner_frame);
+    defer protocol.freeOwnerControlReq(std.testing.allocator, &owner_req);
+    try std.testing.expectEqual(@as(u32, 1), owner_req.request_id);
 
-    try h.terminate("KILL");
-    _ = try h.wait();
-    try h.close();
-}
-
-test "server step rejects unsupported lane request cleanly" {
-    var h = try host.SessionHost.init(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "sleep 1" } });
-    defer h.deinit();
-    try h.start();
-
-    var s = SessionServer.init(std.testing.allocator, &h);
-    defer s.deinit();
-
-    const path = "/tmp/msr-server-lane-unsupported-test.sock";
-    SessionServer.unlinkBestEffort(path);
-    defer SessionServer.unlinkBestEffort(path);
-    try s.listen(path);
-
-    const fd = try connectUnix(path);
-    defer _ = c.close(fd);
-    const req = try protocol.encodeLaneReqMsg(std.testing.allocator, .{
-        .lane_id = "lane-1",
-        .lane_kind = "bogus_lane",
-        .req_type = "call",
-        .seq = 1,
-        .method = "attach",
-        .args_json = "{\"path\":\"/tmp/target.msr\"}",
-    });
-    defer std.testing.allocator.free(req);
-    try protocol.writeFrame(fd, req);
-
+    const requester2_fd = try connectUnix(path);
+    defer _ = c.close(requester2_fd);
+    const req2 = try protocol.encodeControlReq(std.testing.allocator, .{ .op = "owner_forward", .request_id = 2, .action = .{ .op = "detach" } });
+    defer std.testing.allocator.free(req2);
+    try protocol.writeFrame(requester2_fd, req2);
     _ = try s.step();
 
-    const res_bytes = try protocol.readFrame(std.testing.allocator, fd, 64 * 1024);
-    defer std.testing.allocator.free(res_bytes);
-    var res = try protocol.parseLaneResMsg(std.testing.allocator, res_bytes);
-    defer protocol.freeLaneResMsg(std.testing.allocator, &res);
-    try std.testing.expectEqualStrings("lane-1", res.lane_id);
-    try std.testing.expectEqualStrings("error", res.res_type);
-    try std.testing.expectEqual(@as(u32, 1), res.seq);
-    try std.testing.expect(res.error_json != null);
-    try std.testing.expect(std.mem.indexOf(u8, res.error_json.?, "lane_unsupported") != null);
+    const requester2_res_bytes = try protocol.readFrame(std.testing.allocator, requester2_fd, 64 * 1024);
+    defer std.testing.allocator.free(requester2_res_bytes);
+    var requester2_res = try protocol.parseControlRes(std.testing.allocator, requester2_res_bytes);
+    defer protocol.freeControlRes(std.testing.allocator, &requester2_res);
+    try std.testing.expect(!requester2_res.ok);
+    try std.testing.expect(requester2_res.err != null);
+    try std.testing.expectEqualStrings("owner_busy", requester2_res.err.?.code);
 
-    try h.terminate("KILL");
-    _ = try h.wait();
-    try h.close();
-}
-
-test "server step resize is owner-only" {
-    var h = try host.SessionHost.init(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "sleep 1" }, .cols = 80, .rows = 24 });
-    defer h.deinit();
-    try h.start();
-
-    var s = SessionServer.init(std.testing.allocator, &h);
-    defer s.deinit();
-
-    const path = "/tmp/msr-server-resize-owner-step-test.sock";
-    SessionServer.unlinkBestEffort(path);
-    defer SessionServer.unlinkBestEffort(path);
-    try s.listen(path);
-
-    const fd1 = try connectUnix(path);
-    defer _ = c.close(fd1);
-    const resize_req1 = try protocol.encodeControlReq(std.testing.allocator, .{ .op = "resize", .cols = 100, .rows = 30 });
-    defer std.testing.allocator.free(resize_req1);
-    try protocol.writeFrame(fd1, resize_req1);
+    const owner_res_bytes = try protocol.encodeOwnerControlRes(std.testing.allocator, .{ .request_id = 1, .ok = true });
+    defer std.testing.allocator.free(owner_res_bytes);
+    try protocol.writeFrame(owner_fd, owner_res_bytes);
     _ = try s.step();
-    const resize_res1_bytes = try protocol.readFrame(std.testing.allocator, fd1, 64 * 1024);
-    defer std.testing.allocator.free(resize_res1_bytes);
-    var resize_res1 = try protocol.parseControlRes(std.testing.allocator, resize_res1_bytes);
-    defer protocol.freeControlRes(std.testing.allocator, &resize_res1);
-    try std.testing.expect(!resize_res1.ok);
-    try std.testing.expect(resize_res1.err != null);
-    try std.testing.expectEqualStrings("permission_denied", resize_res1.err.?.code);
 
-    const fd2 = try connectUnix(path);
-    defer _ = c.close(fd2);
-    const attach_req = try protocol.encodeControlReq(std.testing.allocator, .{ .op = "attach", .mode = "exclusive" });
-    defer std.testing.allocator.free(attach_req);
-    try protocol.writeFrame(fd2, attach_req);
-    _ = try s.step();
-    const attach_res_bytes = try protocol.readFrame(std.testing.allocator, fd2, 64 * 1024);
-    defer std.testing.allocator.free(attach_res_bytes);
-    var attach_res = try protocol.parseControlRes(std.testing.allocator, attach_res_bytes);
-    defer protocol.freeControlRes(std.testing.allocator, &attach_res);
-    try std.testing.expect(attach_res.ok);
-
-    const resize_req2 = try protocol.encodeControlReq(std.testing.allocator, .{ .op = "resize", .cols = 100, .rows = 30 });
-    defer std.testing.allocator.free(resize_req2);
-    try protocol.writeFrame(fd2, resize_req2);
-    _ = try s.step();
-    const resize_res2_bytes = try protocol.readFrame(std.testing.allocator, fd2, 64 * 1024);
-    defer std.testing.allocator.free(resize_res2_bytes);
-    var resize_res2 = try protocol.parseControlRes(std.testing.allocator, resize_res2_bytes);
-    defer protocol.freeControlRes(std.testing.allocator, &resize_res2);
-    try std.testing.expect(resize_res2.ok);
+    const requester1_res_bytes = try protocol.readFrame(std.testing.allocator, requester1_fd, 64 * 1024);
+    defer std.testing.allocator.free(requester1_res_bytes);
+    var requester1_res = try protocol.parseControlRes(std.testing.allocator, requester1_res_bytes);
+    defer protocol.freeControlRes(std.testing.allocator, &requester1_res);
+    try std.testing.expect(requester1_res.ok);
 
     try h.terminate("KILL");
     _ = try h.wait();
