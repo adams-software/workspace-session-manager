@@ -29,6 +29,15 @@ pub fn build(b: *std.Build) void {
     client_mod.addImport("host", host_mod);
     client_mod.addImport("protocol", protocol_mod);
 
+    const nested_client_mod = b.addModule("nested_client", .{
+        .root_source_file = b.path("src/nested_client.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    nested_client_mod.addImport("client", client_mod);
+    nested_client_mod.addImport("protocol", protocol_mod);
+
     const server_mod = b.addModule("server", .{
         .root_source_file = b.path("src/server.zig"),
         .target = target,
@@ -67,6 +76,7 @@ pub fn build(b: *std.Build) void {
     exe_root.addImport("host", host_mod);
     exe_root.addImport("server", server_mod);
     exe_root.addImport("attach_runtime", attach_runtime_mod);
+    exe_root.addImport("nested_client", nested_client_mod);
 
     const exe = b.addExecutable(.{
         .name = "msr",
@@ -194,6 +204,12 @@ pub fn build(b: *std.Build) void {
 
     const test_server_model_step = b.step("test-server-model", "Run server model transition tests");
     test_server_model_step.dependOn(&run_server_model_tests.step);
+
+    const smoke_cmd = b.addSystemCommand(&.{ "python3", "-u", "scripts/smoke_msr_binary.py" });
+    smoke_cmd.setCwd(b.path("."));
+    const smoke_step = b.step("smoke-binary", "Run real-binary smoke test for msr");
+    smoke_step.dependOn(b.getInstallStep());
+    smoke_step.dependOn(&smoke_cmd.step);
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());

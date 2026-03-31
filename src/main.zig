@@ -2,6 +2,7 @@ const std = @import("std");
 const host = @import("host");
 const server = @import("server");
 const client = @import("client");
+const nested_client = @import("nested_client");
 const attach_runtime = @import("attach_runtime");
 const c = @cImport({
     @cInclude("unistd.h");
@@ -18,11 +19,26 @@ fn usage() void {
             "  msr create <path> -- <cmd...>\n" ++
             "  msr attach <path> [--takeover]\n" ++
             "  msr detach <path>\n" ++
+            "  msr [--session=<current>] attach <target>\n" ++
+            "  msr [--session=<current>] detach\n" ++
             "  msr resize <path> <cols> <rows> [--takeover]\n" ++
             "  msr terminate <path> [TERM|INT|KILL]\n" ++
             "  msr wait <path>\n" ++
             "  msr status <path>\n" ++
             "  msr exists <path>\n\n" ++
+            "Current-session selection:\n" ++
+            "  1. --session=<path>\n" ++
+            "  2. MSR_SESSION\n" ++
+            "  3. no current-session context\n\n" ++
+            "Behavior:\n" ++
+            "  - With a current-session context, attach/detach use nested passthrough.\n" ++
+            "  - Nested passthrough does not silently fall back to direct behavior.\n" ++
+            "  - In direct mode, detach requires an explicit session path.\n\n" ++
+            "Examples:\n" ++
+            "  msr attach /tmp/a.sock\n" ++
+            "  msr detach /tmp/a.sock\n" ++
+            "  msr --session=/tmp/current.sock detach\n" ++
+            "  msr --session=/tmp/current.sock attach /tmp/other.sock\n\n" ++
             "Notes:\n" ++
             "  - attach uses one socket plus an explicit attach handshake.\n" ++
             "  - attach stdin is optional; EOF on stdin does not detach by itself.\n" ++
@@ -99,12 +115,94 @@ fn openAttachmentForOwnerScopedOp(path: []const u8, takeover: bool) !struct { cl
     return .{ .cli = cli, .att = att };
 }
 
-pub fn main(init: std.process.Init) !u8 {
-    var it = std.process.Args.Iterator.init(init.minimal.args);
+fn runAttachDirect(path: []const u8, mode: client.AttachMode) u8 {
+    var cli = client.SessionClient.init(std.heap.page_allocator, path) catch return 1;
+    defer cli.deinit();
+    var att = cli.attach(mode) catch {
+        err("msr: attach rejected (session unavailable, ownership conflict, or takeover required)\n", .{});
+        return 1;
+    };
+    defer att.close();
+    attach_runtime.runAttachBridge(std.heap.page_allocator, &att, c.STDIN_FILENO, c.STDOUT_FILENO) catch {
+        err("msr: attach stream failed\n", .{});
+        return 1;
+    };
+    return 0;
+}
 
-    var argv = try std.ArrayList([]const u8).initCapacity(init.gpa, 8);
-    defer argv.deinit(init.gpa);
-    while (it.next()) |a| try argv.append(init.gpa, a);
+fn runAttachNested(current_session: []const u8, target: []const u8, takeover_requested: bool) u8 {
+    if (takeover_requested) {
+        err("msr: nested attach does not support --takeover; use direct attach for ownership takeover\n", .{});
+        return 1;
+    }
+    var nested = nested_client.NestedClient.init(std.heap.page_allocator, current_session) catch return 1;
+    defer nested.deinit();
+    nested.attach(target) catch {
+        err("msr: nested attach passthrough failed (current session has no reachable outer attached client or target attach was rejected)\n", .{});
+        return 1;
+    };
+    return 0;
+}
+
+fn runDetachDirect(path: []const u8) u8 {
+    var owner = openAttachmentForOwnerScopedOp(path, false) catch {
+        err("msr: detach requires current ownership\n", .{});
+        return 1;
+    };
+    defer owner.att.close();
+    defer owner.cli.deinit();
+
+    owner.att.detach() catch {
+        err("msr: detach failed\n", .{});
+        return 1;
+    };
+    return 0;
+}
+
+fn runDetachNested(current_session: []const u8) u8 {
+    var nested = nested_client.NestedClient.init(std.heap.page_allocator, current_session) catch return 1;
+    defer nested.deinit();
+    nested.detach() catch {
+        err("msr: nested detach passthrough failed (current session has no reachable outer attached client)\n", .{});
+        return 1;
+    };
+    return 0;
+}
+
+const ParsedArgs = struct {
+    args: std.ArrayList([]const u8),
+    session_override: ?[]const u8,
+};
+
+fn parseArgs(init: std.process.Init) !ParsedArgs {
+    var it = std.process.Args.Iterator.init(init.minimal.args);
+    var args = try std.ArrayList([]const u8).initCapacity(init.gpa, 8);
+    errdefer args.deinit(init.gpa);
+
+    var session_override: ?[]const u8 = null;
+    while (it.next()) |a| {
+        if (std.mem.startsWith(u8, a, "--session=")) {
+            session_override = a[10..];
+            continue;
+        }
+        try args.append(init.gpa, a);
+    }
+
+    return .{ .args = args, .session_override = session_override };
+}
+
+fn resolveCurrentSession(init: std.process.Init, session_override: ?[]const u8) ?[]const u8 {
+    _ = init;
+    if (session_override) |s| return s;
+    const raw = c.getenv("MSR_SESSION") orelse return null;
+    return std.mem.span(raw);
+}
+
+pub fn main(init: std.process.Init) !u8 {
+    var parsed = try parseArgs(init);
+    defer parsed.args.deinit(init.gpa);
+    const argv = parsed.args;
+    const current_session = resolveCurrentSession(init, parsed.session_override);
 
     if (argv.items.len < 2) {
         usage();
@@ -178,38 +276,26 @@ pub fn main(init: std.process.Init) !u8 {
             usage();
             return 1;
         }
-        const mode = if (argv.items.len == 4 and std.mem.eql(u8, argv.items[3], "--takeover")) client.AttachMode.takeover else client.AttachMode.exclusive;
-        var cli = client.SessionClient.init(std.heap.page_allocator, argv.items[2]) catch return 1;
-        defer cli.deinit();
-        var att = cli.attach(mode) catch {
-            err("msr: attach rejected\n", .{});
-            return 1;
-        };
-        defer att.close();
-        attach_runtime.runAttachBridge(std.heap.page_allocator, &att, c.STDIN_FILENO, c.STDOUT_FILENO) catch {
-            err("msr: attach stream failed\n", .{});
-            return 1;
-        };
-        return 0;
+        const takeover_requested = argv.items.len == 4 and std.mem.eql(u8, argv.items[3], "--takeover");
+        if (current_session) |session| {
+            return runAttachNested(session, argv.items[2], takeover_requested);
+        }
+        return runAttachDirect(argv.items[2], if (takeover_requested) .takeover else .exclusive);
     }
 
     if (std.mem.eql(u8, cmd, "detach")) {
+        if (current_session) |session| {
+            if (argv.items.len != 2) {
+                err("msr: nested detach uses the current session context and does not take an explicit path\n", .{});
+                return 1;
+            }
+            return runDetachNested(session);
+        }
         if (argv.items.len != 3) {
             usage();
             return 1;
         }
-        var owner = openAttachmentForOwnerScopedOp(argv.items[2], false) catch {
-            err("msr: detach requires current ownership\n", .{});
-            return 1;
-        };
-        defer owner.att.close();
-        defer owner.cli.deinit();
-
-        owner.att.detach() catch {
-            err("msr: detach failed\n", .{});
-            return 1;
-        };
-        return 0;
+        return runDetachDirect(argv.items[2]);
     }
 
     if (std.mem.eql(u8, cmd, "resize")) {

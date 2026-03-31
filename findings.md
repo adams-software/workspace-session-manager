@@ -81,6 +81,24 @@ The key v2 docs now reflect the working routed owner-control path:
 The old dedicated lane spec has been removed from this repo.
 There are still stale lane-heavy sections deeper in `session-nested-client.md`; those should be pruned or rewritten in a dedicated doc rewrite pass rather than mixed into implementation debugging.
 
+## Binary usability status
+The routed nested attach/detach path now works underneath and is wired through the top-level `msr` binary.
+
+Current binary direction:
+- one `msr` binary
+- resolve current-session context from `--session=/path` first, then `MSR_SESSION`
+- nested `attach <target>` and nested `detach` route through explicit `NestedClient`
+- no silent fallback to direct nested attach when passthrough fails
+
+There is now a repeatable real-binary smoke path:
+- `python3 -u scripts/smoke_msr_binary.py`
+
+That smoke currently validates:
+- direct attach
+- nested detach via `--session`
+- nested attach via `--session`
+- nested attach via `MSR_SESSION`
+
 ## Important bug we fixed
 The decisive post-switch bug was on the switched-to destination server:
 - after target/session shutdown, `session_host.getMasterFd()` became null

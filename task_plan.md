@@ -18,6 +18,7 @@ Realign `msr` implementation to the v2 specs, treating `docs/specs/v2/*` as sour
 | 9. Implement WSM shell layer | todo | Recursive discovery and deterministic jump over DSM-style nodes |
 | 10. Research spike: attach runtime state machine + testing strategy | done | Completed enough to conclude v0 should drop generic lanes and reset around one owner + PTY stream + narrow routed owner-control RPC |
 | 11. Reset v0 protocol/runtime around narrow routed owner-control RPC | in_progress | Drop lanes for v0, freeze nested attach/detach only, add unified message layer, explicit owner session state, centralized owner cleanup, minimal NestedClient, and a model-first server transition layer for owner/routed-request lifecycle tests; routed detach + routed attach now pass in the focused integration path, server_model is canonical in server, and the main docs now reflect the routed owner-control v0 path |
+| 12. Wire the actual `msr` binary around nested mode and usable CLI behavior | in_progress | Audit and update `main.zig`/CLI orchestration for direct vs nested mode, add explicit NestedClient wrapper, use `--session=/path` first then `MSR_SESSION`, route nested attach/detach through routed passthrough only, add real-binary smoke coverage, and tighten user-facing errors/help text; one-binary current-session path plus repeatable smoke coverage now work |
 
 ## Success criteria
 - Code structure matches v2 docs rather than the older runtime/manager/app split.
