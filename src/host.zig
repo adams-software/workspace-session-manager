@@ -6,6 +6,7 @@ const c = @cImport({
     @cInclude("signal.h");
     @cInclude("unistd.h");
     @cInclude("poll.h");
+    @cInclude("stdlib.h");
 });
 
 pub const ExitStatus = struct {
@@ -127,6 +128,15 @@ pub const SessionHost = struct {
                 argv_c[i] = z.ptr;
             }
             argv_c[opts.argv.len] = null;
+
+            if (opts.env) |env| {
+                for (env) |entry| {
+                    const eq = std.mem.indexOfScalar(u8, entry, '=') orelse c._exit(127);
+                    const key = a.dupeZ(u8, entry[0..eq]) catch c._exit(127);
+                    const value = a.dupeZ(u8, entry[(eq + 1)..]) catch c._exit(127);
+                    if (c.setenv(key.ptr, value.ptr, 1) != 0) c._exit(127);
+                }
+            }
 
             _ = c.execvp(argv_c[0].?, @ptrCast(argv_c.ptr));
             c._exit(127);
@@ -268,6 +278,32 @@ pub const SessionHost = struct {
             .exited => self.exit_status orelse ExitStatus{},
             .closed => self.exit_status orelse ExitStatus{},
         };
+    }
+
+    pub fn refresh(self: *SessionHost) Error!void {
+        switch (self.state) {
+            .idle, .starting, .exited, .closed => return,
+            .running => {
+                const pid = self.pid orelse return Error.InvalidState;
+                var wait_status: c_int = 0;
+                const got = c.waitpid(pid, &wait_status, c.WNOHANG);
+                if (got == 0) return;
+                if (got < 0) {
+                    const e = std.c.errno(-1);
+                    if (e == .INTR) return;
+                    return Error.InvalidArgs;
+                }
+
+                var out = ExitStatus{};
+                if (c.WIFEXITED(wait_status)) {
+                    out.code = @intCast(c.WEXITSTATUS(wait_status));
+                } else if (c.WIFSIGNALED(wait_status)) {
+                    out.signal = "SIGNALED";
+                }
+                self.exit_status = out;
+                self.state = .exited;
+            },
+        }
     }
 
     pub fn close(self: *SessionHost) Error!void {

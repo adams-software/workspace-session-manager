@@ -16,9 +16,11 @@ fn usage() void {
     out(
         "msr v0 (draft)\n" ++
             "Usage:\n" ++
+            "  msr create <path>\n" ++
+            "  msr create -a <path>\n" ++
             "  msr create <path> -- <cmd...>\n" ++
+            "  msr create -a <path> -- <cmd...>\n" ++
             "  msr attach <path> [--takeover]\n" ++
-            "  msr detach <path>\n" ++
             "  msr [--session=<current>] attach <target>\n" ++
             "  msr [--session=<current>] detach\n" ++
             "  msr resize <path> <cols> <rows> [--takeover]\n" ++
@@ -33,13 +35,17 @@ fn usage() void {
             "Behavior:\n" ++
             "  - With a current-session context, attach/detach use nested passthrough.\n" ++
             "  - Nested passthrough does not silently fall back to direct behavior.\n" ++
-            "  - In direct mode, detach requires an explicit session path.\n\n" ++
+            "  - detach is only available with a current-session context.\n\n" ++
             "Examples:\n" ++
+            "  msr create /tmp/a.sock\n" ++
+            "  msr create -a /tmp/a.sock\n" ++
+            "  msr create /tmp/a.sock -- /usr/bin/top\n" ++
             "  msr attach /tmp/a.sock\n" ++
-            "  msr detach /tmp/a.sock\n" ++
             "  msr --session=/tmp/current.sock detach\n" ++
             "  msr --session=/tmp/current.sock attach /tmp/other.sock\n\n" ++
             "Notes:\n" ++
+            "  - create with no explicit command starts the default interactive shell ($SHELL -i, else /bin/sh -i).\n" ++
+            "  - create is detached by default; use -a/--attach to attach immediately after creation.\n" ++
             "  - attach uses one socket plus an explicit attach handshake.\n" ++
             "  - attach stdin is optional; EOF on stdin does not detach by itself.\n" ++
             "  - wait is host-lifetime only in v0; no durable post-cleanup retrieval.\n" ++
@@ -47,6 +53,19 @@ fn usage() void {
             "Internal:\n" ++
             "  msr _host <path> -- <cmd...>\n",
         .{},
+    );
+}
+
+fn nestedUsage(current_session: []const u8) void {
+    out(
+        "msr nested mode\n" ++
+            "current session: {s}\n\n" ++
+            "Available commands:\n" ++
+            "  msr detach\n" ++
+            "  msr attach <target>\n\n" ++
+            "Session selection:\n" ++
+            "  --session=<path> overrides MSR_SESSION\n",
+        .{current_session},
     );
 }
 
@@ -85,6 +104,10 @@ fn spawnHostDetached(argv0: []const u8, path: []const u8, child_argv: []const []
         }
         av[n - 1] = null;
 
+        if (c.setenv("MSR_SESSION", av[2].?, 1) != 0) {
+            c._exit(127);
+        }
+
         _ = c.execvp(av[0].?, @ptrCast(av.ptr));
         c._exit(127);
     }
@@ -108,11 +131,53 @@ fn waitForReady(path: []const u8, timeout_ms: u32) bool {
 fn openAttachmentForOwnerScopedOp(path: []const u8, takeover: bool) !struct { cli: client.SessionClient, att: client.SessionAttachment } {
     var cli = try client.SessionClient.init(std.heap.page_allocator, path);
     errdefer cli.deinit();
-    const att = cli.attach(if (takeover) .takeover else .exclusive) catch |e| {
-        cli.deinit();
-        return e;
-    };
+    const att = try cli.attach(if (takeover) .takeover else .exclusive);
     return .{ .cli = cli, .att = att };
+}
+
+fn defaultShellArgv() [2][]const u8 {
+    const raw = c.getenv("SHELL");
+    const shell = if (raw) |p| std.mem.span(p) else "/bin/sh";
+    return .{ shell, "-i" };
+}
+
+
+const CreateArgs = struct {
+    path: []const u8,
+    child_argv: []const []const u8,
+    attach_after_create: bool,
+};
+
+fn parseCreateArgs(argv: [][]const u8) ?CreateArgs {
+    if (argv.len < 3) return null;
+
+    var idx: usize = 2;
+    var attach_after_create = false;
+    if (idx < argv.len and (std.mem.eql(u8, argv[idx], "-a") or std.mem.eql(u8, argv[idx], "--attach"))) {
+        attach_after_create = true;
+        idx += 1;
+    }
+    if (idx >= argv.len) return null;
+
+    const path = argv[idx];
+    idx += 1;
+
+    const child_argv = blk: {
+        if (idx == argv.len) {
+            const shell = defaultShellArgv();
+            break :blk shell[0..];
+        }
+        if (idx < argv.len and std.mem.eql(u8, argv[idx], "--") and idx + 1 < argv.len) {
+            break :blk argv[(idx + 1)..];
+        }
+        return null;
+    };
+
+    return .{
+        .path = path,
+        .child_argv = child_argv,
+        .attach_after_create = attach_after_create,
+    };
 }
 
 fn runAttachDirect(path: []const u8, mode: client.AttachMode) u8 {
@@ -137,8 +202,8 @@ fn runAttachNested(current_session: []const u8, target: []const u8, takeover_req
     }
     var nested = nested_client.NestedClient.init(std.heap.page_allocator, current_session) catch return 1;
     defer nested.deinit();
-    nested.attach(target) catch {
-        err("msr: nested attach passthrough failed (current session has no reachable outer attached client or target attach was rejected)\n", .{});
+    nested.attach(target) catch |e| {
+        err("msr: nested attach passthrough failed: {s}\n", .{@errorName(e)});
         return 1;
     };
     return 0;
@@ -162,8 +227,8 @@ fn runDetachDirect(path: []const u8) u8 {
 fn runDetachNested(current_session: []const u8) u8 {
     var nested = nested_client.NestedClient.init(std.heap.page_allocator, current_session) catch return 1;
     defer nested.deinit();
-    nested.detach() catch {
-        err("msr: nested detach passthrough failed (current session has no reachable outer attached client)\n", .{});
+    nested.detach() catch |e| {
+        err("msr: nested detach passthrough failed: {s}\n", .{@errorName(e)});
         return 1;
     };
     return 0;
@@ -205,7 +270,7 @@ pub fn main(init: std.process.Init) !u8 {
     const current_session = resolveCurrentSession(init, parsed.session_override);
 
     if (argv.items.len < 2) {
-        usage();
+        if (current_session) |session| nestedUsage(session) else usage();
         return 1;
     }
 
@@ -240,7 +305,7 @@ pub fn main(init: std.process.Init) !u8 {
             usage();
             return 1;
         }
-        const sig = if (argv.items.len == 4) argv.items[3] else null;
+        const sig = if (argv.items.len == 4) argv.items[3] else "TERM";
         var cli = client.SessionClient.init(std.heap.page_allocator, argv.items[2]) catch return 1;
         defer cli.deinit();
         cli.terminate(sig) catch {
@@ -287,15 +352,13 @@ pub fn main(init: std.process.Init) !u8 {
         if (current_session) |session| {
             if (argv.items.len != 2) {
                 err("msr: nested detach uses the current session context and does not take an explicit path\n", .{});
+                nestedUsage(session);
                 return 1;
             }
             return runDetachNested(session);
         }
-        if (argv.items.len != 3) {
-            usage();
-            return 1;
-        }
-        return runDetachDirect(argv.items[2]);
+        err("msr: detach requires --session=<path> or MSR_SESSION; external direct detach has been removed\n", .{});
+        return 1;
     }
 
     if (std.mem.eql(u8, cmd, "resize")) {
@@ -336,32 +399,47 @@ pub fn main(init: std.process.Init) !u8 {
     }
 
     if (std.mem.eql(u8, cmd, "create") or std.mem.eql(u8, cmd, "_host")) {
-        if (argv.items.len < 5) {
+        const parsed_create = parseCreateArgs(argv.items) orelse {
             usage();
             return 1;
-        }
-        if (!std.mem.eql(u8, argv.items[3], "--")) return 1;
+        };
 
-        const path = argv.items[2];
-        const child_argv = argv.items[4..];
+        const path = parsed_create.path;
+        const child_argv = parsed_create.child_argv;
 
         if (std.mem.eql(u8, cmd, "_host")) {
-            var session_host = try host.SessionHost.init(std.heap.page_allocator, .{ .argv = child_argv });
+            const env_entry = try std.fmt.allocPrint(std.heap.page_allocator, "MSR_SESSION={s}", .{path});
+            defer std.heap.page_allocator.free(env_entry);
+            const env = [_][]const u8{env_entry};
+            var session_host = try host.SessionHost.init(std.heap.page_allocator, .{ .argv = child_argv, .env = env[0..] });
             defer session_host.deinit();
             try session_host.start();
 
             var session_server = server.SessionServer.init(std.heap.page_allocator, &session_host);
             defer session_server.deinit();
-            try session_server.listen(path);
+            session_server.listen(path) catch |e| {
+                switch (e) {
+                    server.Error.AlreadyExists => err("msr: session already exists at {s}\n", .{path}),
+                    server.Error.PermissionDenied => err("msr: permission denied creating session socket at {s}\n", .{path}),
+                    server.Error.PathTooLong => err("msr: session socket path is too long: {s}\n", .{path}),
+                    else => err("msr: failed to create session at {s}\n", .{path}),
+                }
+                return 1;
+            };
 
             while (true) {
+                _ = session_host.refresh() catch {};
                 _ = session_server.step() catch {};
                 switch (session_host.getState()) {
                     .running, .starting => {
                         _ = c.usleep(10_000);
                         continue;
                     },
-                    .exited => break,
+                    .exited => {
+                        _ = session_server.stop() catch {};
+                        _ = session_host.close() catch {};
+                        break;
+                    },
                     .idle, .closed => break,
                 }
             }
@@ -370,9 +448,12 @@ pub fn main(init: std.process.Init) !u8 {
 
         spawnHostDetached(argv.items[0], path, child_argv) catch return 1;
         if (!waitForReady(path, 2000)) return 1;
+        if (parsed_create.attach_after_create) {
+            return runAttachDirect(path, .exclusive);
+        }
         return 0;
     }
 
-    usage();
+    if (current_session) |session| nestedUsage(session) else usage();
     return 1;
 }
