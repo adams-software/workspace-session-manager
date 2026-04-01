@@ -65,6 +65,21 @@ pub fn build(b: *std.Build) void {
     attach_runtime_mod.addImport("client", client_mod);
     attach_runtime_mod.addImport("protocol", protocol_mod);
 
+    const argv_parse_mod = b.addModule("argv_parse", .{
+        .root_source_file = b.path("src/argv_parse.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+
+    const cli_parse_mod = b.addModule("cli_parse", .{
+        .root_source_file = b.path("src/cli_parse.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    cli_parse_mod.addImport("argv_parse", argv_parse_mod);
+
     const exe_root = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
@@ -77,6 +92,7 @@ pub fn build(b: *std.Build) void {
     exe_root.addImport("server", server_mod);
     exe_root.addImport("attach_runtime", attach_runtime_mod);
     exe_root.addImport("nested_client", nested_client_mod);
+    exe_root.addImport("cli_parse", cli_parse_mod);
 
     const exe = b.addExecutable(.{
         .name = "msr",
@@ -158,6 +174,27 @@ pub fn build(b: *std.Build) void {
         .root_module = attach_runtime_logic_root,
     });
 
+    const argv_parse_test_root = b.createModule(.{
+        .root_source_file = b.path("src/argv_parse.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    const argv_parse_tests = b.addTest(.{
+        .root_module = argv_parse_test_root,
+    });
+
+    const cli_parse_test_root = b.createModule(.{
+        .root_source_file = b.path("src/cli_parse.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    cli_parse_test_root.addImport("argv_parse", argv_parse_mod);
+    const cli_parse_tests = b.addTest(.{
+        .root_module = cli_parse_test_root,
+    });
+
     const server_model_test_root = b.createModule(.{
         .root_source_file = b.path("src/server_model.zig"),
         .target = target,
@@ -176,6 +213,8 @@ pub fn build(b: *std.Build) void {
     const run_client_integration_tests = b.addRunArtifact(client_integration_tests);
     const run_attach_runtime_logic_tests = b.addRunArtifact(attach_runtime_logic_tests);
     const run_server_model_tests = b.addRunArtifact(server_model_tests);
+    const run_argv_parse_tests = b.addRunArtifact(argv_parse_tests);
+    const run_cli_parse_tests = b.addRunArtifact(cli_parse_tests);
 
     const test_step = b.step("test", "Run v2 tests");
     test_step.dependOn(&run_host_tests.step);
@@ -185,6 +224,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_client_integration_tests.step);
     test_step.dependOn(&run_attach_runtime_logic_tests.step);
     test_step.dependOn(&run_server_model_tests.step);
+    test_step.dependOn(&run_argv_parse_tests.step);
+    test_step.dependOn(&run_cli_parse_tests.step);
 
     const test_host_step = b.step("test-host", "Run host module tests");
     test_host_step.dependOn(&run_host_tests.step);
@@ -204,6 +245,12 @@ pub fn build(b: *std.Build) void {
 
     const test_server_model_step = b.step("test-server-model", "Run server model transition tests");
     test_server_model_step.dependOn(&run_server_model_tests.step);
+
+    const test_argv_parse_step = b.step("test-argv-parse", "Run generic argv parser tests");
+    test_argv_parse_step.dependOn(&run_argv_parse_tests.step);
+
+    const test_cli_parse_step = b.step("test-cli-parse", "Run msr CLI parser tests");
+    test_cli_parse_step.dependOn(&run_cli_parse_tests.step);
 
     const smoke_cmd = b.addSystemCommand(&.{ "python3", "-u", "scripts/smoke_msr_binary.py" });
     smoke_cmd.setCwd(b.path("."));

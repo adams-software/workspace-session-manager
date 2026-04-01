@@ -238,6 +238,12 @@ pub fn rpcCall(allocator: std.mem.Allocator, path: []const u8, req_msg: protocol
     defer allocator.free(req);
     protocol.writeFrame(fd, req) catch return error.IoError;
 
+    var pfd = c.struct_pollfd{ .fd = fd, .events = c.POLLIN, .revents = 0 };
+    const pr = c.poll(&pfd, 1, 3000);
+    if (pr < 0) return error.IoError;
+    if (pr == 0) return error.UnexpectedEof;
+    if ((pfd.revents & c.POLLIN) == 0) return error.UnexpectedEof;
+
     const res_bytes = protocol.readFrame(allocator, fd, 64 * 1024) catch |e| switch (e) {
         error.UnexpectedEof => return error.UnexpectedEof,
         else => return error.ProtocolError,

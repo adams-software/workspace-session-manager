@@ -279,3 +279,27 @@
   - these now emit command-specific error text plus one-line command usage instead of dumping the full outer help
 - Nested self-attach is now explicitly rejected with a specific error instead of falling through to a generic attach failure.
 - Remaining deferred topic: larger CLI redesign toward a path-first form (e.g. `msr <path> <command> ...`) is intentionally deferred; current checkpoint keeps the command-first CLI but documents nested behavior much more clearly.
+
+- Began the CLI parser architecture refactor:
+  - added `src/argv_parse.zig` as a generic argv grammar layer
+  - added `src/cli_parse.zig` as the `msr`-specific matcher/validator layer
+  - wired parser-focused test targets into `build.zig`
+- Reworked `main.zig` to route normal public commands through `cli_parse` while handling internal `_host` as a pre-parser branch.
+- Fixed a parser/executable contract mismatch:
+  - generic parser now parses the argv slice it is actually given
+  - `main.zig` passes `argv[1..]` into `cli_parse`
+- Fixed `_host` accidentally going through public parsing during the refactor; `_host` is now handled before `cli_parse`.
+- Added ownership cleanup for parser-allocated create literal tails via `ParsedCli.deinit(...)` and corresponding `main.zig` cleanup.
+- Hardened stale owner-forward failure handling in `server.zig`:
+  - if applying owner-forward actions fails during delivery to the owner, the server now drops the owner as `owner_disconnected` instead of letting the requester hang.
+- Hardened the internal `_host` loop in `main.zig`:
+  - `session_server.step()` errors are no longer silently swallowed
+  - `_host` now fails closed on fatal server step errors instead of continuing after internal server failure
+- Added a client-side bounded wait for synchronous RPC responses in `client.rpcCall(...)` using `poll()` with a timeout, to prevent future infinite CLI hangs when the server never produces a terminal frame.
+- Tightened boolean long-flag handling in `cli_parse.zig`:
+  - `--attach` and `--force` are now treated as boolean flags only for the relevant commands
+  - unexpected values like `--attach=/tmp/x` fail explicitly instead of being silently misparsed.
+- Confirmed that current-session selection works in both forms:
+  - `--session=<path>`
+  - `--session <path>`
+- Confirmed stale nested-detach behavior is now bounded rather than hanging forever in manual repros; observed explicit failures like `OwnerDisconnected` / `ConnectFailed` instead of indefinite stalls.

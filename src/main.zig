@@ -4,6 +4,7 @@ const server = @import("server");
 const client = @import("client");
 const nested_client = @import("nested_client");
 const attach_runtime = @import("attach_runtime");
+const cli_parse = @import("cli_parse");
 const c = @cImport({
     @cInclude("unistd.h");
     @cInclude("stdlib.h");
@@ -25,43 +26,43 @@ fn usage() void {
             "  current session owner. All other commands keep their normal\n" ++
             "  explicit-argument behavior.\n\n" ++
             "USAGE\n" ++
-            "  msr create [-a|--attach] <path> [-- <cmd...>]\n" ++
-            "  msr attach <path> [--takeover]\n" ++
-            "  msr detach\n" ++
+            "  msr c [-a|--attach] <path> [-- <cmd...>]\n" ++
+            "  msr a [-f|--force] <path>\n" ++
+            "  msr d\n" ++
             "  msr current\n" ++
-            "  msr resize <path> <cols> <rows> [--takeover]\n" ++
-            "  msr terminate <path> [TERM|INT|KILL]\n" ++
+            "  msr resize [-f|--force] <path> <cols> <rows>\n" ++
+            "  msr terminate [-f|--force] <path> [TERM|INT|KILL]\n" ++
             "  msr wait <path>\n" ++
             "  msr status <path>\n" ++
             "  msr exists <path>\n\n" ++
             "COMMANDS\n" ++
-            "  create      create a session; use -a to attach immediately\n" ++
-            "  attach      attach directly, or route through current session in nested mode\n" ++
-            "  detach      detach the current session\n" ++
-            "  current     print the current session path\n" ++
-            "  resize      resize a session PTY\n" ++
-            "  terminate   send a signal to a session\n" ++
-            "  wait        wait for session exit and print its status\n" ++
-            "  status      print session state\n" ++
-            "  exists      test whether a session socket is reachable\n\n" ++
+            "  c          create a session; use -a to attach immediately\n" ++
+            "  a          attach directly, or route through current session in nested mode\n" ++
+            "  d          detach the current session\n" ++
+            "  current    print the current session path\n" ++
+            "  resize     resize a session PTY; use -f to force takeover\n" ++
+            "  terminate  send TERM by default; use -f for KILL or pass TERM|INT|KILL\n" ++
+            "  wait       wait for session exit and print its status\n" ++
+            "  status     print session state\n" ++
+            "  exists     test whether a session socket is reachable\n\n" ++
             "CURRENT SESSION\n" ++
-            "  --session=<path> overrides MSR_SESSION\n\n" ++
+            "  --session=<path> or --session <path> overrides MSR_SESSION\n\n" ++
             "NESTED MODE\n" ++
             "  When a current session is selected, only these commands change:\n" ++
-            "    msr attach <target>   route attach through the current session owner\n" ++
-            "    msr detach            detach the current session\n\n" ++
+            "    msr a <target>   route attach through the current session owner\n" ++
+            "    msr d            detach the current session\n\n" ++
             "  All other commands keep their normal explicit-argument behavior.\n",
         .{},
     );
 }
 
-fn usageCreate() void { out("usage: msr create [-a|--attach] <path> [-- <cmd...>]\n", .{}); }
-fn usageAttachDirect() void { out("usage: msr attach <path> [--takeover]\n", .{}); }
-fn usageAttachNested() void { out("usage: msr attach <target>\n", .{}); }
-fn usageDetach() void { out("usage: msr detach\n", .{}); }
+fn usageCreate() void { out("usage: msr c [-a|--attach] <path> [-- <cmd...>]\n", .{}); }
+fn usageAttachDirect() void { out("usage: msr a [-f|--force] <path>\n", .{}); }
+fn usageAttachNested() void { out("usage: msr a <target>\n", .{}); }
+fn usageDetach() void { out("usage: msr d\n", .{}); }
 fn usageCurrent() void { out("usage: msr current\n", .{}); }
-fn usageResize() void { out("usage: msr resize <path> <cols> <rows> [--takeover]\n", .{}); }
-fn usageTerminate() void { out("usage: msr terminate <path> [TERM|INT|KILL]\n", .{}); }
+fn usageResize() void { out("usage: msr resize [-f|--force] <path> <cols> <rows>\n", .{}); }
+fn usageTerminate() void { out("usage: msr terminate [-f|--force] <path> [TERM|INT|KILL]\n", .{}); }
 fn usageWait() void { out("usage: msr wait <path>\n", .{}); }
 fn usageStatus() void { out("usage: msr status <path>\n", .{}); }
 fn usageExists() void { out("usage: msr exists <path>\n", .{}); }
@@ -71,8 +72,9 @@ fn nestedUsage(current_session: []const u8) void {
         "NESTED MODE\n" ++
             "  current session: {s}\n\n" ++
             "  In this context:\n" ++
-            "    attach <target>   routes through the current session owner\n" ++
-            "    detach            detaches the current session\n" ++
+            "    a <target>      routes through the current session owner\n" ++
+            "    d               detaches the current session\n" ++
+            "    current         prints the current session path\n" ++
             "    all other commands keep their normal explicit-argument behavior\n\n",
         .{current_session},
     );
@@ -151,42 +153,6 @@ fn defaultShellArgv() [2][]const u8 {
     return .{ shell, "-i" };
 }
 
-
-const CreateArgs = struct {
-    path: []const u8,
-    child_argv: ?[]const []const u8,
-    attach_after_create: bool,
-};
-
-fn parseCreateArgs(argv: [][]const u8) ?CreateArgs {
-    if (argv.len < 3) return null;
-
-    var idx: usize = 2;
-    var attach_after_create = false;
-    if (idx < argv.len and (std.mem.eql(u8, argv[idx], "-a") or std.mem.eql(u8, argv[idx], "--attach"))) {
-        attach_after_create = true;
-        idx += 1;
-    }
-    if (idx >= argv.len) return null;
-
-    const path = argv[idx];
-    idx += 1;
-
-    const child_argv = blk: {
-        if (idx == argv.len) break :blk null;
-        if (idx < argv.len and std.mem.eql(u8, argv[idx], "--") and idx + 1 < argv.len) {
-            break :blk argv[(idx + 1)..];
-        }
-        return null;
-    };
-
-    return .{
-        .path = path,
-        .child_argv = child_argv,
-        .attach_after_create = attach_after_create,
-    };
-}
-
 fn runAttachDirect(path: []const u8, mode: client.AttachMode) u8 {
     var cli = client.SessionClient.init(std.heap.page_allocator, path) catch return 1;
     defer cli.deinit();
@@ -205,9 +171,9 @@ fn runAttachDirect(path: []const u8, mode: client.AttachMode) u8 {
     return 0;
 }
 
-fn runAttachNested(current_session: []const u8, target: []const u8, takeover_requested: bool) u8 {
-    if (takeover_requested) {
-        err("msr: nested attach does not support --takeover; use direct attach for ownership takeover\n", .{});
+fn runAttachNested(current_session: []const u8, target: []const u8, force_requested: bool) u8 {
+    if (force_requested) {
+        err("msr: nested attach does not support -f|--force; use direct attach for ownership takeover\n", .{});
         return 1;
     }
     if (std.mem.eql(u8, current_session, target)) {
@@ -223,21 +189,6 @@ fn runAttachNested(current_session: []const u8, target: []const u8, takeover_req
     return 0;
 }
 
-fn runDetachDirect(path: []const u8) u8 {
-    var owner = openAttachmentForOwnerScopedOp(path, false) catch {
-        err("msr: detach requires current ownership\n", .{});
-        return 1;
-    };
-    defer owner.att.close();
-    defer owner.cli.deinit();
-
-    owner.att.detach() catch {
-        err("msr: detach failed\n", .{});
-        return 1;
-    };
-    return 0;
-}
-
 fn runDetachNested(current_session: []const u8) u8 {
     var nested = nested_client.NestedClient.init(std.heap.page_allocator, current_session) catch return 1;
     defer nested.deinit();
@@ -248,256 +199,260 @@ fn runDetachNested(current_session: []const u8) u8 {
     return 0;
 }
 
-const ParsedArgs = struct {
-    args: std.ArrayList([]const u8),
-    session_override: ?[]const u8,
-};
-
-fn parseArgs(init: std.process.Init) !ParsedArgs {
-    var it = std.process.Args.Iterator.init(init.minimal.args);
-    var args = try std.ArrayList([]const u8).initCapacity(init.gpa, 8);
-    errdefer args.deinit(init.gpa);
-
-    var session_override: ?[]const u8 = null;
-    while (it.next()) |a| {
-        if (std.mem.startsWith(u8, a, "--session=")) {
-            session_override = a[10..];
-            continue;
-        }
-        try args.append(init.gpa, a);
-    }
-
-    return .{ .args = args, .session_override = session_override };
-}
-
-fn resolveCurrentSession(init: std.process.Init, session_override: ?[]const u8) ?[]const u8 {
-    _ = init;
-    if (session_override) |s| return s;
-    const raw = c.getenv("MSR_SESSION") orelse return null;
-    return std.mem.span(raw);
+fn signalName(sig: cli_parse.SignalSpec) []const u8 {
+    return switch (sig) {
+        .term => "TERM",
+        .int => "INT",
+        .kill => "KILL",
+    };
 }
 
 pub fn main(init: std.process.Init) !u8 {
-    var parsed = try parseArgs(init);
-    defer parsed.args.deinit(init.gpa);
-    const argv = parsed.args;
-    const current_session = resolveCurrentSession(init, parsed.session_override);
+    var it = std.process.Args.Iterator.init(init.minimal.args);
+    var argv_list = std.ArrayList([]const u8){};
+    defer argv_list.deinit(init.gpa);
+    while (it.next()) |a| try argv_list.append(init.gpa, a);
+    const argv = argv_list.items;
 
-    if (argv.items.len < 2) {
-        if (current_session) |session| nestedUsage(session) else usage();
-        return 1;
-    }
-
-    const cmd = argv.items[1];
-
-    if (std.mem.eql(u8, cmd, "help") or std.mem.eql(u8, cmd, "--help") or std.mem.eql(u8, cmd, "-h")) {
-        usage();
-        return 0;
-    }
-
-    if (std.mem.eql(u8, cmd, "current")) {
-        if (argv.items.len != 2) {
-            err("msr: current does not take additional arguments\n", .{});
-            usageCurrent();
+    if (argv.len >= 2 and std.mem.eql(u8, argv[1], "_host")) {
+        if (argv.len < 4 or !std.mem.eql(u8, argv[3], "--")) {
+            err("msr: invalid _host arguments\n", .{});
             return 1;
         }
-        if (current_session) |session| {
-            out("{s}\n", .{session});
-            return 0;
-        }
-        err("msr: current requires a current session context (--session or MSR_SESSION)\n", .{});
-        usageCurrent();
-        return 1;
-    }
+        const path = argv[2];
+        const child_argv = argv[4..];
+        const env_entry = try std.fmt.allocPrint(std.heap.page_allocator, "MSR_SESSION={s}", .{path});
+        defer std.heap.page_allocator.free(env_entry);
+        const env = [_][]const u8{env_entry};
+        var session_host = try host.SessionHost.init(std.heap.page_allocator, .{ .argv = child_argv, .env = env[0..] });
+        defer session_host.deinit();
+        try session_host.start();
 
-    if (std.mem.eql(u8, cmd, "status")) {
-        if (argv.items.len != 3) {
-            err("msr: status requires <path>\n", .{});
-            usageStatus();
-            return 1;
-        }
-        var cli = client.SessionClient.init(std.heap.page_allocator, argv.items[2]) catch {
-            err("msr: failed to create client\n", .{});
-            return 1;
-        };
-        defer cli.deinit();
-        const st = cli.status() catch {
-            err("msr: failed to contact session\n", .{});
-            return 1;
-        };
-        defer std.heap.page_allocator.free(@constCast(st.status));
-        out("{s}\n", .{st.status});
-        return if (std.mem.eql(u8, st.status, "running") or std.mem.eql(u8, st.status, "starting") or std.mem.eql(u8, st.status, "exited")) 0 else 1;
-    }
-
-    if (std.mem.eql(u8, cmd, "terminate")) {
-        if (argv.items.len != 3 and argv.items.len != 4) {
-            err("msr: terminate requires <path> and optional signal\n", .{});
-            usageTerminate();
-            return 1;
-        }
-        const sig = if (argv.items.len == 4) argv.items[3] else "TERM";
-        var cli = client.SessionClient.init(std.heap.page_allocator, argv.items[2]) catch return 1;
-        defer cli.deinit();
-        cli.terminate(sig) catch {
-            err("msr: failed to contact session\n", .{});
-            return 1;
-        };
-        return 0;
-    }
-
-    if (std.mem.eql(u8, cmd, "wait")) {
-        if (argv.items.len != 3) {
-            err("msr: wait requires <path>\n", .{});
-            usageWait();
-            return 1;
-        }
-        var cli = client.SessionClient.init(std.heap.page_allocator, argv.items[2]) catch return 1;
-        defer cli.deinit();
-        const st = cli.wait() catch {
-            err("msr: failed to contact session\n", .{});
-            return 1;
-        };
-        defer if (st.signal) |s| std.heap.page_allocator.free(@constCast(s));
-
-        if (st.code) |code| {
-            out("exit_code={d}\n", .{code});
-            return @intCast(@min(@as(i32, 255), @max(@as(i32, 0), code)));
-        }
-        out("exit_signal={s}\n", .{st.signal orelse "unknown"});
-        return 1;
-    }
-
-    if (std.mem.eql(u8, cmd, "attach")) {
-        if (current_session) |session| {
-            if (argv.items.len != 3) {
-                err("msr: nested attach requires <target> and does not support --takeover\n", .{});
-                usageAttachNested();
-                return 1;
+        var session_server = server.SessionServer.init(std.heap.page_allocator, &session_host);
+        defer session_server.deinit();
+        session_server.listen(path) catch |e| {
+            switch (e) {
+                server.Error.AlreadyExists => err("msr: session already exists at {s}\n", .{path}),
+                server.Error.PermissionDenied => err("msr: permission denied creating session socket at {s}\n", .{path}),
+                server.Error.PathTooLong => err("msr: session socket path is too long: {s}\n", .{path}),
+                else => err("msr: failed to create session at {s}\n", .{path}),
             }
-            const takeover_requested = false;
-            return runAttachNested(session, argv.items[2], takeover_requested);
-        }
-        if (argv.items.len != 3 and argv.items.len != 4) {
-            err("msr: attach requires <path> and optional --takeover\n", .{});
-            usageAttachDirect();
-            return 1;
-        }
-        const takeover_requested = argv.items.len == 4 and std.mem.eql(u8, argv.items[3], "--takeover");
-        return runAttachDirect(argv.items[2], if (takeover_requested) .takeover else .exclusive);
-    }
-
-    if (std.mem.eql(u8, cmd, "detach")) {
-        if (current_session) |session| {
-            if (argv.items.len != 2) {
-                err("msr: nested detach does not take an explicit path\n", .{});
-                usageDetach();
-                return 1;
-            }
-            return runDetachNested(session);
-        }
-        err("msr: detach requires a current session context (--session or MSR_SESSION)\n", .{});
-        usageDetach();
-        return 1;
-    }
-
-    if (std.mem.eql(u8, cmd, "resize")) {
-        if (argv.items.len != 5 and argv.items.len != 6) {
-            err("msr: resize requires <path> <cols> <rows> and optional --takeover\n", .{});
-            usageResize();
-            return 1;
-        }
-        const cols = parseU16(argv.items[3]) catch return 1;
-        const rows = parseU16(argv.items[4]) catch return 1;
-        const takeover = argv.items.len == 6 and std.mem.eql(u8, argv.items[5], "--takeover");
-
-        var owner = openAttachmentForOwnerScopedOp(argv.items[2], takeover) catch {
-            err("msr: resize requires current ownership or --takeover\n", .{});
-            return 1;
-        };
-        defer owner.att.close();
-        defer owner.cli.deinit();
-
-        owner.att.resize(cols, rows) catch {
-            err("msr: resize failed\n", .{});
-            return 1;
-        };
-        return 0;
-    }
-
-    if (std.mem.eql(u8, cmd, "exists")) {
-        if (argv.items.len != 3) {
-            err("msr: exists requires <path>\n", .{});
-            usageExists();
-            return 1;
-        }
-        const fd = client.connectUnix(argv.items[2]) catch {
-            out("false\n", .{});
-            return 1;
-        };
-        _ = c.close(fd);
-        out("true\n", .{});
-        return 0;
-    }
-
-    if (std.mem.eql(u8, cmd, "create") or std.mem.eql(u8, cmd, "_host")) {
-        const parsed_create = parseCreateArgs(argv.items) orelse {
-            err("msr: invalid create arguments\n", .{});
-            usageCreate();
             return 1;
         };
 
-        const path = parsed_create.path;
-        const shell_argv = defaultShellArgv();
-        const child_argv = parsed_create.child_argv orelse shell_argv[0..];
-
-        if (std.mem.eql(u8, cmd, "_host")) {
-            const env_entry = try std.fmt.allocPrint(std.heap.page_allocator, "MSR_SESSION={s}", .{path});
-            defer std.heap.page_allocator.free(env_entry);
-            const env = [_][]const u8{env_entry};
-            var session_host = try host.SessionHost.init(std.heap.page_allocator, .{ .argv = child_argv, .env = env[0..] });
-            defer session_host.deinit();
-            try session_host.start();
-
-            var session_server = server.SessionServer.init(std.heap.page_allocator, &session_host);
-            defer session_server.deinit();
-            session_server.listen(path) catch |e| {
-                switch (e) {
-                    server.Error.AlreadyExists => err("msr: session already exists at {s}\n", .{path}),
-                    server.Error.PermissionDenied => err("msr: permission denied creating session socket at {s}\n", .{path}),
-                    server.Error.PathTooLong => err("msr: session socket path is too long: {s}\n", .{path}),
-                    else => err("msr: failed to create session at {s}\n", .{path}),
-                }
+        while (true) {
+            _ = session_host.refresh() catch {};
+            _ = session_server.step() catch |e| {
+                err("msr: internal server step failed: {s}\n", .{@errorName(e)});
+                _ = session_server.stop() catch {};
+                _ = session_host.close() catch {};
                 return 1;
             };
-
-            while (true) {
-                _ = session_host.refresh() catch {};
-                _ = session_server.step() catch {};
-                switch (session_host.getState()) {
-                    .running, .starting => {
-                        _ = c.usleep(10_000);
-                        continue;
-                    },
-                    .exited => {
-                        _ = session_server.stop() catch {};
-                        _ = session_host.close() catch {};
-                        break;
-                    },
-                    .idle, .closed => break,
-                }
+            switch (session_host.getState()) {
+                .running, .starting => {
+                    _ = c.usleep(10_000);
+                    continue;
+                },
+                .exited => {
+                    _ = session_server.stop() catch {};
+                    _ = session_host.close() catch {};
+                    break;
+                },
+                .idle, .closed => break,
             }
-            return 0;
-        }
-
-        spawnHostDetached(argv.items[0], path, child_argv) catch return 1;
-        if (!waitForReady(path, 2000)) return 1;
-        if (parsed_create.attach_after_create) {
-            return runAttachDirect(path, .exclusive);
         }
         return 0;
     }
 
-    if (current_session) |session| nestedUsage(session) else usage();
-    return 1;
+    const parsed = try cli_parse.parseArgv(init.gpa, if (argv.len > 1) argv[1..] else &.{});
+    switch (parsed) {
+        .fail => |failure| {
+            const raw_current_session = blk: {
+                var explicit_session: ?[]const u8 = null;
+                var idx: usize = 1;
+                while (idx < argv.len) : (idx += 1) {
+                    const tok = argv[idx];
+                    if (std.mem.startsWith(u8, tok, "--session=")) {
+                        explicit_session = tok[10..];
+                        break;
+                    }
+                    if (std.mem.eql(u8, tok, "--session") and idx + 1 < argv.len) {
+                        explicit_session = argv[idx + 1];
+                        break;
+                    }
+                }
+                if (explicit_session) |s| break :blk s;
+                const raw = c.getenv("MSR_SESSION") orelse break :blk null;
+                break :blk std.mem.span(raw);
+            };
+
+            switch (failure.kind) {
+                .no_command => {
+                    if (raw_current_session) |session| nestedUsage(session) else usage();
+                    return 1;
+                },
+                .unknown_command => {
+                    usage();
+                    return 1;
+                },
+                else => {
+                    if (failure.command) |cmd_kind| {
+                        switch (cmd_kind) {
+                            .help => usage(),
+                            .current => {
+                                err("msr: current does not take additional arguments\n", .{});
+                                usageCurrent();
+                            },
+                            .create => {
+                                err("msr: invalid create arguments\n", .{});
+                                usageCreate();
+                            },
+                            .attach => {
+                                if (raw_current_session != null) {
+                                    err("msr: nested attach requires <target> and does not support -f|--force\n", .{});
+                                    usageAttachNested();
+                                } else {
+                                    err("msr: attach requires <path> and optional -f|--force\n", .{});
+                                    usageAttachDirect();
+                                }
+                            },
+                            .detach => {
+                                err("msr: detach does not take additional arguments\n", .{});
+                                usageDetach();
+                            },
+                            .resize => {
+                                err("msr: resize requires <path> <cols> <rows> and optional -f|--force\n", .{});
+                                usageResize();
+                            },
+                            .terminate => {
+                                err("msr: terminate requires <path> and optional signal or -f|--force\n", .{});
+                                usageTerminate();
+                            },
+                            .wait => {
+                                err("msr: wait requires <path>\n", .{});
+                                usageWait();
+                            },
+                            .status => {
+                                err("msr: status requires <path>\n", .{});
+                                usageStatus();
+                            },
+                            .exists => {
+                                err("msr: exists requires <path>\n", .{});
+                                usageExists();
+                            },
+                        }
+                    } else {
+                        usage();
+                    }
+                    return 1;
+                },
+            }
+        },
+        .ok => |ok| {
+            var owned_ok = ok;
+            defer owned_ok.deinit(init.gpa);
+            const current_session = owned_ok.current_session;
+            switch (owned_ok.command) {
+                .help => {
+                    usage();
+                    return 0;
+                },
+                .current => {
+                    if (current_session) |session| {
+                        out("{s}\n", .{session});
+                        return 0;
+                    }
+                    err("msr: current requires a current session context (--session or MSR_SESSION)\n", .{});
+                    usageCurrent();
+                    return 1;
+                },
+                .status => |args| {
+                    var cli = client.SessionClient.init(std.heap.page_allocator, args.path) catch {
+                        err("msr: failed to create client\n", .{});
+                        return 1;
+                    };
+                    defer cli.deinit();
+                    const st = cli.status() catch {
+                        err("msr: failed to contact session\n", .{});
+                        return 1;
+                    };
+                    defer std.heap.page_allocator.free(@constCast(st.status));
+                    out("{s}\n", .{st.status});
+                    return if (std.mem.eql(u8, st.status, "running") or std.mem.eql(u8, st.status, "starting") or std.mem.eql(u8, st.status, "exited")) 0 else 1;
+                },
+                .wait => |args| {
+                    var cli = client.SessionClient.init(std.heap.page_allocator, args.path) catch return 1;
+                    defer cli.deinit();
+                    const st = cli.wait() catch {
+                        err("msr: failed to contact session\n", .{});
+                        return 1;
+                    };
+                    defer if (st.signal) |s| std.heap.page_allocator.free(@constCast(s));
+                    if (st.code) |code| {
+                        out("exit_code={d}\n", .{code});
+                        return @intCast(@min(@as(i32, 255), @max(@as(i32, 0), code)));
+                    }
+                    out("exit_signal={s}\n", .{st.signal orelse "unknown"});
+                    return 1;
+                },
+                .attach => |args| {
+                    if (current_session) |session| {
+                        return runAttachNested(session, args.target, args.force);
+                    }
+                    return runAttachDirect(args.target, if (args.force) .takeover else .exclusive);
+                },
+                .detach => {
+                    if (current_session) |session| {
+                        return runDetachNested(session);
+                    }
+                    err("msr: detach requires a current session context (--session or MSR_SESSION)\n", .{});
+                    usageDetach();
+                    return 1;
+                },
+                .resize => |args| {
+                    var owner = openAttachmentForOwnerScopedOp(args.path, args.force) catch {
+                        err("msr: resize requires current ownership or -f|--force\n", .{});
+                        return 1;
+                    };
+                    defer owner.att.close();
+                    defer owner.cli.deinit();
+                    owner.att.resize(args.cols, args.rows) catch {
+                        err("msr: resize failed\n", .{});
+                        return 1;
+                    };
+                    return 0;
+                },
+                .exists => |args| {
+                    const fd = client.connectUnix(args.path) catch {
+                        out("false\n", .{});
+                        return 1;
+                    };
+                    _ = c.close(fd);
+                    out("true\n", .{});
+                    return 0;
+                },
+                .terminate => |args| {
+                    var cli = client.SessionClient.init(std.heap.page_allocator, args.path) catch return 1;
+                    defer cli.deinit();
+                    cli.terminate(signalName(args.signal)) catch {
+                        err("msr: failed to contact session\n", .{});
+                        return 1;
+                    };
+                    return 0;
+                },
+                .create => |args| {
+                    const path = args.path;
+                    const shell_argv = defaultShellArgv();
+                    const child_argv = args.child_argv orelse shell_argv[0..];
+
+                    spawnHostDetached(argv[0], path, child_argv) catch return 1;
+                    if (!waitForReady(path, 2000)) return 1;
+                    if (args.attach_after_create) {
+                        return runAttachDirect(path, .exclusive);
+                    }
+                    return 0;
+                },
+            }
+        },
+    }
 }

@@ -211,7 +211,10 @@ pub const SessionServer = struct {
         defer server_model.deinitActionList(self.allocator, &actions);
 
         try server_model.handleOwnerForward(&self.model, self.allocator, client_fd, req.request_id, req.action, &actions);
-        try self.applyModelActions(&actions);
+        self.applyModelActions(&actions) catch {
+            self.dropOwner("owner_disconnected");
+            return true;
+        };
 
         for (actions.items) |action| {
             switch (action) {

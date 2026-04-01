@@ -131,3 +131,20 @@ Fix: if an owner is attached but `getMasterFd()` is gone, treat that as `pty_clo
 - Nested/current-session context is functional enough for `current`, `attach`, and `detach` UX.
 - Attach terminal behavior is now substantially improved and usable for interactive bash/readline work.
 - Remaining deferred topic: whether to redesign the CLI into a path-first form is still an open product question, not part of this checkpoint.
+
+
+## Parser architecture lessons
+- The most robust CLI structure here is a two-layer design:
+  1. generic argv grammar parser (`argv_parse`) that handles command token selection, options, positionals, and `--`
+  2. app-specific matcher/validator (`cli_parse`) that maps alias sets and command semantics into typed `msr` commands
+- The generic parser should parse the slice it is actually given; it should not assume `argv[0]` is always the executable name. That assumption caused a real executable/parser contract mismatch during integration.
+- Short options should be treated as flags by default at the generic layer. Long options may support `--opt=value` / `--opt value`, but boolean long flags still need app-layer validation so they do not silently consume following positionals.
+- Parser-owned allocations (for example duplicated literal tails after `--`) need an explicit ownership/deinit path once the parse result becomes a typed command object.
+
+## Nested detach / owner-forward hang lessons
+- The nested detach hang is not primarily a parser bug and likely not a `nested_client` bug. The core symptom is: client waits indefinitely in synchronous `rpcCall()` when the server never produces a terminal response frame.
+- `server_model` already covered many logical owner states, but there was still an operational hole around stale/broken owner-forward delivery in `server.zig`.
+- The dangerous path was: pending requester installed, delivery of `owner_control_req` to stale owner fails, server step error gets swallowed, requester never receives a final reply.
+- Hardening the forwarding path to drop the owner on failed owner-control delivery materially improved this.
+- Swallowing `session_server.step()` errors in `_host` was also a real operational hazard. Failing closed there is safer than continuing after a fatal server-side error.
+- Even with server-side fixes, a bounded client-side timeout on blocking RPC waits is worth keeping as a safety net so this class of bug cannot reappear as an infinite hang.

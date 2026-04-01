@@ -171,6 +171,9 @@ test "routed owner_control detach returns success" {
         }
     }.run, .{&owner_att});
 
+    const ready_thread = try spawnBoundedServerThread(&s, 4, 10_000);
+    ready_thread.join();
+
     const route_thread = try spawnBoundedServerThread(&s, 40, 10_000);
 
     const fd = try client.connectUnix(path);
@@ -196,6 +199,67 @@ test "routed owner_control detach returns success" {
     _ = try h.wait();
     try h.close();
     std.debug.print("[client-test] done routed detach\n", .{});
+}
+
+test "routed owner_control detach with stale owner returns owner_disconnected" {
+    std.debug.print("[client-test] start routed detach stale owner\n", .{});
+    var h = try host.SessionHost.init(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "sleep 2" } });
+    defer h.deinit();
+    try h.start();
+
+    var s = server.SessionServer.init(std.testing.allocator, &h);
+    defer s.deinit();
+    const path = "/tmp/msr-routed-owner-detach-stale.sock";
+    _ = c.unlink(path);
+    defer _ = c.unlink(path);
+    try s.listen(path);
+
+    const owner_attach_thread = try spawnBoundedServerThread(&s, 4, 10_000);
+    var owner_cli = try client.SessionClient.init(std.testing.allocator, path);
+    defer owner_cli.deinit();
+    var owner_att = try owner_cli.attach(.exclusive);
+    owner_attach_thread.join();
+
+    const owner_runtime_thread = try std.Thread.spawn(.{}, struct {
+        fn run(att: *client.SessionAttachment) void {
+            attach_runtime.runAttachBridge(std.testing.allocator, att, c.STDIN_FILENO, c.STDOUT_FILENO) catch {};
+        }
+    }.run, .{&owner_att});
+
+    const ready_thread = try spawnBoundedServerThread(&s, 4, 10_000);
+    ready_thread.join();
+
+    // Simulate a stale/broken owner bridge by abruptly closing the owner attachment
+    // before the requester sends owner_forward(detach).
+    owner_att.close();
+    owner_runtime_thread.join();
+
+    const route_thread = try spawnBoundedServerThread(&s, 40, 10_000);
+
+    const fd = try client.connectUnix(path);
+    defer _ = c.close(fd);
+    const req = try protocol.encodeControlReq(std.testing.allocator, .{
+        .op = "owner_forward",
+        .request_id = 1,
+        .action = .{ .op = "detach" },
+    });
+    defer std.testing.allocator.free(req);
+    try protocol.writeFrame(fd, req);
+
+    const res_bytes = try readFrameWithTimeout(std.testing.allocator, fd, 64 * 1024, 1000);
+    defer std.testing.allocator.free(res_bytes);
+    var res = try protocol.parseControlRes(std.testing.allocator, res_bytes);
+    defer protocol.freeControlRes(std.testing.allocator, &res);
+    try std.testing.expect(!res.ok);
+    try std.testing.expect(res.err != null);
+    try std.testing.expectEqualStrings("owner_disconnected", res.err.?.code);
+
+    route_thread.join();
+
+    try h.terminate("KILL");
+    _ = try h.wait();
+    try h.close();
+    std.debug.print("[client-test] done routed detach stale owner\n", .{});
 }
 
 test "routed owner_control attach returns success" {
@@ -249,6 +313,9 @@ test "routed owner_control attach returns success" {
             attach_runtime.runAttachBridge(std.testing.allocator, att, in_fd, out_fd) catch {};
         }
     }.run, .{ &owner_att, &owner_runtime_done, runtime_in[0], runtime_out[1] });
+
+    const ready_thread = try spawnBoundedServerThread(&s1, 4, 10_000);
+    ready_thread.join();
 
     const dst_server_thread = try spawnUntilDoneServerThread(&s2, &owner_runtime_done, 10_000);
     const route_thread = try spawnBoundedServerThread(&s1, 60, 10_000);
