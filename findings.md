@@ -164,3 +164,9 @@ Fix: if an owner is attached but `getMasterFd()` is gone, treat that as `pty_clo
 - Once `_host` stopped swallowing step errors, that old readiness probe became actively harmful and could kill `_host` with `ProtocolError` during detached create.
 - The correct fix was not to weaken fail-closed behavior, but to make readiness probing use a real protocol request (`status`) instead of a raw socket existence probe.
 - More generally: if the server is protocol-strict, readiness checks must also be protocol-valid.
+
+
+## DSM wrapper lessons
+- A thin ergonomic wrapper is valuable as long as it keeps `msr` semantics recognizable. Mirroring the command names/help structure from `msr` made DSM much easier to reason about while still allowing wrapper-specific defaults like literal names, auto-force attach, and auto-create-on-attach.
+- Nested help needs to be tested from the real script entrypoint, not inferred from partial patch success. Earlier patch attempts looked plausible but did not actually produce the intended runtime behavior until the live file was rewritten and directly re-verified.
+- Bash completion is normal distribution-wise, but local testing exposed two practical requirements quickly: register `./dsm` as well as `dsm`, and support both `--cwd <path>` and `--cwd=<path>` because completion and real usage often prefer the equals form.

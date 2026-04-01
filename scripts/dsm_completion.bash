@@ -85,4 +85,9 @@ _dsm_complete() {
   esac
 }
 
-complete -F _dsm_complete dsm
+_dsm_completion_register() {
+  complete -F _dsm_complete dsm
+  complete -F _dsm_complete ./dsm
+}
+
+_dsm_completion_register

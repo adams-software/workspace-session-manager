@@ -82,7 +82,10 @@ EOF2
 }
 
 CWD_OVERRIDE=""
-if [[ $# -ge 2 && "$1" == "--cwd" ]]; then
+if [[ $# -ge 1 && "$1" == --cwd=* ]]; then
+  CWD_OVERRIDE="${1#--cwd=}"
+  shift
+elif [[ $# -ge 2 && "$1" == "--cwd" ]]; then
   CWD_OVERRIDE="$2"
   shift 2
 fi
@@ -236,12 +239,14 @@ case "$cmd" in
 
   status)
     name="$(require_name "${1:-}")"
-    exec "$MSR_BIN" status "$(sock_for "$name")"
+    status_out="$($MSR_BIN status "$(sock_for "$name")")"
+    printf '%s
+' "$status_out"
     ;;
 
   exists)
     name="$(require_name "${1:-}")"
-    exec "$MSR_BIN" exists "$(sock_for "$name")"
+    "$MSR_BIN" exists "$(sock_for "$name")"
     ;;
 
   ls|list)

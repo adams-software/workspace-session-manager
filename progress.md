@@ -334,3 +334,13 @@
   - stale nested-detach hangs are materially hardened
   - `_host` fail-closed semantics and readiness probing are consistent with each other
   - compact create/status smoke is passing again after the readiness probe fix
+
+- Added and hardened DSM as a real ergonomic wrapper layer over `msr`:
+  - command/help structure now mirrors current `msr` more closely (`NAME`, `DESCRIPTION`, `USAGE`, `COMMANDS`, `CURRENT SESSION`, `NESTED MODE`)
+  - aliases now work: `c/create`, `a/attach`, `d/detach`, `ls/list`
+  - `attach` now auto-forces existing sessions and auto-creates + attaches when missing
+  - `create` now supports `-a|--attach`
+  - nested/no-args help now surfaces current-session context similarly to `msr`
+  - bash completion added in `scripts/dsm_completion.bash` for commands and lexical `*.msr` session names
+  - `--cwd=<path>` support added alongside `--cwd <path>`
+- Added `scripts/smoke_dsm.sh` as a compact DSM regression pass covering aliases, nested help/current behavior, list/status, and `--cwd=` parsing.
