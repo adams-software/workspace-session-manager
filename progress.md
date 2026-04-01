@@ -374,3 +374,13 @@
   - added `scripts/smoke_wsm.sh` to exercise create/list/current, exact canonical resolution, ambiguous suffix handling, nested help, and status/exists paths
   - added WSM aliases `s/status` and `e/exists`
   - added `scripts/wsm_completion.bash` for command + canonical-id completion
+
+- Refined the WSM product direction around a simpler runtime/search model and stronger completion:
+  - narrowed WSM runtime resolution to exact canonical id + unique exact basename only
+  - removed suffix-based runtime query matching from `attach`/`status`/`exists`
+  - clarified in help/docs that canonical-id completion is the intended fast interactive path
+- Reworked WSM completion toward slash-aware canonical-id navigation:
+  - `wsm_completion.bash` now completes canonical ids segment-by-segment like path completion
+  - unique segment prefixes expand naturally (e.g. `p` -> `pathdb/`, `pathdb/a` -> `pathdb/api/`)
+  - ambiguous directory tails list matching next components in lexical order from the discovered id set
+- Updated `scripts/smoke_wsm.sh` to validate the simplified runtime model plus path-like completion assumptions.

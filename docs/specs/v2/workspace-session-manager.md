@@ -1297,3 +1297,14 @@ The first implemented WSM slice is intentionally narrow and mirrors lower layers
 - completion currently lives in `scripts/wsm_completion.bash`
 
 This keeps WSM aligned with the same wrapper philosophy as DSM: preserve lower-layer semantics when possible and add only the minimum workspace-level resolution ergonomics.
+
+
+## Search/completion direction note
+
+The current implementation direction intentionally keeps runtime query resolution narrow:
+
+- exact canonical id
+- unique exact basename
+- otherwise no match / ambiguous
+
+The main interactive ergonomics are expected to come from canonical-id tab completion rather than richer runtime fuzzy matching. In practice, WSM ids behave like workspace-relative paths, so slash-aware hierarchical completion is the preferred UX for fast attach.

@@ -38,11 +38,14 @@ WORKSPACE ROOT
   --root=<path> or --root <path> overrides WSM_ROOT
 
 RESOLUTION
-  attach resolves queries deterministically in this order:
-    1. exact canonical id match (wins even if the basename also appears elsewhere)
+  attach/status/exists resolve queries deterministically in this order:
+    1. exact canonical id match
     2. exact basename match if unique
-    3. unique canonical suffix match
-    4. otherwise prints matching candidates and exits nonzero
+    3. otherwise prints matching candidates and exits nonzero
+
+COMPLETION
+  Canonical-id completion is the intended fast path for interactive attach.
+  Use tab completion to expand slash-separated canonical ids in lexical order.
 EOU
 }
 
@@ -61,6 +64,7 @@ NESTED MODE
   In this context:
     current prints the current canonical workspace-relative id
     attach resolves globally under the workspace root
+    status and exists resolve globally under the workspace root
 
 EOF2
   usage_body
@@ -92,7 +96,7 @@ WSM_ROOT_RESOLVED="$(resolve_root)"
 
 canonical_id_for_sock() {
   local sock="$1"
-  local rel dir base
+  local rel
   rel="${sock#$WSM_ROOT_RESOLVED/}"
   [[ "$rel" != "$sock" ]] || {
     if [[ "$sock" == "$WSM_ROOT_RESOLVED"/*.msr ]]; then
@@ -102,8 +106,7 @@ canonical_id_for_sock() {
     fi
   }
   [[ "$rel" == *.msr ]] || return 1
-  rel="${rel%.msr}"
-  printf '%s\n' "$rel"
+  printf '%s\n' "${rel%.msr}"
 }
 
 sock_for_canonical() {
@@ -118,7 +121,7 @@ resolve_current_id() {
 }
 
 list_ids() {
-  find "$WSM_ROOT_RESOLVED" -type s -name '*.msr' -o -type f -name '*.msr' | \
+  find "$WSM_ROOT_RESOLVED" \( -type s -o -type f \) -name '*.msr' | \
     while IFS= read -r path; do
       canonical_id_for_sock "$path" || true
     done | LC_ALL=C sort -u
@@ -153,20 +156,6 @@ resolve_query() {
     return 2
   fi
 
-  matches=()
-  for id in "${ids[@]}"; do
-    if [[ "$id" == */"$query" || "$id" == "$query" ]]; then
-      matches+=("$id")
-    fi
-  done
-  if [[ ${#matches[@]} -eq 1 ]]; then
-    printf '%s\n' "${matches[0]}"
-    return 0
-  elif [[ ${#matches[@]} -gt 1 ]]; then
-    printf '%s\n' "${matches[@]}"
-    return 2
-  fi
-
   return 1
 }
 
@@ -177,10 +166,9 @@ attach_canonical() {
 
 status_canonical() {
   local id="$1"
-  local out
-  out="$($MSR_BIN status "$(sock_for_canonical "$id")")"
-  printf '%s
-' "$out"
+  local captured
+  captured="$($MSR_BIN status "$(sock_for_canonical "$id")")"
+  printf '%s\n' "$captured"
 }
 
 exists_canonical() {
@@ -246,15 +234,13 @@ case "$cmd" in
       attach_canonical "$resolved"
     elif [[ $rc -eq 2 ]]; then
       err "wsm: ambiguous query: $query"
-      printf '%s
-' "$resolved"
+      printf '%s\n' "$resolved"
       exit 1
     else
       err "wsm: no match for query: $query"
       exit 1
     fi
     ;;
-
 
   current)
     cid="$(resolve_current_id)" || { err "wsm: no current session and no WSM context"; exit 1; }
@@ -272,8 +258,7 @@ case "$cmd" in
         status_canonical "$resolved"
       elif [[ $rc -eq 2 ]]; then
         err "wsm: ambiguous query: $query"
-        printf '%s
-' "$resolved"
+        printf '%s\n' "$resolved"
         exit 1
       else
         err "wsm: no match for query: $query"
@@ -296,8 +281,7 @@ case "$cmd" in
         exists_canonical "$resolved"
       elif [[ $rc -eq 2 ]]; then
         err "wsm: ambiguous query: $query"
-        printf '%s
-' "$resolved"
+        printf '%s\n' "$resolved"
         exit 1
       else
         err "wsm: no match for query: $query"

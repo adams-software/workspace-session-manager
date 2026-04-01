@@ -192,3 +192,13 @@ Fix: if an owner is attached but `getMasterFd()` is gone, treat that as `pty_clo
 - Overloading `attach` with workspace-level jump semantics is cleaner than introducing a dedicated `j` command, because it preserves the mental model across layers: `msr attach` resolves a path, `dsm attach` resolves a local name, and `wsm attach` resolves a workspace-relative query.
 - Exact canonical id should win before basename/suffix matching, even when that means a short root-level id like `shell` is chosen over deeper siblings sharing the same basename. That rule is deterministic and easy to explain.
 - As with DSM, the wrapper layer benefits from mirroring lower-layer help/alias structure early. Even a narrow first WSM slice feels more coherent once aliases, completion, and explicit resolution docs are present.
+
+
+## WSM attach UX direction
+- For WSM, efficient attach does not require increasingly rich runtime query matching. A better split is:
+  - keep runtime resolution simple and deterministic (`exact canonical id`, then `unique basename`)
+  - move interactive ergonomics into strong canonical-id tab completion
+- This keeps scripting behavior unsurprising while still making human interactive attach fast.
+
+## WSM completion lesson
+- Canonical ids are path-like enough that shell completion should behave like hierarchical path completion rather than generic flat word completion. Segment-by-segment slash-aware completion is a better fit than richer runtime fuzzy matching for this layer.

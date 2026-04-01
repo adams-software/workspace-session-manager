@@ -30,28 +30,25 @@ CURRENT_OUTPUT="$(MSR_SESSION="$TMP/pathdb/api/shell.msr" WSM_ROOT="$TMP" "$WSM"
 printf '%s\n' "$CURRENT_OUTPUT"
 [[ "$CURRENT_OUTPUT" == 'pathdb/api/shell' ]]
 
-printf '=== wsm exact canonical wins ===\n'
+printf '=== wsm exact canonical + unique basename only ===\n'
 set +e
 EXACT_OUT="$("$WSM" --root="$TMP" attach shell 2>&1)"
 EXACT_RC=$?
-set -e
-printf 'rc=%s out=[%s]\n' "$EXACT_RC" "$EXACT_OUT"
-[[ $EXACT_RC -eq 0 ]]
-
-printf '=== wsm ambiguous suffix ===\n'
-set +e
-AMBIG="$($WSM --root="$TMP" attach api/shell 2>&1)"
+AMBIG="$("$WSM" --root="$TMP" attach api/shell 2>&1)"
 AMBIG_RC=$?
+NOMATCH="$("$WSM" --root="$TMP" attach pathdb/api 2>&1)"
+NOMATCH_RC=$?
 set -e
+printf 'exact rc=%s out=[%s]\n' "$EXACT_RC" "$EXACT_OUT"
 printf '%s\n' "$AMBIG" | sed -n '1,10p'
+printf 'nomatch rc=%s out=[%s]\n' "$NOMATCH_RC" "$NOMATCH"
+[[ $EXACT_RC -eq 0 ]]
 [[ $AMBIG_RC -ne 0 ]]
-printf '%s\n' "$AMBIG" | grep -q 'wsm: ambiguous query: api/shell'
-printf '%s\n' "$AMBIG" | grep -q '^pathdb/api/shell$'
-printf '%s\n' "$AMBIG" | grep -q '^other/api/shell$'
+printf '%s\n' "$AMBIG" | grep -q 'wsm: no match for query: api/shell'
+[[ $NOMATCH_RC -ne 0 ]]
+printf '%s\n' "$NOMATCH" | grep -q 'wsm: no match for query: pathdb/api'
 
 printf '=== wsm status/exists ===\n'
-"$WSM" --root="$TMP" status pathdb/api/build
-"$WSM" --root="$TMP" exists pathdb/api/build >/dev/null
 STATUS_CTX_OUT="$(MSR_SESSION="$TMP/pathdb/api/build.msr" WSM_ROOT="$TMP" "$WSM" status 2>&1)"
 EXISTS_CTX_OUT="$(MSR_SESSION="$TMP/pathdb/api/build.msr" WSM_ROOT="$TMP" "$WSM" exists 2>&1)"
 printf 'status_ctx=[%s]\n' "$STATUS_CTX_OUT"
