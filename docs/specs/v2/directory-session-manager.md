@@ -1,4 +1,4 @@
-# MSR Workspace Script v0 Spec
+# MSR Container Script v0 Spec
 
 ## Status
 
@@ -13,14 +13,26 @@ Session files are identified by literal user-provided names with a `.msr` extens
 ## Naming
 Script called directory session manager or dsm as its application name.
 
+## Current implementation notes
+
+The current script shape now mirrors `msr` command structure more closely while staying directory/name ergonomic:
+
+- aliases: `c/create`, `a/attach`, `d/detach`, `ls/list`
+- `attach` auto-forces existing sessions
+- `attach` auto-creates and attaches when the named session does not exist
+- `create` supports `-a|--attach`
+- no-args/help in nested context shows a `NESTED MODE` header similar to `msr`
+- bash completion lives in `scripts/dsm_completion.bash` and completes commands plus `*.msr` names from the effective directory
+
+
 ## Purpose
 
 Define a **single-directory shell UX layer** that composes on top of the low-level `msr` binary.
 
-This layer treats one directory as a **workspace** containing session sockets. It provides:
+This layer treats one directory as a **container** containing session sockets. It provides:
 
 * ergonomic session naming
-* workspace-local session creation and attach
+* container-local session creation and attach
 * current-session awareness
 * lexical sibling navigation
 * shell completion and small quality-of-life helpers
@@ -33,7 +45,7 @@ This layer is intentionally **just composition**. It does not redefine session s
 
 This spec does **not** define:
 
-* global multi-workspace discovery
+* global multi-container discovery
 * hierarchy/tree navigation across directories
 * a central daemon or registry
 * any change to `msr` host/server/client semantics
@@ -50,13 +62,13 @@ Those are follow-on layers.
    The script must delegate actual session behavior to `msr`.
 
 2. **Filesystem is the registry**
-   Session sockets in one directory define the workspace.
+   Session sockets in one directory define the container.
 
 3. **Current session is explicit**
    `MSR_SESSION` is the source of truth for “where am I?”
 
-4. **Workspace is stable while attached**
-   When inside a session, workspace is derived from `MSR_SESSION`, not drifting shell cwd.
+4. **container is stable while attached**
+   When inside a session, container is derived from `MSR_SESSION`, not drifting shell cwd.
 
 5. **Conventions over configuration**
    Session names map predictably to socket filenames.
@@ -68,9 +80,9 @@ Those are follow-on layers.
 
 # 1. Core model
 
-## Workspace
+## Container
 
-A **workspace** is a directory containing session socket files with a fixed extension.
+A **container** is a directory containing session socket files with a fixed extension.
 
 Recommended extension:
 
@@ -95,7 +107,7 @@ A human-friendly name like:
 Mapping rule:
 
 ```text
-<name> -> <workspace>/<name>.msr
+<name> -> <container>/<name>.msr
 ```
 
 ## Current session
@@ -103,36 +115,36 @@ Mapping rule:
 When inside a hosted shell/session, the environment variable:
 
 ```text
-MSR_SESSION=/full/path/to/workspace/name.msr
+MSR_SESSION=/full/path/to/container/name.msr
 ```
 
 identifies the current session.
 
 From this, the script can derive:
 
-* current workspace: `dirname "$MSR_SESSION"`
+* current container: `dirname "$MSR_SESSION"`
 * current session filename: `basename "$MSR_SESSION"`
 * current session name: filename minus `.msr`
 
 ---
 
-# 2. Workspace resolution
+# 2. Container resolution
 
-Workspace resolution order:
+Container resolution order:
 
 ## Rule 1: explicit override
 
-If command is given an explicit workspace option, use it.
+If command is given an explicit --session option, use it.
 
 Example:
 
 ```bash
-ms --workspace /path/to/proj ls
+dsm --session /path/to/proj.msr ls
 ```
 
 ## Rule 2: current session context
 
-If `MSR_SESSION` is set, workspace is:
+If `MSR_SESSION` is set, container is:
 
 ```bash
 dirname "$MSR_SESSION"
@@ -142,7 +154,7 @@ This rule takes precedence over live shell cwd while inside a session.
 
 ## Rule 3: fallback
 
-If no explicit workspace and no `MSR_SESSION`, workspace is current directory:
+If no explicit container and no `MSR_SESSION`, container is current directory:
 
 ```bash
 $PWD
@@ -158,7 +170,7 @@ This is critical because once attached, shell cwd may drift:
 * inside session, `cd /tmp`
 * `ms next` should still navigate `/proj/*.msr`, not `/tmp/*.msr`
 
-So attached session identity, not live cwd, defines workspace context.
+So attached session identity, not live cwd, defines container context.
 
 ---
 
@@ -169,7 +181,7 @@ So attached session identity, not live cwd, defines workspace context.
 Socket file path for session name `foo` is:
 
 ```text
-<workspace>/foo.msr
+<container>/foo.msr
 ```
 
 ## Accepted user inputs
@@ -185,7 +197,7 @@ foo
 Resolved as:
 
 ```text
-<workspace>/foo.msr
+<container>/foo.msr
 ```
 
 ### name with suffix
@@ -197,7 +209,7 @@ foo.msr
 Resolved as:
 
 ```text
-<workspace>/foo.msr
+<container>/foo.msr
 ```
 
 ### explicit relative path
@@ -223,8 +235,8 @@ Used as provided.
 
 Normalization helper should behave like:
 
-* `foo` -> `<workspace>/foo.msr`
-* `foo.msr` -> `<workspace>/foo.msr`
+* `foo` -> `<container>/foo.msr`
+* `foo.msr` -> `<container>/foo.msr`
 * `./foo.msr` -> `./foo.msr`
 * `/x/y/foo.msr` -> `/x/y/foo.msr`
 
@@ -237,7 +249,7 @@ Normalization helper should behave like:
 The hosted shell/process should receive:
 
 ```text
-MSR_SESSION=/full/path/to/workspace/name.msr
+MSR_SESSION=/full/path/to/container/name.msr
 ```
 
 This must be set when the session is **created**, not when attached.
@@ -250,37 +262,26 @@ So the wrapper must ensure that `msr create` includes `MSR_SESSION` in the envir
 
 ---
 
-## Optional future env vars
-
-Not required for v0, but possible later:
-
-* `MSR_WORKSPACE`
-* `MSR_NAME`
-
-For v0, `MSR_SESSION` alone is sufficient.
-
----
-
 # 5. User-facing command surface
 
 Recommended shell function name:
 
 ```bash
-ms
+dsm
 ```
 
-This is the higher-level workspace UX wrapper over low-level `msr`.
+This is the higher-level container UX wrapper over low-level `msr`.
 
 ## Commands
 
-### `ms new <name> [-- cmd ...]`
+### `dsm create <name> [-- cmd ...]`
 
-Create a new session in the resolved workspace.
+Create a new session in the resolved container.
 
 Behavior:
 
-* resolve workspace
-* resolve socket path as `<workspace>/<name>.msr`
+* resolve container
+* resolve socket path as `<container>/<name>.msr`
 * call low-level `msr create <socket> -- <cmd...>`
 * inject `MSR_SESSION=<socket>` into hosted process environment
 
@@ -291,16 +292,16 @@ Default command if omitted:
 Examples:
 
 ```bash
-ms new shell
-ms new build -- bash
-ms new api -- npm run dev
+dsm create shell
+dsm create build -- bash
+dsm create api -- npm run dev
 ```
 
 ---
 
-### `ms a <name>`
+### `dsm a <name>`
 
-Attach to a named session in the resolved workspace.
+Attach to a named session in the resolved container.
 
 Behavior:
 
@@ -311,25 +312,25 @@ Behavior:
 Examples:
 
 ```bash
-ms a shell
-ms a build
+dsm a shell
+dsm a build
 ```
 
 Optional alias:
 
 ```bash
-ms attach shell
+dsm attach shell
 ```
 
 ---
 
 ### `ms ls`
 
-List sessions in the resolved workspace.
+List sessions in the resolved container.
 
 Behavior:
 
-* enumerate `*.msr` in workspace
+* enumerate `*.msr` in container
 * sort lexically
 * display session names
 * optionally mark current session if `MSR_SESSION` is set
@@ -398,16 +399,11 @@ Recommended default:
 
 * print full path
 
-Optional flags later:
-
-* `--name`
-* `--workspace`
-
 ---
 
 ### `ms next`
 
-Attach to next session in lexical order within current workspace.
+Attach to next session in lexical order within current container.
 
 Behavior:
 
@@ -423,7 +419,7 @@ Behavior:
 
 ### `ms prev`
 
-Attach to previous session in lexical order within current workspace.
+Attach to previous session in lexical order within current container.
 
 Behavior:
 
@@ -486,7 +482,7 @@ The script should be explicit and simple.
 Example:
 
 ```bash
-ms a nope
+dsm a nope
 ```
 
 Behavior:
@@ -494,12 +490,12 @@ Behavior:
 * print clear error
 * exit non-zero
 
-### no workspace sessions
+### no Container sessions
 
 Example:
 
 ```bash
-ms ls
+dsm ls
 ```
 
 Behavior:
@@ -534,22 +530,22 @@ Use a **sourced shell script** that defines:
 Recommended file:
 
 ```text
-msr-workspace.sh
+msr-container.sh
 ```
 
 Users add to shell startup:
 
 ```bash
-source /path/to/msr-workspace.sh
+source /path/to/msr-container.sh
 ```
 
 ---
 
 ## Recommended internal helper functions
 
-### `_ms_workspace`
+### `_ms_container`
 
-Resolve current workspace path.
+Resolve current container path.
 
 Responsibilities:
 
@@ -563,7 +559,7 @@ Map name/path input to socket path.
 
 ### `_ms_list_sockets`
 
-List workspace socket files.
+List Container socket files.
 
 Recommended output:
 
@@ -613,7 +609,7 @@ A simple organization that stays maintainable:
 
 ```text
 shell/
-  msr-workspace.sh
+  msr-container.sh
   completion.bash
   README.md
 ```
@@ -622,7 +618,7 @@ Or combined in one file initially:
 
 ```text
 shell/
-  msr-workspace.sh
+  msr-container.sh
 ```
 
 With sections:
@@ -641,7 +637,7 @@ Recommended progression:
 
 # 10. Low-level delegation contract
 
-The workspace script must not reimplement session semantics.
+The container script must not reimplement session semantics.
 
 It should delegate to low-level `msr` for:
 
@@ -661,7 +657,7 @@ The script only adds:
 
 * naming
 * path resolution
-* workspace conventions
+* container conventions
 * current-session navigation
 
 ---
@@ -672,7 +668,7 @@ The script only adds:
 
 Recommended behavior:
 
-1. resolve workspace
+1. resolve container
 2. resolve target socket path
 3. determine command:
 
@@ -683,7 +679,7 @@ Recommended behavior:
    * `MSR_SESSION=<socket>`
 5. call low-level create
 
-This is essential because `MSR_SESSION` inside the hosted shell is what enables later workspace navigation from within attached sessions.
+This is essential because `MSR_SESSION` inside the hosted shell is what enables later container navigation from within attached sessions.
 
 ---
 
@@ -691,7 +687,7 @@ This is essential because `MSR_SESSION` inside the hosted shell is what enables 
 
 `ms a <name>` should:
 
-1. resolve workspace
+1. resolve container
 2. resolve target socket path
 3. delegate to `msr attach <socket>`
 
@@ -707,7 +703,7 @@ This avoids leaving an extra wrapper shell process in the middle.
 
 `ms ls` should:
 
-* resolve workspace
+* resolve container
 * enumerate `*.msr`
 * sort lexically
 * strip `.msr` for user-facing names
@@ -742,7 +738,7 @@ Provide completion for:
 
 Completion source:
 
-* list `*.msr` in resolved workspace
+* list `*.msr` in resolved container
 * strip `.msr`
 * return names only
 
@@ -778,18 +774,18 @@ Do not require them in v0.
 
 ## Initial installation
 
-The workspace layer should be installable by sourcing a shell file.
+The container layer should be installable by sourcing a shell file.
 
 Example:
 
 ```bash
-source ~/.local/share/msr/msr-workspace.sh
+source ~/.local/share/msr/msr-container.sh
 ```
 
 Or copy into dotfiles:
 
 ```bash
-source ~/dotfiles/msr-workspace.sh
+source ~/dotfiles/msr-container.sh
 ```
 
 This is the simplest path and ideal for quick iteration.
@@ -802,14 +798,14 @@ For a packaged binary + shell integration:
 
 ```text
 ~/.local/bin/msr
-~/.local/share/msr/msr-workspace.sh
+~/.local/share/msr/msr-container.sh
 ~/.local/share/msr/completion.bash
 ```
 
 Then user shell init:
 
 ```bash
-source ~/.local/share/msr/msr-workspace.sh
+source ~/.local/share/msr/msr-container.sh
 source ~/.local/share/msr/completion.bash
 ```
 
@@ -870,30 +866,30 @@ all operate against `/home/me/proj`, regardless of current shell cwd.
 
 # 17. Acceptance criteria
 
-The workspace script is successful if:
+The container script is successful if:
 
-1. A directory can act as a workspace with no extra metadata.
+1. A directory can act as a container with no extra metadata.
 2. Session names map predictably to socket filenames.
 3. `MSR_SESSION` inside the hosted shell enables current-session-aware navigation.
 4. `ms next` and `ms prev` work over lexical sibling sockets.
 5. `ms ls`, `ms a`, `ms status`, `ms kill`, and `ms wait` correctly delegate to low-level `msr`.
 6. The script can be installed by sourcing a shell file.
-7. Tab completion can suggest session names from the current workspace.
+7. Tab completion can suggest session names from the current container.
 
 ---
 
 # 18. Follow-on evolution
 
-This v0 workspace layer is intended to become the foundation for a future global manager.
+This v0 container layer is intended to become the foundation for a future global manager.
 
 Likely next step:
 
-* a higher-level wrapper that operates across many workspace directories
+* a higher-level wrapper that operates across many container directories
 
 That future layer should reuse the same core ideas:
 
 * current session path
-* workspace resolution
+* container resolution
 * filesystem discovery
 * name/path mapping
 
