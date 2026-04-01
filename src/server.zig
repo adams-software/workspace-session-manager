@@ -139,6 +139,7 @@ pub const SessionServer = struct {
     fn ownerFd(self: *const SessionServer) ?c_int {
         return switch (self.model.owner) {
             .none => null,
+            .attaching => |owner| @intCast(owner.fd),
             .attached => |owner| @intCast(owner.fd),
         };
     }
@@ -146,6 +147,7 @@ pub const SessionServer = struct {
     fn ownerPending(self: *const SessionServer) ?server_model.ForwardedOwnerReq {
         return switch (self.model.owner) {
             .none => null,
+            .attaching => null,
             .attached => |owner| owner.pending,
         };
     }
@@ -181,6 +183,7 @@ pub const SessionServer = struct {
                 _ = c.close(@intCast(fd));
             },
             .install_owner => {},
+            .owner_ready => {},
             .clear_owner => {},
         }
     }
@@ -328,6 +331,14 @@ pub const SessionServer = struct {
         try self.applyModelActions(&actions);
     }
 
+    fn resolveOwnerReady(self: *SessionServer) Error!void {
+        var actions = server_model.ActionList.init(self.allocator);
+        defer server_model.deinitActionList(self.allocator, &actions);
+
+        try server_model.handleOwnerReady(&self.model, &actions);
+        try self.applyModelActions(&actions);
+    }
+
     fn dropOwner(self: *SessionServer, failure_code: ?[]const u8) void {
         var actions = server_model.ActionList.init(self.allocator);
         defer server_model.deinitActionList(self.allocator, &actions);
@@ -385,6 +396,19 @@ pub const SessionServer = struct {
                 },
                 .owner_control_res => |owner_res| {
                     try self.resolveOwnerControlRes(owner_res);
+                },
+                .owner_ready => {
+                    try self.resolveOwnerReady();
+                },
+                .owner_resize => |resize| {
+                    self.session_host.resize(resize.cols, resize.rows) catch |e| switch (e) {
+                        host.Error.InvalidArgs, host.Error.InvalidState, host.Error.NotStarted, host.Error.Closed => {},
+                        else => return Error.ProtocolError,
+                    };
+                    self.session_host.signalWinch() catch |e| switch (e) {
+                        host.Error.InvalidArgs, host.Error.InvalidState, host.Error.NotStarted, host.Error.Closed => {},
+                        else => return Error.ProtocolError,
+                    };
                 },
                 else => return Error.ProtocolError,
             }
@@ -713,6 +737,11 @@ test "server step owner_forward sends owner_control_req to attached owner" {
     defer protocol.freeControlRes(std.testing.allocator, &attach_res);
     try std.testing.expect(attach_res.ok);
 
+    const ready_bytes = try protocol.encodeOwnerReady(std.testing.allocator);
+    defer std.testing.allocator.free(ready_bytes);
+    try protocol.writeFrame(owner_fd, ready_bytes);
+    _ = try s.step();
+
     const requester_fd = try connectUnix(path);
     defer _ = c.close(requester_fd);
     const req = try protocol.encodeControlReq(std.testing.allocator, .{ .op = "owner_forward", .request_id = 5, .action = .{ .op = "detach" } });
@@ -769,6 +798,11 @@ test "server step owner_forward reports owner_busy when pending exists" {
     var attach_res = try protocol.parseControlRes(std.testing.allocator, attach_res_bytes);
     defer protocol.freeControlRes(std.testing.allocator, &attach_res);
     try std.testing.expect(attach_res.ok);
+
+    const ready_bytes = try protocol.encodeOwnerReady(std.testing.allocator);
+    defer std.testing.allocator.free(ready_bytes);
+    try protocol.writeFrame(owner_fd, ready_bytes);
+    _ = try s.step();
 
     const requester1_fd = try connectUnix(path);
     defer _ = c.close(requester1_fd);

@@ -108,3 +108,26 @@ The decisive post-switch bug was on the switched-to destination server:
 - the owner bridge then waited forever after target shutdown
 
 Fix: if an owner is attached but `getMasterFd()` is gone, treat that as `pty_closed` and drop the owner.
+
+## Terminal UX / attach lifecycle lessons
+- The bash/readline corruption (tab completion redraw weirdness, cursor/edit-region desync, backspacing into what should have been stable prompt/output) was not fixed by output write-all alone. The decisive missing piece was **correct PTY size at initial attach time**.
+- A later `SIGWINCH`-only strategy was insufficient because the session could spend its whole initial interactive period with stale/default dimensions until the user manually resized the outer terminal.
+- We first tried attach-time size sync through the old `attachment.resize(...)` request/response RPC. That transport shape was wrong for attach bootstrap and caused intermittent `attach stream failed` regressions.
+- The better model, borrowed from `atch`, is: **client-driven attach metadata over the live attach stream; host applies it**.
+- In `msr`, this became `owner_resize` on the attachment stream, consumed directly by the server owner loop and applied to the PTY host.
+- Initial attach-time `owner_resize` + host-side `SIGWINCH` after applying the new size fixed the remaining readline/tab-completion problem.
+- Raw local tty mode during attach, restore-on-exit, and `writeAll(...)` to stdout are all still necessary and justified. They are not speculative hacks.
+- The attach-start `tcflush(...)` experiment was not required once initial size sync was correct, so it was removed to keep the final path minimal.
+
+## CLI / docs lessons
+- Nested mode should not pretend to be a different reduced CLI if most commands still work. The clean rule is: **all commands remain available; only `attach` and `detach` change behavior under current-session context**.
+- For recognized commands with missing args, dumping full global help is poor UX. Command-specific error + one-line command usage is much better.
+- Compact help was better than the earlier verbose version, but a pure manpage skeleton was still too context-light. The current best shape is a hybrid: `NAME`, `DESCRIPTION`, `USAGE`, `COMMANDS`, `CURRENT SESSION`, `NESTED MODE`.
+- `msr current` is a useful nested/current-session introspection primitive and matches the detach/current-session mental model cleanly.
+
+## Current checkpoint status (post-terminal UX fixes)
+- `create -a` works and no longer crashes.
+- Session child env correctly receives `MSR_SESSION`.
+- Nested/current-session context is functional enough for `current`, `attach`, and `detach` UX.
+- Attach terminal behavior is now substantially improved and usable for interactive bash/readline work.
+- Remaining deferred topic: whether to redesign the CLI into a path-first form is still an open product question, not part of this checkpoint.

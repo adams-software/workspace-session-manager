@@ -238,3 +238,44 @@
 - New next-phase conclusion: the remaining path to a truly usable `msr` binary is mostly CLI/orchestration work in `main.zig`, because the binary still treats attach/detach as direct path-based commands and does not yet apply nested-mode routing at the top level.
 - Decision for the next phase: keep one `msr` binary, add an explicit tiny `NestedClient`, and resolve current-session context using `--session=/path` first and `MSR_SESSION` second.
 - Added a repeatable real-binary smoke path (`python3 -u scripts/smoke_msr_binary.py`) that validates direct attach plus nested attach/detach through the actual built `msr` binary; this now passes cleanly.
+- Pivoted `create` UX to support both detached and immediate-attach flows under one verb:
+  - `msr create <path>` stays detached by default
+  - `msr create -a|--attach <path>` creates and immediately attaches
+- Fixed a real `create -a` parser gap in `main.zig`; help/usage now documents the attach flag.
+- Fixed a real crash in `create -a` default-shell startup:
+  - root cause was returning a `child_argv` slice backed by a parser-local stack array
+  - parser now returns optional explicit argv and selects default shell argv at the call site
+- `_host` now injects `MSR_SESSION=<path>` into the spawned session child environment.
+- `host.spawnChild(...)` now actually applies `SpawnOptions.env` before `execvp(...)`.
+- Verified that explicit child commands and interactive shells inside a session now see `MSR_SESSION`.
+- Attach bridge terminal handling was hardened substantially:
+  - local tty enters raw mode during attach
+  - original termios are restored on exit
+  - PTY output to local stdout now uses `writeAll(...)`
+  - clean `\r\n` boundary is emitted on successful attach return so outer shell prompts do not smear onto inner-session text
+- Diagnosed the lingering readline/tab-completion corruption as primarily a stale PTY-size-at-attach problem.
+- Added attach-stream-native terminal size propagation instead of using the old blocking `resize` request/response RPC during attach startup:
+  - new protocol message: `owner_resize { cols, rows }`
+  - `SessionAttachment.sendOwnerResize(...)`
+  - server owner stream now consumes `owner_resize` directly and applies PTY resize on the host side
+- Attach runtime now sends the current local tty size immediately after `owner_ready`, and also on later local `SIGWINCH` events.
+- Host now sends a one-shot `SIGWINCH` to the child after applying `owner_resize`, which together with initial attach-time size sync fixed the remaining bash/readline tab-completion/cursor-state issue.
+- Cleaned up the attach path after experiments:
+  - removed the speculative attach-start `tcflush(...)` once it proved unnecessary
+  - kept the now-justified raw mode, write-all, initial size sync, and SIGWINCH flow
+- Simplified and clarified CLI help/docs in `main.zig`:
+  - moved from verbose prose to a hybrid man-style structure: `NAME`, `DESCRIPTION`, `USAGE`, `COMMANDS`, `CURRENT SESSION`, `NESTED MODE`
+  - `NAME` now expands MSR as `minimal session runtime`
+  - removed the `INTERNAL` section from user-facing help
+  - nested no-args help is now `nested context header + normal help`, instead of pretending nested mode is a separate tiny command set
+- Clarified nested/current-session command semantics:
+  - all commands remain available in nested mode
+  - only `attach` and `detach` change behavior under current-session context
+- Added `msr current`:
+  - prints the current session path in nested/current-session context
+  - errors cleanly outside nested mode, similar to `detach`
+- Improved command UX for recognized commands with missing/invalid args:
+  - `wait`, `status`, `terminate`, `resize`, `exists`, `create`, `attach`, `detach`, `current`
+  - these now emit command-specific error text plus one-line command usage instead of dumping the full outer help
+- Nested self-attach is now explicitly rejected with a specific error instead of falling through to a generic attach failure.
+- Remaining deferred topic: larger CLI redesign toward a path-first form (e.g. `msr <path> <command> ...`) is intentionally deferred; current checkpoint keeps the command-first CLI but documents nested behavior much more clearly.

@@ -48,6 +48,13 @@ pub const OwnerControlRes = struct {
     err: ?ControlRes.ErrBody = null,
 };
 
+pub const OwnerReady = struct {};
+
+pub const OwnerResize = struct {
+    cols: u16,
+    rows: u16,
+};
+
 pub const DataMsg = struct {
     stream: []const u8,
     bytes_b64: []const u8,
@@ -64,6 +71,8 @@ pub const Message = union(enum) {
     control_res: ControlRes,
     owner_control_req: OwnerControlReq,
     owner_control_res: OwnerControlRes,
+    owner_ready: OwnerReady,
+    owner_resize: OwnerResize,
     data: DataMsg,
     event: EventMsg,
 
@@ -73,6 +82,8 @@ pub const Message = union(enum) {
             .control_res => |*msg| freeControlRes(allocator, msg),
             .owner_control_req => |*msg| freeOwnerControlReq(allocator, msg),
             .owner_control_res => |*msg| freeOwnerControlRes(allocator, msg),
+            .owner_ready => {},
+            .owner_resize => {},
             .data => |*msg| freeDataMsg(allocator, msg),
             .event => |*msg| freeEventMsg(allocator, msg),
         }
@@ -159,6 +170,14 @@ pub fn encodeOwnerControlRes(allocator: std.mem.Allocator, res: OwnerControlRes)
     return encodeMessage(allocator, .{ .owner_control_res = res });
 }
 
+pub fn encodeOwnerReady(allocator: std.mem.Allocator) ![]u8 {
+    return encodeMessage(allocator, .{ .owner_ready = .{} });
+}
+
+pub fn encodeOwnerResize(allocator: std.mem.Allocator, msg: OwnerResize) ![]u8 {
+    return encodeMessage(allocator, .{ .owner_resize = msg });
+}
+
 pub fn encodeDataMsg(allocator: std.mem.Allocator, msg: DataMsg) ![]u8 {
     return encodeMessage(allocator, .{ .data = msg });
 }
@@ -203,6 +222,24 @@ pub fn parseOwnerControlRes(allocator: std.mem.Allocator, bytes: []const u8) !Ow
     };
 }
 
+pub fn parseOwnerReady(allocator: std.mem.Allocator, bytes: []const u8) !OwnerReady {
+    var msg = try parseMessage(allocator, bytes);
+    errdefer msg.deinit(allocator);
+    return switch (msg) {
+        .owner_ready => |ready| ready,
+        else => error.BadMessageType,
+    };
+}
+
+pub fn parseOwnerResize(allocator: std.mem.Allocator, bytes: []const u8) !OwnerResize {
+    var msg = try parseMessage(allocator, bytes);
+    errdefer msg.deinit(allocator);
+    return switch (msg) {
+        .owner_resize => |resize| resize,
+        else => error.BadMessageType,
+    };
+}
+
 pub fn parseDataMsg(allocator: std.mem.Allocator, bytes: []const u8) !DataMsg {
     var msg = try parseMessage(allocator, bytes);
     errdefer msg.deinit(allocator);
@@ -227,6 +264,8 @@ pub fn encodeMessage(allocator: std.mem.Allocator, msg: Message) ![]u8 {
         .control_res => |payload| encodeEnvelope(allocator, "control_res", payload),
         .owner_control_req => |payload| encodeEnvelope(allocator, "owner_control_req", payload),
         .owner_control_res => |payload| encodeEnvelope(allocator, "owner_control_res", payload),
+        .owner_ready => |payload| encodeEnvelope(allocator, "owner_ready", payload),
+        .owner_resize => |payload| encodeEnvelope(allocator, "owner_resize", payload),
         .data => |payload| encodeEnvelope(allocator, "data", payload),
         .event => |payload| encodeEnvelope(allocator, "event", payload),
     };
@@ -248,6 +287,12 @@ pub fn parseMessage(allocator: std.mem.Allocator, bytes: []const u8) !Message {
     }
     if (std.mem.eql(u8, parsed.value.type, "owner_control_res")) {
         return .{ .owner_control_res = try parseEnvelopePayload(OwnerControlRes, cloneOwnerControlRes, allocator, bytes, "owner_control_res") };
+    }
+    if (std.mem.eql(u8, parsed.value.type, "owner_ready")) {
+        return .{ .owner_ready = try parseEnvelopePayload(OwnerReady, cloneOwnerReady, allocator, bytes, "owner_ready") };
+    }
+    if (std.mem.eql(u8, parsed.value.type, "owner_resize")) {
+        return .{ .owner_resize = try parseEnvelopePayload(OwnerResize, cloneOwnerResize, allocator, bytes, "owner_resize") };
     }
     if (std.mem.eql(u8, parsed.value.type, "data")) {
         return .{ .data = try parseEnvelopePayload(DataMsg, cloneDataMsg, allocator, bytes, "data") };
@@ -329,6 +374,16 @@ fn cloneOwnerControlRes(allocator: std.mem.Allocator, res: OwnerControlRes) !Own
             .message = if (e.message) |m| try allocator.dupe(u8, m) else null,
         } else null,
     };
+}
+
+fn cloneOwnerReady(allocator: std.mem.Allocator, ready: OwnerReady) !OwnerReady {
+    _ = allocator;
+    return ready;
+}
+
+fn cloneOwnerResize(allocator: std.mem.Allocator, resize: OwnerResize) !OwnerResize {
+    _ = allocator;
+    return resize;
 }
 
 fn cloneDataMsg(allocator: std.mem.Allocator, msg: DataMsg) !DataMsg {
@@ -445,6 +500,13 @@ test "protocol encode/decode owner control response" {
     try std.testing.expect(out.err != null);
     try std.testing.expectEqualStrings("attach_conflict", out.err.?.code);
     try std.testing.expectEqualStrings("owner already attached", out.err.?.message.?);
+}
+
+test "protocol encode/decode owner ready" {
+    const payload = try encodeOwnerReady(std.testing.allocator);
+    defer std.testing.allocator.free(payload);
+
+    _ = try parseOwnerReady(std.testing.allocator, payload);
 }
 
 test "protocol parseMessage identifies unified message variants" {

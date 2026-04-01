@@ -14,6 +14,11 @@ pub const Error = error{
     ProtocolError,
     UnexpectedEof,
     OutOfMemory,
+    NoOwnerClient,
+    OwnerNotReady,
+    OwnerBusy,
+    OwnerDisconnected,
+    AttachConflict,
 };
 
 pub const AttachMode = enum {
@@ -68,7 +73,16 @@ pub const SessionClient = struct {
     pub fn ownerForward(self: *SessionClient, action: protocol.OwnerAction) !void {
         var res = try rpcCall(self.allocator, self.socket_path, .{ .op = "owner_forward", .request_id = 1, .action = action });
         defer protocol.freeControlRes(self.allocator, &res);
-        if (!res.ok) return Error.ProtocolError;
+        if (!res.ok) {
+            if (res.err) |e| {
+                if (std.mem.eql(u8, e.code, "no_owner_client")) return Error.NoOwnerClient;
+                if (std.mem.eql(u8, e.code, "owner_not_ready")) return Error.OwnerNotReady;
+                if (std.mem.eql(u8, e.code, "owner_busy")) return Error.OwnerBusy;
+                if (std.mem.eql(u8, e.code, "owner_disconnected")) return Error.OwnerDisconnected;
+                if (std.mem.eql(u8, e.code, "attach_conflict")) return Error.AttachConflict;
+            }
+            return Error.ProtocolError;
+        }
     }
 
     pub fn requestOwnerDetach(self: *SessionClient) !void {
@@ -151,6 +165,12 @@ pub const SessionAttachment = struct {
             .err = if (err_code) |code| .{ .code = code } else null,
         };
         const bytes = try protocol.encodeOwnerControlRes(self.allocator, res);
+        defer self.allocator.free(bytes);
+        try protocol.writeFrame(self.fd, bytes);
+    }
+
+    pub fn sendOwnerResize(self: *SessionAttachment, cols: u16, rows: u16) !void {
+        const bytes = try protocol.encodeOwnerResize(self.allocator, .{ .cols = cols, .rows = rows });
         defer self.allocator.free(bytes);
         try protocol.writeFrame(self.fd, bytes);
     }

@@ -201,6 +201,19 @@ pub const SessionHost = struct {
         };
     }
 
+    pub fn signalWinch(self: *SessionHost) Error!void {
+        return switch (self.state) {
+            .idle, .starting => Error.NotStarted,
+            .running => blk: {
+                const pid = self.pid orelse return Error.InvalidState;
+                if (c.kill(pid, c.SIGWINCH) != 0) break :blk Error.InvalidArgs;
+                break :blk;
+            },
+            .exited => Error.InvalidState,
+            .closed => Error.Closed,
+        };
+    }
+
     pub fn terminate(self: *SessionHost, signal: ?[]const u8) Error!void {
         return switch (self.state) {
             .idle, .starting => Error.NotStarted,

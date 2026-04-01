@@ -4,6 +4,9 @@ const protocol = @import("protocol");
 const c = @cImport({
     @cInclude("unistd.h");
     @cInclude("poll.h");
+    @cInclude("termios.h");
+    @cInclude("signal.h");
+    @cInclude("sys/ioctl.h");
 });
 
 pub const OwnerControlAction = union(enum) {
@@ -43,6 +46,32 @@ fn writeOwnerControlSuccess(allocator: std.mem.Allocator, attachment: *client.Se
     try attachment.replyOwnerControl(request_id, true, null);
 }
 
+fn writeAll(fd: c_int, bytes: []const u8) !void {
+    var off: usize = 0;
+    while (off < bytes.len) {
+        const n = c.write(fd, bytes.ptr + off, bytes.len - off);
+        if (n < 0) return error.IoError;
+        if (n == 0) return error.IoError;
+        off += @intCast(n);
+    }
+}
+
+var winch_changed: bool = false;
+
+fn handleSigwinch(_: c_int) callconv(.c) void {
+    winch_changed = true;
+}
+
+fn sendResizeIfAvailable(attachment: *client.SessionAttachment, in_fd: c_int) void {
+    if (c.isatty(in_fd) != 1) return;
+
+    var ws: c.struct_winsize = undefined;
+    if (c.ioctl(in_fd, c.TIOCGWINSZ, &ws) != 0) return;
+    if (ws.ws_col == 0 or ws.ws_row == 0) return;
+
+    attachment.sendOwnerResize(@intCast(ws.ws_col), @intCast(ws.ws_row)) catch {};
+}
+
 pub fn decideOwnerControlReq(allocator: std.mem.Allocator, req: protocol.OwnerControlReq) !OwnerControlDecision {
     if (std.mem.eql(u8, req.action.op, "detach")) {
         return .{ .action = .detach, .should_exit = true };
@@ -67,7 +96,6 @@ pub fn executeOwnerControlDecision(allocator: std.mem.Allocator, attachment: *cl
         .none => return .stay,
         .detach => {
             try writeOwnerControlSuccess(allocator, attachment, req.request_id);
-            try attachment.detach();
             return .exit;
         },
         .attach => |path| {
@@ -106,6 +134,30 @@ pub fn runAttachBridge(allocator: std.mem.Allocator, attachment: *client.Session
     var stdin_open = true;
     var in_buf: [4096]u8 = undefined;
 
+    const old_winch = c.signal(c.SIGWINCH, handleSigwinch);
+    defer _ = c.signal(c.SIGWINCH, old_winch);
+    winch_changed = false;
+
+    var raw_enabled = false;
+    var saved_termios: c.struct_termios = undefined;
+    if (c.isatty(in_fd) == 1) {
+        if (c.tcgetattr(in_fd, &saved_termios) == 0) {
+            var raw = saved_termios;
+            c.cfmakeraw(&raw);
+            if (c.tcsetattr(in_fd, c.TCSANOW, &raw) == 0) {
+                raw_enabled = true;
+            }
+        }
+    }
+    defer if (raw_enabled) {
+        _ = c.tcsetattr(in_fd, c.TCSANOW, &saved_termios);
+    };
+
+    const ready_bytes = try protocol.encodeOwnerReady(allocator);
+    defer allocator.free(ready_bytes);
+    try protocol.writeFrame(attachment.fd, ready_bytes);
+    sendResizeIfAvailable(attachment, in_fd);
+
     while (true) {
         var pfds = [2]c.struct_pollfd{
             .{ .fd = if (stdin_open) in_fd else -1, .events = if (stdin_open) c.POLLIN else 0, .revents = 0 },
@@ -142,7 +194,7 @@ pub fn runAttachBridge(allocator: std.mem.Allocator, attachment: *client.Session
                     const decoded = try allocator.alloc(u8, decoded_len);
                     defer allocator.free(decoded);
                     try std.base64.standard.Decoder.decode(decoded, data_msg.bytes_b64);
-                    _ = c.write(out_fd, decoded.ptr, decoded.len);
+                    try writeAll(out_fd, decoded);
                 },
                 .owner_control_req => |req| {
                     const transition = try handleOwnerControlReq(allocator, attachment, req);
@@ -161,6 +213,11 @@ pub fn runAttachBridge(allocator: std.mem.Allocator, attachment: *client.Session
 
         if ((pfds[attachment_idx].revents & (c.POLLHUP | c.POLLERR | c.POLLNVAL)) != 0) {
             return;
+        }
+
+        if (winch_changed) {
+            winch_changed = false;
+            sendResizeIfAvailable(attachment, in_fd);
         }
     }
 }

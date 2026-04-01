@@ -14,59 +14,69 @@ const c = @cImport({
 
 fn usage() void {
     out(
-        "msr v0 (draft)\n" ++
-            "Usage:\n" ++
-            "  msr create <path>\n" ++
-            "  msr create -a <path>\n" ++
-            "  msr create <path> -- <cmd...>\n" ++
-            "  msr create -a <path> -- <cmd...>\n" ++
+        "NAME\n" ++
+            "  msr - minimal session runtime for persistent PTY-backed sessions\n\n" ++
+            "DESCRIPTION\n" ++
+            "  msr runs a command inside a persistent PTY-backed session identified by\n" ++
+            "  a socket path. Sessions can be created, attached, detached, and\n" ++
+            "  re-attached.\n\n" ++
+            "  A current session can be selected with --session=<path> or\n" ++
+            "  MSR_SESSION. In that context, attach and detach operate on the\n" ++
+            "  current session owner. All other commands keep their normal\n" ++
+            "  explicit-argument behavior.\n\n" ++
+            "USAGE\n" ++
+            "  msr create [-a|--attach] <path> [-- <cmd...>]\n" ++
             "  msr attach <path> [--takeover]\n" ++
-            "  msr [--session=<current>] attach <target>\n" ++
-            "  msr [--session=<current>] detach\n" ++
+            "  msr detach\n" ++
+            "  msr current\n" ++
             "  msr resize <path> <cols> <rows> [--takeover]\n" ++
             "  msr terminate <path> [TERM|INT|KILL]\n" ++
             "  msr wait <path>\n" ++
             "  msr status <path>\n" ++
             "  msr exists <path>\n\n" ++
-            "Current-session selection:\n" ++
-            "  1. --session=<path>\n" ++
-            "  2. MSR_SESSION\n" ++
-            "  3. no current-session context\n\n" ++
-            "Behavior:\n" ++
-            "  - With a current-session context, attach/detach use nested passthrough.\n" ++
-            "  - Nested passthrough does not silently fall back to direct behavior.\n" ++
-            "  - detach is only available with a current-session context.\n\n" ++
-            "Examples:\n" ++
-            "  msr create /tmp/a.sock\n" ++
-            "  msr create -a /tmp/a.sock\n" ++
-            "  msr create /tmp/a.sock -- /usr/bin/top\n" ++
-            "  msr attach /tmp/a.sock\n" ++
-            "  msr --session=/tmp/current.sock detach\n" ++
-            "  msr --session=/tmp/current.sock attach /tmp/other.sock\n\n" ++
-            "Notes:\n" ++
-            "  - create with no explicit command starts the default interactive shell ($SHELL -i, else /bin/sh -i).\n" ++
-            "  - create is detached by default; use -a/--attach to attach immediately after creation.\n" ++
-            "  - attach uses one socket plus an explicit attach handshake.\n" ++
-            "  - attach stdin is optional; EOF on stdin does not detach by itself.\n" ++
-            "  - wait is host-lifetime only in v0; no durable post-cleanup retrieval.\n" ++
-            "  - resize is owner-scoped and may require --takeover to claim ownership.\n\n" ++
-            "Internal:\n" ++
-            "  msr _host <path> -- <cmd...>\n",
+            "COMMANDS\n" ++
+            "  create      create a session; use -a to attach immediately\n" ++
+            "  attach      attach directly, or route through current session in nested mode\n" ++
+            "  detach      detach the current session\n" ++
+            "  current     print the current session path\n" ++
+            "  resize      resize a session PTY\n" ++
+            "  terminate   send a signal to a session\n" ++
+            "  wait        wait for session exit and print its status\n" ++
+            "  status      print session state\n" ++
+            "  exists      test whether a session socket is reachable\n\n" ++
+            "CURRENT SESSION\n" ++
+            "  --session=<path> overrides MSR_SESSION\n\n" ++
+            "NESTED MODE\n" ++
+            "  When a current session is selected, only these commands change:\n" ++
+            "    msr attach <target>   route attach through the current session owner\n" ++
+            "    msr detach            detach the current session\n\n" ++
+            "  All other commands keep their normal explicit-argument behavior.\n",
         .{},
     );
 }
 
+fn usageCreate() void { out("usage: msr create [-a|--attach] <path> [-- <cmd...>]\n", .{}); }
+fn usageAttachDirect() void { out("usage: msr attach <path> [--takeover]\n", .{}); }
+fn usageAttachNested() void { out("usage: msr attach <target>\n", .{}); }
+fn usageDetach() void { out("usage: msr detach\n", .{}); }
+fn usageCurrent() void { out("usage: msr current\n", .{}); }
+fn usageResize() void { out("usage: msr resize <path> <cols> <rows> [--takeover]\n", .{}); }
+fn usageTerminate() void { out("usage: msr terminate <path> [TERM|INT|KILL]\n", .{}); }
+fn usageWait() void { out("usage: msr wait <path>\n", .{}); }
+fn usageStatus() void { out("usage: msr status <path>\n", .{}); }
+fn usageExists() void { out("usage: msr exists <path>\n", .{}); }
+
 fn nestedUsage(current_session: []const u8) void {
     out(
-        "msr nested mode\n" ++
-            "current session: {s}\n\n" ++
-            "Available commands:\n" ++
-            "  msr detach\n" ++
-            "  msr attach <target>\n\n" ++
-            "Session selection:\n" ++
-            "  --session=<path> overrides MSR_SESSION\n",
+        "NESTED MODE\n" ++
+            "  current session: {s}\n\n" ++
+            "  In this context:\n" ++
+            "    attach <target>   routes through the current session owner\n" ++
+            "    detach            detaches the current session\n" ++
+            "    all other commands keep their normal explicit-argument behavior\n\n",
         .{current_session},
     );
+    usage();
 }
 
 fn out(comptime fmt: []const u8, args: anytype) void {
@@ -144,7 +154,7 @@ fn defaultShellArgv() [2][]const u8 {
 
 const CreateArgs = struct {
     path: []const u8,
-    child_argv: []const []const u8,
+    child_argv: ?[]const []const u8,
     attach_after_create: bool,
 };
 
@@ -163,10 +173,7 @@ fn parseCreateArgs(argv: [][]const u8) ?CreateArgs {
     idx += 1;
 
     const child_argv = blk: {
-        if (idx == argv.len) {
-            const shell = defaultShellArgv();
-            break :blk shell[0..];
-        }
+        if (idx == argv.len) break :blk null;
         if (idx < argv.len and std.mem.eql(u8, argv[idx], "--") and idx + 1 < argv.len) {
             break :blk argv[(idx + 1)..];
         }
@@ -192,12 +199,19 @@ fn runAttachDirect(path: []const u8, mode: client.AttachMode) u8 {
         err("msr: attach stream failed\n", .{});
         return 1;
     };
+    if (c.isatty(c.STDOUT_FILENO) == 1) {
+        out("\r\n", .{});
+    }
     return 0;
 }
 
 fn runAttachNested(current_session: []const u8, target: []const u8, takeover_requested: bool) u8 {
     if (takeover_requested) {
         err("msr: nested attach does not support --takeover; use direct attach for ownership takeover\n", .{});
+        return 1;
+    }
+    if (std.mem.eql(u8, current_session, target)) {
+        err("msr: cannot attach current session to itself\n", .{});
         return 1;
     }
     var nested = nested_client.NestedClient.init(std.heap.page_allocator, current_session) catch return 1;
@@ -281,9 +295,25 @@ pub fn main(init: std.process.Init) !u8 {
         return 0;
     }
 
+    if (std.mem.eql(u8, cmd, "current")) {
+        if (argv.items.len != 2) {
+            err("msr: current does not take additional arguments\n", .{});
+            usageCurrent();
+            return 1;
+        }
+        if (current_session) |session| {
+            out("{s}\n", .{session});
+            return 0;
+        }
+        err("msr: current requires a current session context (--session or MSR_SESSION)\n", .{});
+        usageCurrent();
+        return 1;
+    }
+
     if (std.mem.eql(u8, cmd, "status")) {
         if (argv.items.len != 3) {
-            usage();
+            err("msr: status requires <path>\n", .{});
+            usageStatus();
             return 1;
         }
         var cli = client.SessionClient.init(std.heap.page_allocator, argv.items[2]) catch {
@@ -302,7 +332,8 @@ pub fn main(init: std.process.Init) !u8 {
 
     if (std.mem.eql(u8, cmd, "terminate")) {
         if (argv.items.len != 3 and argv.items.len != 4) {
-            usage();
+            err("msr: terminate requires <path> and optional signal\n", .{});
+            usageTerminate();
             return 1;
         }
         const sig = if (argv.items.len == 4) argv.items[3] else "TERM";
@@ -317,7 +348,8 @@ pub fn main(init: std.process.Init) !u8 {
 
     if (std.mem.eql(u8, cmd, "wait")) {
         if (argv.items.len != 3) {
-            usage();
+            err("msr: wait requires <path>\n", .{});
+            usageWait();
             return 1;
         }
         var cli = client.SessionClient.init(std.heap.page_allocator, argv.items[2]) catch return 1;
@@ -337,33 +369,42 @@ pub fn main(init: std.process.Init) !u8 {
     }
 
     if (std.mem.eql(u8, cmd, "attach")) {
+        if (current_session) |session| {
+            if (argv.items.len != 3) {
+                err("msr: nested attach requires <target> and does not support --takeover\n", .{});
+                usageAttachNested();
+                return 1;
+            }
+            const takeover_requested = false;
+            return runAttachNested(session, argv.items[2], takeover_requested);
+        }
         if (argv.items.len != 3 and argv.items.len != 4) {
-            usage();
+            err("msr: attach requires <path> and optional --takeover\n", .{});
+            usageAttachDirect();
             return 1;
         }
         const takeover_requested = argv.items.len == 4 and std.mem.eql(u8, argv.items[3], "--takeover");
-        if (current_session) |session| {
-            return runAttachNested(session, argv.items[2], takeover_requested);
-        }
         return runAttachDirect(argv.items[2], if (takeover_requested) .takeover else .exclusive);
     }
 
     if (std.mem.eql(u8, cmd, "detach")) {
         if (current_session) |session| {
             if (argv.items.len != 2) {
-                err("msr: nested detach uses the current session context and does not take an explicit path\n", .{});
-                nestedUsage(session);
+                err("msr: nested detach does not take an explicit path\n", .{});
+                usageDetach();
                 return 1;
             }
             return runDetachNested(session);
         }
-        err("msr: detach requires --session=<path> or MSR_SESSION; external direct detach has been removed\n", .{});
+        err("msr: detach requires a current session context (--session or MSR_SESSION)\n", .{});
+        usageDetach();
         return 1;
     }
 
     if (std.mem.eql(u8, cmd, "resize")) {
         if (argv.items.len != 5 and argv.items.len != 6) {
-            usage();
+            err("msr: resize requires <path> <cols> <rows> and optional --takeover\n", .{});
+            usageResize();
             return 1;
         }
         const cols = parseU16(argv.items[3]) catch return 1;
@@ -386,7 +427,8 @@ pub fn main(init: std.process.Init) !u8 {
 
     if (std.mem.eql(u8, cmd, "exists")) {
         if (argv.items.len != 3) {
-            usage();
+            err("msr: exists requires <path>\n", .{});
+            usageExists();
             return 1;
         }
         const fd = client.connectUnix(argv.items[2]) catch {
@@ -400,12 +442,14 @@ pub fn main(init: std.process.Init) !u8 {
 
     if (std.mem.eql(u8, cmd, "create") or std.mem.eql(u8, cmd, "_host")) {
         const parsed_create = parseCreateArgs(argv.items) orelse {
-            usage();
+            err("msr: invalid create arguments\n", .{});
+            usageCreate();
             return 1;
         };
 
         const path = parsed_create.path;
-        const child_argv = parsed_create.child_argv;
+        const shell_argv = defaultShellArgv();
+        const child_argv = parsed_create.child_argv orelse shell_argv[0..];
 
         if (std.mem.eql(u8, cmd, "_host")) {
             const env_entry = try std.fmt.allocPrint(std.heap.page_allocator, "MSR_SESSION={s}", .{path});
