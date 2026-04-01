@@ -30,6 +30,10 @@ USAGE
   dsm attach <name>
   dsm detach
   dsm current
+  dsm first
+  dsm last
+  dsm prev
+  dsm next
   dsm terminate [name] [-f|--force|TERM|INT|KILL]
   dsm wait [name]
   dsm status [name]
@@ -41,6 +45,10 @@ COMMANDS
   a, attach     attach to a session by name; auto-force; create+attach if missing
   d, detach     detach the current session
   current       print the current session name
+  f, first      attach to the first session in lexical order
+  l, last       attach to the last session in lexical order
+  p, prev       attach to the previous session in lexical order
+  n, next       attach to the next session in lexical order
   terminate     send a signal to a session
   wait          wait for session exit
   status        print session state
@@ -55,6 +63,8 @@ NESTED MODE
   When a current session is selected, only these commands change:
     dsm a <target>   attach to another named session from the current session
     dsm d            detach the current session
+    dsm prev         attach to the previous session in lexical order
+    dsm next         attach to the next session in lexical order
 
   All other commands keep their normal explicit-argument behavior.
 EOU
@@ -75,6 +85,8 @@ NESTED MODE
     a <target> routes through the current session owner
     d detaches the current session
     current prints the current session name
+    prev attaches to the previous lexical session
+    next attaches to the next lexical session
     all other commands keep their normal explicit-argument behavior
 
 EOF2
@@ -151,6 +163,72 @@ list_names() {
   printf '%s\n' "${names[@]}" | LC_ALL=C sort
 }
 
+require_current_context() {
+  resolve_current_name >/dev/null 2>&1 || {
+    err "dsm: command requires current session context"
+    exit 1
+  }
+}
+
+attach_name() {
+  local name="$1"
+  local sock nested=0
+  sock="$(sock_for "$name")"
+  if [[ -n "${MSR_SESSION:-}" ]]; then
+    nested=1
+  fi
+  if "$MSR_BIN" status "$sock" >/dev/null 2>&1; then
+    if [[ $nested -eq 1 ]]; then
+      exec "$MSR_BIN" attach "$sock"
+    else
+      exec "$MSR_BIN" attach "$sock" --force
+    fi
+  else
+    exec "$MSR_BIN" create -a "$sock"
+  fi
+}
+
+ordered_name_at() {
+  local index="$1"
+  mapfile -t names < <(list_names)
+  [[ ${#names[@]} -gt 0 ]] || return 1
+  [[ $index -ge 0 && $index -lt ${#names[@]} ]] || return 1
+  printf '%s\n' "${names[$index]}"
+}
+
+ordered_prev_name() {
+  local current
+  current="$(resolve_current_name)" || return 1
+  mapfile -t names < <(list_names)
+  [[ ${#names[@]} -gt 0 ]] || return 1
+  local i
+  for ((i=0; i<${#names[@]}; i++)); do
+    if [[ "${names[$i]}" == "$current" ]]; then
+      [[ $i -gt 0 ]] || return 1
+      printf '%s\n' "${names[$((i-1))]}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+ordered_next_name() {
+  local current
+  current="$(resolve_current_name)" || return 1
+  mapfile -t names < <(list_names)
+  [[ ${#names[@]} -gt 0 ]] || return 1
+  local i last
+  last=$((${#names[@]} - 1))
+  for ((i=0; i<${#names[@]}; i++)); do
+    if [[ "${names[$i]}" == "$current" ]]; then
+      [[ $i -lt $last ]] || return 1
+      printf '%s\n' "${names[$((i+1))]}"
+      return 0
+    fi
+  done
+  return 1
+}
+
 if [[ $# -lt 1 ]]; then
   if cname="$(resolve_current_name 2>/dev/null)"; then
     nested_usage "$cname" "${MSR_SESSION:-}"
@@ -204,12 +282,7 @@ case "$cmd" in
   a|attach)
     name="$(require_name "${1:-}")"
     if [[ $# -ge 1 && "$1" != --* ]]; then shift; fi
-    sock="$(sock_for "$name")"
-    if "$MSR_BIN" exists "$sock" >/dev/null 2>&1; then
-      exec "$MSR_BIN" attach "$sock" --force
-    else
-      exec "$MSR_BIN" create -a "$sock"
-    fi
+    attach_name "$name"
     ;;
 
   d|detach)
@@ -219,6 +292,29 @@ case "$cmd" in
   current)
     name="$(require_name)"
     out "$name"
+    ;;
+
+  f|first)
+    target="$(ordered_name_at 0)" || { err "dsm: no sessions in directory"; exit 1; }
+    attach_name "$target"
+    ;;
+
+  l|last)
+    mapfile -t names < <(list_names)
+    [[ ${#names[@]} -gt 0 ]] || { err "dsm: no sessions in directory"; exit 1; }
+    attach_name "${names[$((${#names[@]} - 1))]}"
+    ;;
+
+  p|prev)
+    require_current_context
+    target="$(ordered_prev_name)" || { err "dsm: no previous session"; exit 1; }
+    attach_name "$target"
+    ;;
+
+  n|next)
+    require_current_context
+    target="$(ordered_next_name)" || { err "dsm: no next session"; exit 1; }
+    attach_name "$target"
     ;;
 
   terminate)
@@ -240,8 +336,7 @@ case "$cmd" in
   status)
     name="$(require_name "${1:-}")"
     status_out="$($MSR_BIN status "$(sock_for "$name")")"
-    printf '%s
-' "$status_out"
+    printf '%s\n' "$status_out"
     ;;
 
   exists)

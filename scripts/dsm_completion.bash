@@ -2,7 +2,7 @@ _dsm_complete() {
   local cur prev words cword
   _init_completion -n : || return
 
-  local commands="c create a attach d detach current terminate wait status exists ls list help -h --help"
+  local commands="c create a attach d detach current f first l last p prev n next terminate wait status exists ls list help -h --help"
   local name_cmds="c create a attach terminate wait status exists"
 
   __dsm_names() {

@@ -914,3 +914,29 @@ This keeps the architecture clean and makes later global composition much easier
 
 If you want, next I can turn this into an actual Bash implementation skeleton.
 
+
+## Lexical navigation
+
+DSM now supports lexical sibling navigation based on the same sorted order returned by `dsm ls`:
+
+- `dsm first` attaches to the first session in lexical order
+- `dsm last` attaches to the last session in lexical order
+- `dsm prev` attaches to the previous session relative to the current session
+- `dsm next` attaches to the next session relative to the current session
+
+`prev` and `next` require current-session context and error when not inside a session. These commands are attach/navigation commands, not name-printing helpers.
+
+
+### Aliases
+
+Lexical navigation aliases:
+
+- `f` -> `first`
+- `l` -> `last`
+- `p` -> `prev`
+- `n` -> `next`
+
+### Nested attach behavior
+
+DSM direct attach is allowed to use ownership-taking behavior when attaching from outside a session.
+When already inside a current session, DSM uses plain nested attach semantics and does **not** pass `-f|--force`, because nested `msr attach` rejects ownership-takeover flags.

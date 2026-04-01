@@ -438,11 +438,15 @@ pub fn main(init: std.process.Init) !u8 {
                     return 0;
                 },
                 .exists => |args| {
-                    const fd = client.connectUnix(args.path) catch {
+                    var cli = client.SessionClient.init(std.heap.page_allocator, args.path) catch {
                         out("false\n", .{});
                         return 1;
                     };
-                    _ = c.close(fd);
+                    defer cli.deinit();
+                    _ = cli.status() catch {
+                        out("false\n", .{});
+                        return 1;
+                    };
                     out("true\n", .{});
                     return 0;
                 },

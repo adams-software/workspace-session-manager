@@ -344,3 +344,22 @@
   - bash completion added in `scripts/dsm_completion.bash` for commands and lexical `*.msr` session names
   - `--cwd=<path>` support added alongside `--cwd <path>`
 - Added `scripts/smoke_dsm.sh` as a compact DSM regression pass covering aliases, nested help/current behavior, list/status, and `--cwd=` parsing.
+
+- Continued hardening the DSM wrapper after the initial completion/help milestone:
+  - fixed `msr exists` to use a real `status()` RPC instead of the old raw connect/close probe, eliminating another protocol-strict `ProtocolError` edge
+  - confirmed DSM `status`/`exists` capture paths now behave cleanly after the `msr exists` fix
+- Extended DSM navigation ergonomics with lexical sibling attach commands based on the same sorted order as `dsm ls`:
+  - added `first`, `last`, `prev`, `next`
+  - these are attach/navigation commands, not name-printing helpers
+  - `prev`/`next` require current-session context and error cleanly otherwise
+  - boundary cases (`no previous`, `no next`) now fail with explicit wrapper errors
+- Fixed an important nested-mode mismatch in DSM attach policy:
+  - DSM originally forced `--force` on all attaches
+  - nested `msr attach` explicitly rejects `-f|--force`
+  - DSM now uses plain nested attach when `MSR_SESSION` is set and keeps force-taking behavior only for direct/non-nested attach
+- Added short lexical-navigation aliases for fast interactive use:
+  - `f/first`
+  - `l/last`
+  - `p/prev`
+  - `n/next`
+- Updated DSM help/completion/docs to reflect the lexical navigation surface and aliases.

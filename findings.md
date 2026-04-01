@@ -170,3 +170,19 @@ Fix: if an owner is attached but `getMasterFd()` is gone, treat that as `pty_clo
 - A thin ergonomic wrapper is valuable as long as it keeps `msr` semantics recognizable. Mirroring the command names/help structure from `msr` made DSM much easier to reason about while still allowing wrapper-specific defaults like literal names, auto-force attach, and auto-create-on-attach.
 - Nested help needs to be tested from the real script entrypoint, not inferred from partial patch success. Earlier patch attempts looked plausible but did not actually produce the intended runtime behavior until the live file was rewritten and directly re-verified.
 - Bash completion is normal distribution-wise, but local testing exposed two practical requirements quickly: register `./dsm` as well as `dsm`, and support both `--cwd <path>` and `--cwd=<path>` because completion and real usage often prefer the equals form.
+
+
+## More protocol-strict probe cleanup
+- The earlier readiness-probe fix was not the only place where a raw connect/close assumption had survived. `msr exists` was still implemented as a bare socket connect in `main.zig`, which could again trigger protocol-strict `_host` failures.
+- Fixing `exists` to use a real `status()` RPC removed another hidden compatibility trap between convenience probes and a strict framed protocol server.
+
+## DSM navigation lessons
+- Lexical navigation (`first/last/prev/next`) fits DSM well because it is explicitly a single-directory ergonomic layer. These commands add wrapper value without redefining the low-level `msr` runtime model.
+- The right semantics are action-oriented, not informational: these commands should attach/navigate, not merely print the selected sibling name.
+- Relative navigation (`prev`/`next`) should require current-session context. That keeps them aligned with the mental model of `detach`: they are session-context operations, not pure directory queries.
+
+## DSM attach policy lesson
+- “Always force attach” was too blunt once nested/current-session semantics mattered. DSM needs context-sensitive attach behavior:
+  - direct attach can take ownership (`--force`)
+  - nested attach must respect the nested `msr` contract and omit `--force`
+- Wrapper ergonomics are still valuable, but they must bend to the underlying runtime’s actual nested semantics.
