@@ -303,3 +303,34 @@
   - `--session=<path>`
   - `--session <path>`
 - Confirmed stale nested-detach behavior is now bounded rather than hanging forever in manual repros; observed explicit failures like `OwnerDisconnected` / `ConnectFailed` instead of indefinite stalls.
+
+- Continued the help/parser metadata unification work from the new command schema:
+  - added `src/command_spec.zig` as the initial single-source command metadata table
+  - command table now carries ids, aliases, summaries, descriptions, flag specs, positional specs, examples, and nested/current-session behavior markers
+- Updated `docs/specs/cli-help-spec.md` to explicitly describe the phased rollout:
+  - v1 scope
+  - not-in-v1
+  - Phase A/B/C/D
+- Landed Phase B of the command-spec rollout:
+  - global help now renders `USAGE` and `COMMANDS` from `command_spec.zig`
+  - canonical long command names are used in `USAGE`
+  - alias/shortcut display is shown in `COMMANDS`
+- Landed early Phase C command-spec integration:
+  - `cli_parse` command alias lookup now comes from `command_spec.findCommandByAlias(...)`
+  - command-kind-to-spec lookup now uses `command_spec.findCommandById(...)`
+  - flag alias membership checks for create/attach/resize/terminate now use command-spec metadata rather than duplicated hardcoded alias lists
+- Reduced more `main.zig` usage duplication:
+  - command-spec now provides `usageLine`, `aliasSummary`, and `shortUsage`
+  - `main.zig` uses these helpers for global help and most command-specific usage rendering
+  - added `usageForCommandKind(...)` to reduce parse-failure usage duplication while preserving the nested attach special case
+- Fixed a real readiness regression introduced by fail-closed `_host` behavior:
+  - old `waitForReady(...)` only did a raw connect/close probe
+  - once `_host` stopped swallowing `session_server.step()` errors, that benign probe triggered a server `ProtocolError`
+  - `waitForReady(...)` now uses a real status RPC instead of a raw socket connect probe
+  - confirmed `create ... -- /bin/sh -lc 'sleep 3'` followed by `status` returns `running` again
+- Current checkpoint state:
+  - parser architecture is in place and integrated enough to be useful
+  - help/usage is now partially driven by the shared command table
+  - stale nested-detach hangs are materially hardened
+  - `_host` fail-closed semantics and readiness probing are consistent with each other
+  - compact create/status smoke is passing again after the readiness probe fix

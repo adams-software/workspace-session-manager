@@ -148,3 +148,19 @@ Fix: if an owner is attached but `getMasterFd()` is gone, treat that as `pty_clo
 - Hardening the forwarding path to drop the owner on failed owner-control delivery materially improved this.
 - Swallowing `session_server.step()` errors in `_host` was also a real operational hazard. Failing closed there is safer than continuing after a fatal server-side error.
 - Even with server-side fixes, a bounded client-side timeout on blocking RPC waits is worth keeping as a safety net so this class of bug cannot reappear as an infinite hang.
+
+
+## Help / command schema lessons
+- A lightweight command schema (`command_spec.zig`) is already useful before full parser generation. It is enough to start unifying aliases, summaries, usage text, and help rendering without making runtime execution magical.
+- The right phased approach is:
+  1. command metadata table
+  2. help/usage generation from metadata
+  3. parser alias/flag metadata from metadata
+  4. only later consider deeper validation from schema if it still feels worth it
+- Canonical long names in `USAGE` plus alias display in `COMMANDS` is a better UX split than showing only shorthand forms everywhere.
+
+## Readiness / fail-closed lesson
+- Hardening `_host` to fail closed on `session_server.step()` errors exposed an old hidden assumption: the old readiness probe (`connect` + immediate `close`) relied on the server silently tolerating protocol-less accepted sockets.
+- Once `_host` stopped swallowing step errors, that old readiness probe became actively harmful and could kill `_host` with `ProtocolError` during detached create.
+- The correct fix was not to weaken fail-closed behavior, but to make readiness probing use a real protocol request (`status`) instead of a raw socket existence probe.
+- More generally: if the server is protocol-strict, readiness checks must also be protocol-valid.

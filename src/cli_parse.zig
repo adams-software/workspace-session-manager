@@ -1,5 +1,6 @@
 const std = @import("std");
 const argv_parse = @import("argv_parse");
+const command_spec = @import("command_spec");
 const c = @cImport({
     @cInclude("stdlib.h");
 });
@@ -80,29 +81,21 @@ pub const TerminateArgs = struct {
     signal: SignalSpec,
 };
 
-const CommandSpec = struct {
-    kind: CommandKind,
-    names: []const []const u8,
-};
-
-const commands = [_]CommandSpec{
-    .{ .kind = .create, .names = &.{ "c", "create" } },
-    .{ .kind = .attach, .names = &.{ "a", "attach" } },
-    .{ .kind = .detach, .names = &.{ "d", "detach" } },
-    .{ .kind = .current, .names = &.{ "current" } },
-    .{ .kind = .resize, .names = &.{ "resize" } },
-    .{ .kind = .terminate, .names = &.{ "terminate" } },
-    .{ .kind = .wait, .names = &.{ "wait" } },
-    .{ .kind = .status, .names = &.{ "status" } },
-    .{ .kind = .exists, .names = &.{ "exists" } },
-    .{ .kind = .help, .names = &.{ "help", "-h", "--help" } },
-};
-
 fn commandKindFor(name: []const u8) ?CommandKind {
-    for (commands) |spec| {
-        for (spec.names) |alias| {
-            if (std.mem.eql(u8, name, alias)) return spec.kind;
-        }
+    if (std.mem.eql(u8, name, "-h") or std.mem.eql(u8, name, "--help")) return .help;
+    if (command_spec.findCommandByAlias(name)) |cmd| {
+        return switch (cmd.id) {
+            .help => .help,
+            .current => .current,
+            .create => .create,
+            .attach => .attach,
+            .detach => .detach,
+            .resize => .resize,
+            .terminate => .terminate,
+            .wait => .wait,
+            .status => .status,
+            .exists => .exists,
+        };
     }
     return null;
 }
@@ -125,6 +118,35 @@ fn optionHasValue(parsed: argv_parse.ParsedArgv, aliases: []const []const u8) bo
         }
     }
     return false;
+}
+
+fn specForKind(cmd_kind: CommandKind) ?*const command_spec.CommandSpec {
+    return switch (cmd_kind) {
+        .help => command_spec.findCommandById(.help),
+        .current => command_spec.findCommandById(.current),
+        .create => command_spec.findCommandById(.create),
+        .attach => command_spec.findCommandById(.attach),
+        .detach => command_spec.findCommandById(.detach),
+        .resize => command_spec.findCommandById(.resize),
+        .terminate => command_spec.findCommandById(.terminate),
+        .wait => command_spec.findCommandById(.wait),
+        .status => command_spec.findCommandById(.status),
+        .exists => command_spec.findCommandById(.exists),
+    };
+}
+
+fn hasFlag(parsed: argv_parse.ParsedArgv, cmd_kind: CommandKind, alias: []const u8) bool {
+    const spec = specForKind(cmd_kind) orelse return false;
+
+    if (!command_spec.hasFlagAlias(spec, alias)) return false;
+    return argv_parse.hasOption(parsed, &.{alias});
+}
+
+fn flagHasUnexpectedValue(parsed: argv_parse.ParsedArgv, cmd_kind: CommandKind, alias: []const u8) bool {
+    const spec = specForKind(cmd_kind) orelse return false;
+
+    if (!command_spec.hasFlagAlias(spec, alias)) return false;
+    return optionHasValue(parsed, &.{alias});
 }
 
 fn envCurrentSession() ?[]const u8 {
@@ -159,8 +181,8 @@ pub fn parseArgv(allocator: std.mem.Allocator, argv: []const []const u8) (std.me
             return .{ .ok = .{ .current_session = current_session, .command = .detach } };
         },
         .create => {
-            if (optionHasValue(parsed, &.{ "a", "attach" })) return .{ .fail = .{ .kind = .unexpected_argument, .command = .create } };
-            const attach_after_create = argv_parse.hasOption(parsed, &.{ "a", "attach" });
+            if (flagHasUnexpectedValue(parsed, .create, "a") or flagHasUnexpectedValue(parsed, .create, "attach")) return .{ .fail = .{ .kind = .unexpected_argument, .command = .create } };
+            const attach_after_create = hasFlag(parsed, .create, "a") or hasFlag(parsed, .create, "attach");
             if (parsed.positionals.len != 1) return .{ .fail = .{ .kind = .missing_argument, .command = .create } };
             return .{ .ok = .{ .current_session = current_session, .command = .{ .create = .{
                 .path = parsed.positionals[0],
@@ -169,22 +191,22 @@ pub fn parseArgv(allocator: std.mem.Allocator, argv: []const []const u8) (std.me
             } } } };
         },
         .attach => {
-            if (optionHasValue(parsed, &.{ "f", "force" })) return .{ .fail = .{ .kind = .unexpected_argument, .command = .attach } };
-            const force = argv_parse.hasOption(parsed, &.{ "f", "force" });
+            if (flagHasUnexpectedValue(parsed, .attach, "f") or flagHasUnexpectedValue(parsed, .attach, "force")) return .{ .fail = .{ .kind = .unexpected_argument, .command = .attach } };
+            const force = hasFlag(parsed, .attach, "f") or hasFlag(parsed, .attach, "force");
             if (parsed.positionals.len != 1) return .{ .fail = .{ .kind = .missing_argument, .command = .attach } };
             return .{ .ok = .{ .current_session = current_session, .command = .{ .attach = .{ .target = parsed.positionals[0], .force = force } } } };
         },
         .resize => {
-            if (optionHasValue(parsed, &.{ "f", "force" })) return .{ .fail = .{ .kind = .unexpected_argument, .command = .resize } };
-            const force = argv_parse.hasOption(parsed, &.{ "f", "force" });
+            if (flagHasUnexpectedValue(parsed, .resize, "f") or flagHasUnexpectedValue(parsed, .resize, "force")) return .{ .fail = .{ .kind = .unexpected_argument, .command = .resize } };
+            const force = hasFlag(parsed, .resize, "f") or hasFlag(parsed, .resize, "force");
             if (parsed.positionals.len != 3) return .{ .fail = .{ .kind = .missing_argument, .command = .resize } };
             const cols = parseU16(parsed.positionals[1]) orelse return .{ .fail = .{ .kind = .invalid_argument, .command = .resize } };
             const rows = parseU16(parsed.positionals[2]) orelse return .{ .fail = .{ .kind = .invalid_argument, .command = .resize } };
             return .{ .ok = .{ .current_session = current_session, .command = .{ .resize = .{ .path = parsed.positionals[0], .cols = cols, .rows = rows, .force = force } } } };
         },
         .terminate => {
-            if (optionHasValue(parsed, &.{ "f", "force" })) return .{ .fail = .{ .kind = .unexpected_argument, .command = .terminate } };
-            const force = argv_parse.hasOption(parsed, &.{ "f", "force" });
+            if (flagHasUnexpectedValue(parsed, .terminate, "f") or flagHasUnexpectedValue(parsed, .terminate, "force")) return .{ .fail = .{ .kind = .unexpected_argument, .command = .terminate } };
+            const force = hasFlag(parsed, .terminate, "f") or hasFlag(parsed, .terminate, "force");
             if (parsed.positionals.len < 1 or parsed.positionals.len > 2) return .{ .fail = .{ .kind = .missing_argument, .command = .terminate } };
             const sig: SignalSpec = if (force) .kill else if (parsed.positionals.len == 2) signalFromString(parsed.positionals[1]) orelse return .{ .fail = .{ .kind = .invalid_argument, .command = .terminate } } else .term;
             return .{ .ok = .{ .current_session = current_session, .command = .{ .terminate = .{ .path = parsed.positionals[0], .signal = sig } } } };

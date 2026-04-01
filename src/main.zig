@@ -5,6 +5,7 @@ const client = @import("client");
 const nested_client = @import("nested_client");
 const attach_runtime = @import("attach_runtime");
 const cli_parse = @import("cli_parse");
+const command_spec = @import("command_spec");
 const c = @cImport({
     @cInclude("unistd.h");
     @cInclude("stdlib.h");
@@ -25,27 +26,22 @@ fn usage() void {
             "  MSR_SESSION. In that context, attach and detach operate on the\n" ++
             "  current session owner. All other commands keep their normal\n" ++
             "  explicit-argument behavior.\n\n" ++
-            "USAGE\n" ++
-            "  msr c [-a|--attach] <path> [-- <cmd...>]\n" ++
-            "  msr a [-f|--force] <path>\n" ++
-            "  msr d\n" ++
-            "  msr current\n" ++
-            "  msr resize [-f|--force] <path> <cols> <rows>\n" ++
-            "  msr terminate [-f|--force] <path> [TERM|INT|KILL]\n" ++
-            "  msr wait <path>\n" ++
-            "  msr status <path>\n" ++
-            "  msr exists <path>\n\n" ++
-            "COMMANDS\n" ++
-            "  c          create a session; use -a to attach immediately\n" ++
-            "  a          attach directly, or route through current session in nested mode\n" ++
-            "  d          detach the current session\n" ++
-            "  current    print the current session path\n" ++
-            "  resize     resize a session PTY; use -f to force takeover\n" ++
-            "  terminate  send TERM by default; use -f for KILL or pass TERM|INT|KILL\n" ++
-            "  wait       wait for session exit and print its status\n" ++
-            "  status     print session state\n" ++
-            "  exists     test whether a session socket is reachable\n\n" ++
-            "CURRENT SESSION\n" ++
+            "USAGE\n",
+        .{},
+    );
+    for (command_spec.commands) |cmd| {
+        if (cmd.id == .help) continue;
+        out("{s}", .{command_spec.usageLine(&cmd)});
+    }
+    out("\nCOMMANDS\n", .{});
+    for (command_spec.commands) |cmd| {
+        if (cmd.id == .help) continue;
+        const line = command_spec.aliasSummary(std.heap.page_allocator, &cmd) catch continue;
+        defer std.heap.page_allocator.free(line);
+        out("{s}", .{line});
+    }
+    out(
+        "\nCURRENT SESSION\n" ++
             "  --session=<path> or --session <path> overrides MSR_SESSION\n\n" ++
             "NESTED MODE\n" ++
             "  When a current session is selected, only these commands change:\n" ++
@@ -56,16 +52,31 @@ fn usage() void {
     );
 }
 
-fn usageCreate() void { out("usage: msr c [-a|--attach] <path> [-- <cmd...>]\n", .{}); }
-fn usageAttachDirect() void { out("usage: msr a [-f|--force] <path>\n", .{}); }
+fn usageCreate() void { out("{s}", .{command_spec.shortUsage(.create)}); }
+fn usageAttachDirect() void { out("{s}", .{command_spec.shortUsage(.attach)}); }
 fn usageAttachNested() void { out("usage: msr a <target>\n", .{}); }
-fn usageDetach() void { out("usage: msr d\n", .{}); }
-fn usageCurrent() void { out("usage: msr current\n", .{}); }
-fn usageResize() void { out("usage: msr resize [-f|--force] <path> <cols> <rows>\n", .{}); }
-fn usageTerminate() void { out("usage: msr terminate [-f|--force] <path> [TERM|INT|KILL]\n", .{}); }
-fn usageWait() void { out("usage: msr wait <path>\n", .{}); }
-fn usageStatus() void { out("usage: msr status <path>\n", .{}); }
-fn usageExists() void { out("usage: msr exists <path>\n", .{}); }
+fn usageDetach() void { out("{s}", .{command_spec.shortUsage(.detach)}); }
+fn usageCurrent() void { out("{s}", .{command_spec.shortUsage(.current)}); }
+fn usageResize() void { out("{s}", .{command_spec.shortUsage(.resize)}); }
+fn usageTerminate() void { out("{s}", .{command_spec.shortUsage(.terminate)}); }
+fn usageWait() void { out("{s}", .{command_spec.shortUsage(.wait)}); }
+fn usageStatus() void { out("{s}", .{command_spec.shortUsage(.status)}); }
+fn usageExists() void { out("{s}", .{command_spec.shortUsage(.exists)}); }
+
+fn usageForCommandKind(kind: cli_parse.CommandKind) void {
+    switch (kind) {
+        .help => usage(),
+        .current => usageCurrent(),
+        .create => usageCreate(),
+        .attach => usageAttachDirect(),
+        .detach => usageDetach(),
+        .resize => usageResize(),
+        .terminate => usageTerminate(),
+        .wait => usageWait(),
+        .status => usageStatus(),
+        .exists => usageExists(),
+    }
+}
 
 fn nestedUsage(current_session: []const u8) void {
     out(
@@ -130,11 +141,15 @@ fn waitForReady(path: []const u8, timeout_ms: u32) bool {
     const loops = timeout_ms / 10;
     var i: u32 = 0;
     while (i < loops) : (i += 1) {
-        const fd = client.connectUnix(path) catch {
+        var cli = client.SessionClient.init(std.heap.page_allocator, path) catch {
             _ = c.usleep(step_us);
             continue;
         };
-        _ = c.close(fd);
+        defer cli.deinit();
+        _ = cli.status() catch {
+            _ = c.usleep(step_us);
+            continue;
+        };
         return true;
     }
     return false;
@@ -298,14 +313,14 @@ pub fn main(init: std.process.Init) !u8 {
                 else => {
                     if (failure.command) |cmd_kind| {
                         switch (cmd_kind) {
-                            .help => usage(),
+                            .help => usageForCommandKind(.help),
                             .current => {
                                 err("msr: current does not take additional arguments\n", .{});
-                                usageCurrent();
+                                usageForCommandKind(.current);
                             },
                             .create => {
                                 err("msr: invalid create arguments\n", .{});
-                                usageCreate();
+                                usageForCommandKind(.create);
                             },
                             .attach => {
                                 if (raw_current_session != null) {
@@ -313,32 +328,32 @@ pub fn main(init: std.process.Init) !u8 {
                                     usageAttachNested();
                                 } else {
                                     err("msr: attach requires <path> and optional -f|--force\n", .{});
-                                    usageAttachDirect();
+                                    usageForCommandKind(.attach);
                                 }
                             },
                             .detach => {
                                 err("msr: detach does not take additional arguments\n", .{});
-                                usageDetach();
+                                usageForCommandKind(.detach);
                             },
                             .resize => {
                                 err("msr: resize requires <path> <cols> <rows> and optional -f|--force\n", .{});
-                                usageResize();
+                                usageForCommandKind(.resize);
                             },
                             .terminate => {
                                 err("msr: terminate requires <path> and optional signal or -f|--force\n", .{});
-                                usageTerminate();
+                                usageForCommandKind(.terminate);
                             },
                             .wait => {
                                 err("msr: wait requires <path>\n", .{});
-                                usageWait();
+                                usageForCommandKind(.wait);
                             },
                             .status => {
                                 err("msr: status requires <path>\n", .{});
-                                usageStatus();
+                                usageForCommandKind(.status);
                             },
                             .exists => {
                                 err("msr: exists requires <path>\n", .{});
-                                usageExists();
+                                usageForCommandKind(.exists);
                             },
                         }
                     } else {

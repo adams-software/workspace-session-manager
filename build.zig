@@ -72,6 +72,13 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
 
+    const command_spec_mod = b.addModule("command_spec", .{
+        .root_source_file = b.path("src/command_spec.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+
     const cli_parse_mod = b.addModule("cli_parse", .{
         .root_source_file = b.path("src/cli_parse.zig"),
         .target = target,
@@ -79,6 +86,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     cli_parse_mod.addImport("argv_parse", argv_parse_mod);
+    cli_parse_mod.addImport("command_spec", command_spec_mod);
 
     const exe_root = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -93,6 +101,7 @@ pub fn build(b: *std.Build) void {
     exe_root.addImport("attach_runtime", attach_runtime_mod);
     exe_root.addImport("nested_client", nested_client_mod);
     exe_root.addImport("cli_parse", cli_parse_mod);
+    exe_root.addImport("command_spec", command_spec_mod);
 
     const exe = b.addExecutable(.{
         .name = "msr",
@@ -191,6 +200,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     cli_parse_test_root.addImport("argv_parse", argv_parse_mod);
+    cli_parse_test_root.addImport("command_spec", command_spec_mod);
     const cli_parse_tests = b.addTest(.{
         .root_module = cli_parse_test_root,
     });
