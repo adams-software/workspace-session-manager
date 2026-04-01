@@ -186,3 +186,9 @@ Fix: if an owner is attached but `getMasterFd()` is gone, treat that as `pty_clo
   - direct attach can take ownership (`--force`)
   - nested attach must respect the nested `msr` contract and omit `--force`
 - Wrapper ergonomics are still valuable, but they must bend to the underlying runtime’s actual nested semantics.
+
+
+## WSM first-slice lessons
+- Overloading `attach` with workspace-level jump semantics is cleaner than introducing a dedicated `j` command, because it preserves the mental model across layers: `msr attach` resolves a path, `dsm attach` resolves a local name, and `wsm attach` resolves a workspace-relative query.
+- Exact canonical id should win before basename/suffix matching, even when that means a short root-level id like `shell` is chosen over deeper siblings sharing the same basename. That rule is deterministic and easy to explain.
+- As with DSM, the wrapper layer benefits from mirroring lower-layer help/alias structure early. Even a narrow first WSM slice feels more coherent once aliases, completion, and explicit resolution docs are present.

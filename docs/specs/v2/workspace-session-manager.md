@@ -1279,3 +1279,21 @@ That is the cleanest framing, and it composes naturally with the architecture yo
 * `dsm` — one directory
 * `wsm` — many directories under one root
 
+
+## Current implementation notes
+
+The first implemented WSM slice is intentionally narrow and mirrors lower layers where possible:
+
+- commands currently implemented: `create`, `attach`, `current`, `status`, `exists`, `list`
+- aliases currently implemented: `c/create`, `a/attach`, `s/status`, `e/exists`, `ls/list`
+- `attach` is overloaded with global jump semantics rather than introducing a separate `j` command
+- root resolution order is: `--root`, then `WSM_ROOT`, then shell cwd
+- query resolution is deterministic:
+  1. exact canonical id
+  2. unique basename
+  3. unique canonical suffix
+  4. otherwise ambiguous/no-match
+- current-session display uses the canonical workspace-relative id
+- completion currently lives in `scripts/wsm_completion.bash`
+
+This keeps WSM aligned with the same wrapper philosophy as DSM: preserve lower-layer semantics when possible and add only the minimum workspace-level resolution ergonomics.

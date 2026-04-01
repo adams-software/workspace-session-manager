@@ -363,3 +363,14 @@
   - `p/prev`
   - `n/next`
 - Updated DSM help/completion/docs to reflect the lexical navigation surface and aliases.
+
+- Started the first real WSM slice as the hierarchical layer above DSM:
+  - added `scripts/wsm`
+  - implemented workspace-root resolution via `--root`, `WSM_ROOT`, then shell cwd
+  - implemented recursive `.msr` discovery and canonical workspace-relative ids
+  - overloaded `attach` with global workspace jump semantics instead of adding a separate jump command
+  - implemented deterministic query resolution: exact canonical id, unique basename, unique suffix, else ambiguous/no-match
+  - added initial WSM passthroughs for `status`, `exists`, `current`, and `list`
+  - added `scripts/smoke_wsm.sh` to exercise create/list/current, exact canonical resolution, ambiguous suffix handling, nested help, and status/exists paths
+  - added WSM aliases `s/status` and `e/exists`
+  - added `scripts/wsm_completion.bash` for command + canonical-id completion
