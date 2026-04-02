@@ -1308,3 +1308,14 @@ The current implementation direction intentionally keeps runtime query resolutio
 - otherwise no match / ambiguous
 
 The main interactive ergonomics are expected to come from canonical-id tab completion rather than richer runtime fuzzy matching. In practice, WSM ids behave like workspace-relative paths, so slash-aware hierarchical completion is the preferred UX for fast attach.
+
+
+## Current local-navigation direction
+
+WSM local navigation is now intended as thin composition over DSM rather than an independent reimplementation.
+
+- `first/last/prev/next` are exposed at the WSM layer for convenience
+- current-node resolution still comes from `WSM_ROOT` + `MSR_SESSION`
+- actual lexical sibling behavior is delegated to DSM inside the current node
+
+This keeps workspace-global behavior in WSM and local lexical behavior in one place.

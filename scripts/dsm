@@ -7,8 +7,8 @@ MSR_BIN="$ROOT/zig-out/bin/msr"
 err() { printf '%s\n' "$*" >&2; }
 out() { printf '%s\n' "$*"; }
 
-usage_body() {
-  cat <<'EOU'
+usage() {
+  cat <<'EOF2'
 NAME
   dsm - directory session manager for ergonomic local msr session names
 
@@ -34,7 +34,7 @@ USAGE
   dsm last
   dsm prev
   dsm next
-  dsm terminate [name] [-f|--force|TERM|INT|KILL]
+  dsm terminate [name] [TERM|INT|KILL|-f|--force]
   dsm wait [name]
   dsm status [name]
   dsm exists [name]
@@ -42,13 +42,13 @@ USAGE
 
 COMMANDS
   c, create     create a session
-  a, attach     attach to a session by name; auto-force; create+attach if missing
+  a, attach     attach to a session by name; auto-force on direct attach; create+attach if missing
   d, detach     detach the current session
   current       print the current session name
   f, first      attach to the first session in lexical order
   l, last       attach to the last session in lexical order
-  p, prev       attach to the previous session in lexical order
-  n, next       attach to the next session in lexical order
+  p, prev       attach to the previous session in lexical order (wraps)
+  n, next       attach to the next session in lexical order (wraps)
   terminate     send a signal to a session
   wait          wait for session exit
   status        print session state
@@ -63,15 +63,11 @@ NESTED MODE
   When a current session is selected, only these commands change:
     dsm a <target>   attach to another named session from the current session
     dsm d            detach the current session
-    dsm prev         attach to the previous session in lexical order
-    dsm next         attach to the next session in lexical order
+    dsm p            attach to the previous session in lexical order (wraps)
+    dsm n            attach to the next session in lexical order (wraps)
 
   All other commands keep their normal explicit-argument behavior.
-EOU
-}
-
-usage() {
-  usage_body
+EOF2
 }
 
 nested_usage() {
@@ -85,12 +81,12 @@ NESTED MODE
     a <target> routes through the current session owner
     d detaches the current session
     current prints the current session name
-    prev attaches to the previous lexical session
-    next attaches to the next lexical session
+    p/prev attaches to the previous lexical session (wraps)
+    n/next attaches to the next lexical session (wraps)
     all other commands keep their normal explicit-argument behavior
 
 EOF2
-  usage_body
+  usage
 }
 
 CWD_OVERRIDE=""
@@ -184,7 +180,7 @@ attach_name() {
       exec "$MSR_BIN" attach "$sock" --force
     fi
   else
-    exec "$MSR_BIN" create -a "$sock"
+    exec env WSM_ROOT="${WSM_ROOT:-}" "$MSR_BIN" create -a "$sock"
   fi
 }
 
@@ -196,16 +192,26 @@ ordered_name_at() {
   printf '%s\n' "${names[$index]}"
 }
 
+ordered_last_name() {
+  mapfile -t names < <(list_names)
+  [[ ${#names[@]} -gt 0 ]] || return 1
+  printf '%s\n' "${names[$((${#names[@]} - 1))]}"
+}
+
 ordered_prev_name() {
   local current
   current="$(resolve_current_name)" || return 1
   mapfile -t names < <(list_names)
   [[ ${#names[@]} -gt 0 ]] || return 1
-  local i
+  local i last
+  last=$((${#names[@]} - 1))
   for ((i=0; i<${#names[@]}; i++)); do
     if [[ "${names[$i]}" == "$current" ]]; then
-      [[ $i -gt 0 ]] || return 1
-      printf '%s\n' "${names[$((i-1))]}"
+      if [[ $i -gt 0 ]]; then
+        printf '%s\n' "${names[$((i-1))]}"
+      else
+        printf '%s\n' "${names[$last]}"
+      fi
       return 0
     fi
   done
@@ -221,8 +227,11 @@ ordered_next_name() {
   last=$((${#names[@]} - 1))
   for ((i=0; i<${#names[@]}; i++)); do
     if [[ "${names[$i]}" == "$current" ]]; then
-      [[ $i -lt $last ]] || return 1
-      printf '%s\n' "${names[$((i+1))]}"
+      if [[ $i -lt $last ]]; then
+        printf '%s\n' "${names[$((i+1))]}"
+      else
+        printf '%s\n' "${names[0]}"
+      fi
       return 0
     fi
   done
@@ -266,15 +275,15 @@ case "$cmd" in
         exit 1
       fi
       if [[ $attach_now -eq 1 ]]; then
-        exec "$MSR_BIN" create -a "$(sock_for "$name")" -- "$@"
+        exec env WSM_ROOT="${WSM_ROOT:-}" "$MSR_BIN" create -a "$(sock_for "$name")" -- "$@"
       else
-        exec "$MSR_BIN" create "$(sock_for "$name")" -- "$@"
+        exec env WSM_ROOT="${WSM_ROOT:-}" "$MSR_BIN" create "$(sock_for "$name")" -- "$@"
       fi
     else
       if [[ $attach_now -eq 1 ]]; then
-        exec "$MSR_BIN" create -a "$(sock_for "$name")"
+        exec env WSM_ROOT="${WSM_ROOT:-}" "$MSR_BIN" create -a "$(sock_for "$name")"
       else
-        exec "$MSR_BIN" create "$(sock_for "$name")"
+        exec env WSM_ROOT="${WSM_ROOT:-}" "$MSR_BIN" create "$(sock_for "$name")"
       fi
     fi
     ;;
@@ -296,24 +305,31 @@ case "$cmd" in
 
   f|first)
     target="$(ordered_name_at 0)" || { err "dsm: no sessions in directory"; exit 1; }
+    if current="$(resolve_current_name 2>/dev/null)" && [[ "$current" == "$target" ]]; then
+      err "dsm: already at first session"
+      exit 1
+    fi
     attach_name "$target"
     ;;
 
   l|last)
-    mapfile -t names < <(list_names)
-    [[ ${#names[@]} -gt 0 ]] || { err "dsm: no sessions in directory"; exit 1; }
-    attach_name "${names[$((${#names[@]} - 1))]}"
+    target="$(ordered_last_name)" || { err "dsm: no sessions in directory"; exit 1; }
+    if current="$(resolve_current_name 2>/dev/null)" && [[ "$current" == "$target" ]]; then
+      err "dsm: already at last session"
+      exit 1
+    fi
+    attach_name "$target"
     ;;
 
   p|prev)
     require_current_context
-    target="$(ordered_prev_name)" || { err "dsm: no previous session"; exit 1; }
+    target="$(ordered_prev_name)" || { err "dsm: no sessions in directory"; exit 1; }
     attach_name "$target"
     ;;
 
   n|next)
     require_current_context
-    target="$(ordered_next_name)" || { err "dsm: no next session"; exit 1; }
+    target="$(ordered_next_name)" || { err "dsm: no sessions in directory"; exit 1; }
     attach_name "$target"
     ;;
 

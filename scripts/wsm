@@ -21,24 +21,36 @@ DESCRIPTION
 USAGE
   wsm create <target> [-- <cmd...>]
   wsm attach <target-or-query>
+  wsm detach
   wsm current
   wsm status [target-or-query]
   wsm exists [target-or-query]
+  wsm terminate [target-or-query] [TERM|INT|KILL|-f|--force]
+  wsm first
+  wsm last
+  wsm prev
+  wsm next
   wsm list
 
 COMMANDS
   c, create     create a session at a canonical workspace-relative target
   a, attach     resolve a workspace-wide target/query and attach to it
+  d, detach     detach the current session
   current       print the current canonical workspace-relative id
   s, status     resolve a workspace-wide target/query and print session state
   e, exists     resolve a workspace-wide target/query and test whether it is reachable
+  terminate     resolve a workspace-wide target/query and send a signal
+  f, first      delegate local first-session navigation to DSM in the current node
+  l, last       delegate local last-session navigation to DSM in the current node
+  p, prev       delegate local previous-session navigation to DSM in the current node
+  n, next       delegate local next-session navigation to DSM in the current node
   ls, list      list canonical ids under the workspace root
 
 WORKSPACE ROOT
   --root=<path> or --root <path> overrides WSM_ROOT
 
 RESOLUTION
-  attach/status/exists resolve queries deterministically in this order:
+  attach/status/exists/terminate resolve queries deterministically in this order:
     1. exact canonical id match
     2. exact basename match if unique
     3. otherwise prints matching candidates and exits nonzero
@@ -62,9 +74,11 @@ NESTED MODE
   workspace root: $root
 
   In this context:
+    d detaches the current session
     current prints the current canonical workspace-relative id
     attach resolves globally under the workspace root
     status and exists resolve globally under the workspace root
+    first/last/prev/next delegate local navigation to DSM in the current node
 
 EOF2
   usage_body
@@ -120,8 +134,20 @@ resolve_current_id() {
   canonical_id_for_sock "$raw"
 }
 
+require_current_context() {
+  resolve_current_id >/dev/null 2>&1 || {
+    err "wsm: command requires current WSM session context"
+    exit 1
+  }
+}
+
+current_node_dir() {
+  require_current_context
+  dirname -- "$MSR_SESSION"
+}
+
 list_ids() {
-  find "$WSM_ROOT_RESOLVED" \( -type s -o -type f \) -name '*.msr' | \
+  find "$WSM_ROOT_RESOLVED" \( -type s -o -type f \) -name '*.msr' 2>/dev/null | \
     while IFS= read -r path; do
       canonical_id_for_sock "$path" || true
     done | LC_ALL=C sort -u
@@ -176,6 +202,16 @@ exists_canonical() {
   "$MSR_BIN" exists "$(sock_for_canonical "$id")"
 }
 
+terminate_canonical() {
+  local id="$1"
+  local sig="${2:-}"
+  if [[ -n "$sig" ]]; then
+    "$MSR_BIN" terminate "$(sock_for_canonical "$id")" "$sig"
+  else
+    "$MSR_BIN" terminate "$(sock_for_canonical "$id")"
+  fi
+}
+
 create_canonical() {
   local id="$1"
   local sock dir
@@ -188,6 +224,13 @@ create_canonical() {
   else
     exec env WSM_ROOT="$WSM_ROOT_RESOLVED" "$MSR_BIN" create "$sock"
   fi
+}
+
+local_nav_delegate() {
+  local op="$1"
+  local node_dir
+  node_dir="$(current_node_dir)"
+  exec "$DSM_BIN" --cwd "$node_dir" "$op"
 }
 
 if [[ $# -lt 1 ]]; then
@@ -242,6 +285,10 @@ case "$cmd" in
     fi
     ;;
 
+  d|detach)
+    exec "$MSR_BIN" detach
+    ;;
+
   current)
     cid="$(resolve_current_id)" || { err "wsm: no current session and no WSM context"; exit 1; }
     out "$cid"
@@ -291,6 +338,54 @@ case "$cmd" in
       cid="$(resolve_current_id)" || { err "wsm: no target and no current WSM context"; exit 1; }
       exists_canonical "$cid"
     fi
+    ;;
+
+  terminate)
+    sig=""
+    if [[ $# -ge 1 && ( "$1" == "TERM" || "$1" == "INT" || "$1" == "KILL" || "$1" == "-f" || "$1" == "--force" ) ]]; then
+      cid="$(resolve_current_id)" || { err "wsm: no target and no current WSM context"; exit 1; }
+      sig="$1"
+      terminate_canonical "$cid" "$sig"
+    elif [[ $# -ge 1 ]]; then
+      query="$1"
+      shift || true
+      if [[ $# -ge 1 ]]; then
+        sig="$1"
+      fi
+      set +e
+      resolved="$(resolve_query "$query")"
+      rc=$?
+      set -e
+      if [[ $rc -eq 0 ]]; then
+        terminate_canonical "$resolved" "$sig"
+      elif [[ $rc -eq 2 ]]; then
+        err "wsm: ambiguous query: $query"
+        printf '%s\n' "$resolved"
+        exit 1
+      else
+        err "wsm: no match for query: $query"
+        exit 1
+      fi
+    else
+      cid="$(resolve_current_id)" || { err "wsm: no target and no current WSM context"; exit 1; }
+      terminate_canonical "$cid"
+    fi
+    ;;
+
+  f|first)
+    local_nav_delegate first
+    ;;
+
+  l|last)
+    local_nav_delegate last
+    ;;
+
+  p|prev)
+    local_nav_delegate prev
+    ;;
+
+  n|next)
+    local_nav_delegate next
     ;;
 
   ls|list)

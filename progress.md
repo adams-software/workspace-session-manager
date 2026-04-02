@@ -384,3 +384,18 @@
   - unique segment prefixes expand naturally (e.g. `p` -> `pathdb/`, `pathdb/a` -> `pathdb/api/`)
   - ambiguous directory tails list matching next components in lexical order from the discovered id set
 - Updated `scripts/smoke_wsm.sh` to validate the simplified runtime model plus path-like completion assumptions.
+
+- Continued integrating WSM/DSM cleanly after the first WSM slice:
+  - added WSM local navigation commands (`first/last/prev/next`) as a thin wrapper that delegates to DSM in the current node rather than duplicating local lexical logic
+  - added `wsm detach` passthrough for symmetry with the lower layers
+  - fixed DSM create/auto-create paths to preserve `WSM_ROOT` so workspace context survives through WSM -> DSM -> msr composition
+- Refined WSM completion and discovery UX:
+  - top-level completion now prefers canonical long command names plus `--root`
+  - fixed `--root=<path>` completion behavior so it works the same as `--root <path>`
+  - canonical-id completion now works for alias forms like `wsm a ...` as well as full command names
+  - recursive `find` noise (permission denied under roots like `/tmp`) is now suppressed in WSM discovery/listing
+- Addressed a likely core nested-attach readiness issue:
+  - forwarded attach replacement in `attach_runtime.zig` now sends a fresh `owner_ready` after attachment replacement and resends resize, so the post-hop owner path reasserts readiness more like the initial attach lifecycle
+- Cleaned up DSM local navigation semantics:
+  - `prev`/`next` now wrap
+  - `first`/`last` now error cleanly when already at the endpoint instead of attempting a self-attach

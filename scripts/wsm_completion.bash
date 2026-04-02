@@ -2,7 +2,8 @@ _wsm_complete() {
   local cur prev words cword
   _init_completion -n : || return
 
-  local commands="c create a attach current s status e exists ls list help -h --help"
+  local long_commands="create attach detach current status exists terminate first last prev next list"
+  local global_flags="--root"
 
   __wsm_ids() {
     local root_override=""
@@ -28,7 +29,7 @@ _wsm_complete() {
     fi
 
     [[ -d "$root" ]] || return 0
-    find "$root" \( -type s -o -type f \) -name '*.msr' | while IFS= read -r path; do
+    find "$root" \( -type s -o -type f \) -name '*.msr' 2>/dev/null | while IFS= read -r path; do
       local rel="${path#$root/}"
       [[ "$rel" == "$path" ]] && rel="$(basename -- "$path")"
       printf '%s\n' "${rel%.msr}"
@@ -68,8 +69,19 @@ _wsm_complete() {
     done | LC_ALL=C sort -u
   }
 
+  if [[ "$cur" == --root=* ]]; then
+    local root_prefix="--root="
+    local root_cur="${cur#--root=}"
+    COMPREPLY=( $(compgen -d -- "$root_cur") )
+    local i
+    for i in "${!COMPREPLY[@]}"; do
+      COMPREPLY[$i]="$root_prefix${COMPREPLY[$i]}"
+    done
+    return
+  fi
+
   if [[ $cword -eq 1 ]]; then
-    COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
+    COMPREPLY=( $(compgen -W "$long_commands $global_flags" -- "$cur") )
     return
   fi
 
@@ -84,26 +96,38 @@ _wsm_complete() {
       _filedir -d
       return
     fi
+    if [[ $cword -eq 3 ]]; then
+      COMPREPLY=( $(compgen -W "$long_commands $global_flags" -- "$cur") )
+      return
+    fi
     cmd_index=3
   elif [[ "${words[1]}" == --root=* ]]; then
+    if [[ $cword -eq 2 ]]; then
+      COMPREPLY=( $(compgen -W "$long_commands $global_flags" -- "$cur") )
+      return
+    fi
     cmd_index=2
   fi
 
-  if [[ $cmd_index -ge ${#words[@]} ]]; then
-    COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
+  local cmd="${words[$cmd_index]:-}"
+  if [[ -z "$cmd" ]]; then
+    COMPREPLY=( $(compgen -W "$long_commands $global_flags" -- "$cur") )
     return
   fi
 
-  local cmd="${words[$cmd_index]}"
   case "$cmd" in
-    c|create|a|attach|s|status|e|exists)
+    c|create|a|attach|s|status|e|exists|terminate)
       if [[ $cword -eq $((cmd_index + 1)) ]]; then
         mapfile -t COMPREPLY < <(__wsm_pathish_candidates "$cur")
         return
       fi
       ;;
-    current|ls|list|help|-h|--help)
+    detach|current|first|last|prev|next|list|help|--help)
       COMPREPLY=()
+      return
+      ;;
+    *)
+      COMPREPLY=( $(compgen -W "$long_commands $global_flags" -- "$cur") )
       return
       ;;
   esac

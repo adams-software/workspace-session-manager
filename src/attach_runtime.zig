@@ -204,6 +204,10 @@ pub fn runAttachBridge(allocator: std.mem.Allocator, attachment: *client.Session
                         .replace_attachment => |next_attachment| {
                             attachment.close();
                             attachment.* = next_attachment;
+                            const re_ready_bytes = try protocol.encodeOwnerReady(allocator);
+                            defer allocator.free(re_ready_bytes);
+                            try protocol.writeFrame(attachment.fd, re_ready_bytes);
+                            sendResizeIfAvailable(attachment, in_fd);
                         },
                     }
                 },

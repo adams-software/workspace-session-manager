@@ -202,3 +202,16 @@ Fix: if an owner is attached but `getMasterFd()` is gone, treat that as `pty_clo
 
 ## WSM completion lesson
 - Canonical ids are path-like enough that shell completion should behave like hierarchical path completion rather than generic flat word completion. Segment-by-segment slash-aware completion is a better fit than richer runtime fuzzy matching for this layer.
+
+
+## WSM/DSM composition lesson
+- Delegating WSM local navigation to DSM is the right layering. WSM adds workspace-wide discovery and global resolution; DSM remains the single source of truth for local lexical sibling navigation. That avoids duplicated local-order logic and keeps the hierarchy clean.
+
+## Workspace env propagation lesson
+- `WSM_ROOT` has to survive the full wrapper stack, not just direct `wsm create`. If WSM delegates attach/create behavior through DSM, DSM must also preserve `WSM_ROOT` on create and auto-create paths or nested WSM context will appear mysteriously absent inside attached sessions.
+
+## Nested forwarded-attach readiness lesson
+- The forwarded attach path was likely missing an explicit re-ready signal after owner attachment replacement. The initial owner attach lifecycle has a clear `owner_ready` transition; forwarded replacement should reassert readiness too, otherwise subsequent routed operations can observe a stale not-ready view of the owner path.
+
+## Completion ergonomics lesson
+- For WSM, command completion should bias toward canonical long command names while still supporting alias behavior for target completion. Showing every shorthand in the top-level command list added clutter without helping attach speed.
