@@ -74,7 +74,7 @@ try:
         log(f'[smoke] missing binary: {BIN}')
         sys.exit(1)
 
-    shell_cmd = 'PS1=; export PS1; while read line; do eval "$line"; done'
+    shell_cmd = 'PS1=; export PS1; stty -echo; while read line; do eval "$line"; done'
 
     log('[smoke] create src')
     subprocess.check_call([BIN, 'create', SRC, '--', '/bin/sh', '-lc', shell_cmd])
@@ -95,6 +95,9 @@ try:
     log('[smoke] nested detach via --session')
     proc, master = spawn_attach_pty(SRC)
     assert_probe(master, "printf 'SRC2\\n'", 'SRC2', 'pre-detach src probe')
+    if proc.poll() is not None:
+        log(f'[smoke] outer attach exited before nested detach with code {proc.returncode}')
+        sys.exit(1)
     subprocess.check_call([BIN, f'--session={SRC}', 'detach'])
     proc.wait(timeout=3)
     os.close(master)
@@ -102,6 +105,9 @@ try:
     log('[smoke] nested attach via --session')
     proc, master = spawn_attach_pty(SRC)
     assert_probe(master, "printf 'SRC3\\n'", 'SRC3', 'pre-switch src probe')
+    if proc.poll() is not None:
+        log(f'[smoke] outer attach exited before nested attach with code {proc.returncode}')
+        sys.exit(1)
     subprocess.check_call([BIN, f'--session={SRC}', 'attach', DST])
     assert_probe(master, "printf 'DST1\\n'", 'DST1', 'post-switch dst probe')
     proc.terminate()
@@ -111,6 +117,9 @@ try:
     log('[smoke] nested attach via MSR_SESSION')
     proc, master = spawn_attach_pty(SRC)
     assert_probe(master, "printf 'SRC4\\n'", 'SRC4', 'pre-switch env src probe')
+    if proc.poll() is not None:
+        log(f'[smoke] outer attach exited before env nested attach with code {proc.returncode}')
+        sys.exit(1)
     env = os.environ.copy()
     env['MSR_SESSION'] = SRC
     subprocess.check_call([BIN, 'attach', DST], env=env)

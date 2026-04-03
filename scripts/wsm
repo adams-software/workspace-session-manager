@@ -187,7 +187,7 @@ resolve_query() {
 
 attach_canonical() {
   local id="$1"
-  exec "$DSM_BIN" --cwd "$(dirname -- "$(sock_for_canonical "$id")")" attach "$(basename -- "$id")"
+  "$DSM_BIN" --cwd "$(dirname -- "$(sock_for_canonical "$id")")" attach "$(basename -- "$id")"
 }
 
 status_canonical() {
@@ -220,9 +220,9 @@ create_canonical() {
   mkdir -p "$dir"
   if [[ $# -gt 1 ]]; then
     shift
-    exec env WSM_ROOT="$WSM_ROOT_RESOLVED" "$MSR_BIN" create "$sock" -- "$@"
+    env WSM_ROOT="$WSM_ROOT_RESOLVED" "$MSR_BIN" create "$sock" -- "$@"
   else
-    exec env WSM_ROOT="$WSM_ROOT_RESOLVED" "$MSR_BIN" create "$sock"
+    env WSM_ROOT="$WSM_ROOT_RESOLVED" "$MSR_BIN" create "$sock"
   fi
 }
 
@@ -230,7 +230,7 @@ local_nav_delegate() {
   local op="$1"
   local node_dir
   node_dir="$(current_node_dir)"
-  exec "$DSM_BIN" --cwd "$node_dir" "$op"
+  "$DSM_BIN" --cwd "$node_dir" "$op"
 }
 
 if [[ $# -lt 1 ]]; then
@@ -286,7 +286,7 @@ case "$cmd" in
     ;;
 
   d|detach)
-    exec "$MSR_BIN" detach
+    "$MSR_BIN" detach
     ;;
 
   current)

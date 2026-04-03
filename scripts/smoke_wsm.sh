@@ -48,13 +48,45 @@ printf '%s\n' "$AMBIG" | grep -q 'wsm: no match for query: api/shell'
 [[ $NOMATCH_RC -ne 0 ]]
 printf '%s\n' "$NOMATCH" | grep -q 'wsm: no match for query: pathdb/api'
 
-printf '=== wsm status/exists ===\n'
+printf '=== wsm status/exists/terminate ===\n'
 STATUS_CTX_OUT="$(MSR_SESSION="$TMP/pathdb/api/build.msr" WSM_ROOT="$TMP" "$WSM" status 2>&1)"
 EXISTS_CTX_OUT="$(MSR_SESSION="$TMP/pathdb/api/build.msr" WSM_ROOT="$TMP" "$WSM" exists 2>&1)"
 printf 'status_ctx=[%s]\n' "$STATUS_CTX_OUT"
 printf 'exists_ctx=[%s]\n' "$EXISTS_CTX_OUT"
 [[ "$STATUS_CTX_OUT" == 'running' ]]
 [[ "$EXISTS_CTX_OUT" == 'true' ]]
+"$WSM" --root="$TMP" terminate pathdb/api/build TERM >/dev/null
+
+printf '=== wsm local nav delegates to dsm ===\n'
+set +e
+NOCTX="$("$WSM" prev 2>&1)"
+NOCTX_RC=$?
+set -e
+printf 'noctx rc=%s out=[%s]\n' "$NOCTX_RC" "$NOCTX"
+[[ $NOCTX_RC -ne 0 ]]
+printf '%s\n' "$NOCTX" | grep -q 'wsm: command requires current WSM session context'
+set +e
+PREV_FAIL_OUT="$(MSR_SESSION="$TMP/pathdb/api/build.msr" WSM_ROOT="$TMP" "$WSM" prev 2>&1)"
+PREV_FAIL_RC=$?
+set -e
+printf 'prev-fail rc=%s out=[%s]\n' "$PREV_FAIL_RC" "$PREV_FAIL_OUT"
+[[ $PREV_FAIL_RC -ne 0 ]]
+printf '%s
+' "$PREV_FAIL_OUT" | grep -q 'dsm: no previous session'
+set +e
+NEXT_FAIL_OUT="$(MSR_SESSION="$TMP/pathdb/api/shell.msr" WSM_ROOT="$TMP" "$WSM" next 2>&1)"
+NEXT_FAIL_RC=$?
+set -e
+printf 'next-fail rc=%s out=[%s]\n' "$NEXT_FAIL_RC" "$NEXT_FAIL_OUT"
+[[ $NEXT_FAIL_RC -ne 0 ]]
+printf '%s
+' "$NEXT_FAIL_OUT" | grep -q 'dsm: no next session'
+set +e
+PREV_OK_OUT="$(MSR_SESSION="$TMP/pathdb/api/shell.msr" WSM_ROOT="$TMP" "$WSM" prev 2>&1)"
+PREV_OK_RC=$?
+set -e
+printf 'prev-ok rc=%s out=[%s]\n' "$PREV_OK_RC" "$PREV_OK_OUT"
+[[ $PREV_OK_RC -eq 0 ]]
 
 printf '=== wsm nested help ===\n'
 set +e

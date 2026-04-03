@@ -104,7 +104,7 @@ fn parseU16(s: []const u8) !u16 {
     return std.fmt.parseInt(u16, s, 10);
 }
 
-fn spawnHostDetached(argv0: []const u8, path: []const u8, child_argv: []const []const u8) !void {
+fn spawnHostDetached(argv0: []const u8, path: []const u8, child_argv: []const []const u8, enable_vterm: bool) !void {
     const pid = c.fork();
     if (pid < 0) return error.ForkFailed;
 
@@ -115,15 +115,21 @@ fn spawnHostDetached(argv0: []const u8, path: []const u8, child_argv: []const []
         defer arena.deinit();
         const a = arena.allocator();
 
-        const n = 4 + child_argv.len + 1;
+        const n = 4 + (if (enable_vterm) @as(usize, 1) else 0) + child_argv.len + 1;
         const av = a.alloc(?[*:0]u8, n) catch c._exit(127);
 
         av[0] = (a.dupeZ(u8, argv0) catch c._exit(127)).ptr;
         av[1] = (a.dupeZ(u8, "_host") catch c._exit(127)).ptr;
         av[2] = (a.dupeZ(u8, path) catch c._exit(127)).ptr;
-        av[3] = (a.dupeZ(u8, "--") catch c._exit(127)).ptr;
+        var arg_base: usize = 3;
+        if (enable_vterm) {
+            av[arg_base] = (a.dupeZ(u8, "--vterm") catch c._exit(127)).ptr;
+            arg_base += 1;
+        }
+        av[arg_base] = (a.dupeZ(u8, "--") catch c._exit(127)).ptr;
+        arg_base += 1;
         for (child_argv, 0..) |arg, i| {
-            av[4 + i] = (a.dupeZ(u8, arg) catch c._exit(127)).ptr;
+            av[arg_base + i] = (a.dupeZ(u8, arg) catch c._exit(127)).ptr;
         }
         av[n - 1] = null;
 
@@ -168,18 +174,69 @@ fn defaultShellArgv() [2][]const u8 {
     return .{ shell, "-i" };
 }
 
+fn renderSnapshot(snapshot: client.RemoteSnapshot) void {
+    out("\x1b[?1049h\x1b[H\x1b[2J", .{});
+    for (snapshot.snapshot.cells, 0..) |row, r| {
+        for (row) |cell| out("{s}", .{cell.text});
+        if (r + 1 < snapshot.snapshot.cells.len) out("\n", .{});
+    }
+    out("\x1b[{d};{d}H", .{ snapshot.snapshot.cursor_row + 1, snapshot.snapshot.cursor_col + 1 });
+    if (snapshot.snapshot.cursor_visible) out("\x1b[?25h", .{}) else out("\x1b[?25l", .{});
+}
+
 fn runAttachDirect(path: []const u8, mode: client.AttachMode) u8 {
     var cli = client.SessionClient.init(std.heap.page_allocator, path) catch return 1;
     defer cli.deinit();
-    var att = cli.attach(mode) catch {
-        err("msr: attach rejected (session unavailable, ownership conflict, or takeover required)\n", .{});
-        return 1;
+
+    // Plain attach is live-stream only. When terminal-state support is available,
+    // upgrade attach to snapshot + after_seq replay so reattach can restore the
+    // visible screen and then stream the missing tail.
+    var used_snapshot = false;
+    var att = blk: {
+        const snap = cli.getScreenSnapshot() catch null;
+        if (snap) |snapshot| {
+            var owned_snapshot = snapshot;
+            defer owned_snapshot.deinit(std.heap.page_allocator);
+            if (cli.attachAfterSeq(mode, owned_snapshot.snapshot.seq)) |att_snapshot| {
+                renderSnapshot(.{ .snapshot = owned_snapshot.snapshot });
+                used_snapshot = true;
+                break :blk att_snapshot;
+            } else |_| {}
+        }
+
+        break :blk cli.attach(mode) catch {
+            err("msr: attach rejected (session unavailable, ownership conflict, or takeover required)\n", .{});
+            return 1;
+        };
     };
     defer att.close();
-    attach_runtime.runAttachBridge(std.heap.page_allocator, &att, c.STDIN_FILENO, c.STDOUT_FILENO) catch {
+    const bridge_exit = attach_runtime.runAttachBridge(std.heap.page_allocator, &att, c.STDIN_FILENO, c.STDOUT_FILENO) catch {
         err("msr: attach stream failed\n", .{});
         return 1;
     };
+    switch (bridge_exit) {
+        .clean => {},
+        .remote_closed => {
+            if (c.isatty(c.STDERR_FILENO) == 1) {
+                err("msr: session closed the current attachment\n", .{});
+            }
+        },
+        .stdin_closed => {},
+        .stdin_suspended => {
+            if (c.isatty(c.STDERR_FILENO) == 1) {
+                err("msr: local terminal input became unavailable; session is still running\n", .{});
+            }
+        },
+        .stdout_unavailable => {
+            if (c.isatty(c.STDERR_FILENO) == 1) {
+                err("msr: local terminal output became unavailable; session is still running\n", .{});
+            }
+        },
+        .remote_error => {
+            err("msr: attach stream failed\n", .{});
+            return 1;
+        },
+    }
     if (c.isatty(c.STDOUT_FILENO) == 1) {
         out("\r\n", .{});
     }
@@ -230,16 +287,25 @@ pub fn main(init: std.process.Init) !u8 {
     const argv = argv_list.items;
 
     if (argv.len >= 2 and std.mem.eql(u8, argv[1], "_host")) {
-        if (argv.len < 4 or !std.mem.eql(u8, argv[3], "--")) {
+        if (argv.len < 4) {
             err("msr: invalid _host arguments\n", .{});
             return 1;
         }
         const path = argv[2];
-        const child_argv = argv[4..];
+        var child_start: usize = 3;
+        var enable_vterm = false;
+        while (child_start < argv.len and !std.mem.eql(u8, argv[child_start], "--")) : (child_start += 1) {
+            if (std.mem.eql(u8, argv[child_start], "--vterm")) enable_vterm = true;
+        }
+        if (child_start >= argv.len or !std.mem.eql(u8, argv[child_start], "--")) {
+            err("msr: invalid _host arguments\n", .{});
+            return 1;
+        }
+        const child_argv = argv[(child_start + 1)..];
         const env_entry = try std.fmt.allocPrint(std.heap.page_allocator, "MSR_SESSION={s}", .{path});
         defer std.heap.page_allocator.free(env_entry);
         const env = [_][]const u8{env_entry};
-        var session_host = try host.SessionHost.init(std.heap.page_allocator, .{ .argv = child_argv, .env = env[0..] });
+        var session_host = try host.SessionHost.init(std.heap.page_allocator, .{ .argv = child_argv, .env = env[0..], .enable_terminal_state = enable_vterm, .rows = 24, .cols = 80, .replay_capacity = 128 });
         defer session_host.deinit();
         try session_host.start();
 
@@ -256,13 +322,20 @@ pub fn main(init: std.process.Init) !u8 {
         };
 
         while (true) {
-            _ = session_host.refresh() catch {};
             _ = session_server.step() catch |e| {
                 err("msr: internal server step failed: {s}\n", .{@errorName(e)});
                 _ = session_server.stop() catch {};
                 _ = session_host.close() catch {};
                 return 1;
             };
+            if (!session_server.hasOwner()) {
+                const drained = session_host.drainObservedPtyOutput() catch &[_][]u8{};
+                if (@TypeOf(drained) != *const [0][]u8) {
+                    for (drained) |chunk| std.heap.page_allocator.free(chunk);
+                    std.heap.page_allocator.free(drained);
+                }
+            }
+            _ = session_host.refresh() catch {};
             switch (session_host.getState()) {
                 .running, .starting => {
                     _ = c.usleep(10_000);
@@ -464,7 +537,7 @@ pub fn main(init: std.process.Init) !u8 {
                     const shell_argv = defaultShellArgv();
                     const child_argv = args.child_argv orelse shell_argv[0..];
 
-                    spawnHostDetached(argv[0], path, child_argv) catch return 1;
+                    spawnHostDetached(argv[0], path, child_argv, args.vterm) catch return 1;
                     if (!waitForReady(path, 2000)) return 1;
                     if (args.attach_after_create) {
                         return runAttachDirect(path, .exclusive);

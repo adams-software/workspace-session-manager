@@ -63,6 +63,7 @@ pub const PathArgs = struct { path: []const u8 };
 pub const CreateArgs = struct {
     path: []const u8,
     attach_after_create: bool,
+    vterm: bool,
     child_argv: ?[]const []const u8,
 };
 pub const AttachArgs = struct {
@@ -183,10 +184,13 @@ pub fn parseArgv(allocator: std.mem.Allocator, argv: []const []const u8) (std.me
         .create => {
             if (flagHasUnexpectedValue(parsed, .create, "a") or flagHasUnexpectedValue(parsed, .create, "attach")) return .{ .fail = .{ .kind = .unexpected_argument, .command = .create } };
             const attach_after_create = hasFlag(parsed, .create, "a") or hasFlag(parsed, .create, "attach");
+            if (flagHasUnexpectedValue(parsed, .create, "vterm")) return .{ .fail = .{ .kind = .unexpected_argument, .command = .create } };
+            const vterm = hasFlag(parsed, .create, "vterm");
             if (parsed.positionals.len != 1) return .{ .fail = .{ .kind = .missing_argument, .command = .create } };
             return .{ .ok = .{ .current_session = current_session, .command = .{ .create = .{
                 .path = parsed.positionals[0],
                 .attach_after_create = attach_after_create,
+                .vterm = vterm,
                 .child_argv = if (parsed.literal_tail) |tail| try allocator.dupe([]const u8, tail) else null,
             } } } };
         },
@@ -234,6 +238,7 @@ test "cli_parse parses create with attach flag after path" {
             .create => |cargs| {
                 try std.testing.expectEqualStrings("/tmp/x", cargs.path);
                 try std.testing.expect(cargs.attach_after_create);
+                try std.testing.expect(!cargs.vterm);
             },
             else => return error.UnexpectedResult,
         },
@@ -261,6 +266,7 @@ test "cli_parse parses basic create" {
             .create => |cargs| {
                 try std.testing.expectEqualStrings("/tmp/x", cargs.path);
                 try std.testing.expect(!cargs.attach_after_create);
+                try std.testing.expect(!cargs.vterm);
                 try std.testing.expect(cargs.child_argv == null);
             },
             else => return error.UnexpectedResult,
@@ -277,7 +283,30 @@ test "cli_parse parses long create alias" {
     const res = try parseArgv(std.testing.allocator, argv[0..]);
     switch (res) {
         .ok => |ok| switch (ok.command) {
-            .create => |cargs| try std.testing.expectEqualStrings("/tmp/x", cargs.path),
+            .create => |cargs| {
+                try std.testing.expectEqualStrings("/tmp/x", cargs.path);
+                try std.testing.expect(!cargs.vterm);
+            },
+            else => return error.UnexpectedResult,
+        },
+        .fail => |f| {
+            std.debug.print("unexpected fail: {any}\n", .{f});
+            return error.UnexpectedResult;
+        },
+    }
+}
+
+
+test "cli_parse parses create with vterm flag" {
+    const argv = [_][]const u8{ "create", "--vterm", "/tmp/x" };
+    const res = try parseArgv(std.testing.allocator, argv[0..]);
+    switch (res) {
+        .ok => |ok| switch (ok.command) {
+            .create => |cargs| {
+                try std.testing.expectEqualStrings("/tmp/x", cargs.path);
+                try std.testing.expect(cargs.vterm);
+                try std.testing.expect(!cargs.attach_after_create);
+            },
             else => return error.UnexpectedResult,
         },
         .fail => |f| {

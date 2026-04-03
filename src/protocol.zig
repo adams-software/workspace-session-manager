@@ -8,6 +8,22 @@ pub const OwnerAction = struct {
     path: ?[]const u8 = null,
 };
 
+pub const ScreenCell = struct {
+    text: []const u8,
+};
+
+pub const ScreenSnapshot = struct {
+    rows: u16,
+    cols: u16,
+    cursor_row: u16,
+    cursor_col: u16,
+    cursor_visible: bool,
+    alt_screen: bool,
+    title: ?[]const u8 = null,
+    seq: u64,
+    cells: [][]ScreenCell,
+};
+
 pub const ControlReq = struct {
     op: []const u8,
     path: ?[]const u8 = null,
@@ -15,6 +31,7 @@ pub const ControlReq = struct {
     rows: ?u16 = null,
     signal: ?[]const u8 = null,
     mode: ?[]const u8 = null,
+    after_seq: ?u64 = null,
     request_id: ?u32 = null,
     action: ?OwnerAction = null,
 };
@@ -24,6 +41,7 @@ pub const ControlValue = struct {
     status: ?[]const u8 = null,
     code: ?i32 = null,
     signal: ?[]const u8 = null,
+    snapshot: ?ScreenSnapshot = null,
 };
 
 pub const ControlRes = struct {
@@ -103,10 +121,64 @@ pub fn freeControlReq(allocator: std.mem.Allocator, req: *ControlReq) void {
     if (req.action) |*action| freeOwnerAction(allocator, action);
 }
 
+fn freeScreenSnapshot(allocator: std.mem.Allocator, snapshot: *ScreenSnapshot) void {
+    if (snapshot.title) |t| allocator.free(@constCast(t));
+    for (snapshot.cells) |row| {
+        for (row) |cell| allocator.free(@constCast(cell.text));
+        allocator.free(row);
+    }
+    allocator.free(snapshot.cells);
+}
+
+pub fn freeScreenSnapshotOwned(allocator: std.mem.Allocator, snapshot: *ScreenSnapshot) void {
+    freeScreenSnapshot(allocator, snapshot);
+}
+
+fn cloneScreenSnapshot(allocator: std.mem.Allocator, snapshot: ScreenSnapshot) !ScreenSnapshot {
+    var rows = try allocator.alloc([]ScreenCell, snapshot.cells.len);
+    errdefer allocator.free(rows);
+
+    for (snapshot.cells, 0..) |row, i| {
+        rows[i] = try allocator.alloc(ScreenCell, row.len);
+        errdefer {
+            var j: usize = 0;
+            while (j <= i) : (j += 1) {
+                if (j == i) {
+                    for (rows[j][0..row.len]) |cell| allocator.free(@constCast(cell.text));
+                } else {
+                    for (rows[j]) |cell| allocator.free(@constCast(cell.text));
+                }
+                allocator.free(rows[j]);
+            }
+            allocator.free(rows);
+        }
+        for (row, 0..) |cell, k| {
+            rows[i][k] = .{ .text = try allocator.dupe(u8, cell.text) };
+        }
+    }
+
+    return .{
+        .rows = snapshot.rows,
+        .cols = snapshot.cols,
+        .cursor_row = snapshot.cursor_row,
+        .cursor_col = snapshot.cursor_col,
+        .cursor_visible = snapshot.cursor_visible,
+        .alt_screen = snapshot.alt_screen,
+        .title = if (snapshot.title) |t| try allocator.dupe(u8, t) else null,
+        .seq = snapshot.seq,
+        .cells = rows,
+    };
+}
+
+pub fn cloneScreenSnapshotOwned(allocator: std.mem.Allocator, snapshot: ScreenSnapshot) !ScreenSnapshot {
+    return cloneScreenSnapshot(allocator, snapshot);
+}
+
 pub fn freeControlRes(allocator: std.mem.Allocator, res: *ControlRes) void {
     if (res.value) |*v| {
         if (v.status) |s| allocator.free(@constCast(s));
         if (v.signal) |s| allocator.free(@constCast(s));
+        if (v.snapshot) |*snapshot| freeScreenSnapshot(allocator, snapshot);
     }
     if (res.err) |*e| {
         allocator.free(@constCast(e.code));
@@ -334,6 +406,7 @@ fn cloneControlReq(allocator: std.mem.Allocator, req: ControlReq) !ControlReq {
         .rows = req.rows,
         .signal = if (req.signal) |v| try allocator.dupe(u8, v) else null,
         .mode = if (req.mode) |v| try allocator.dupe(u8, v) else null,
+        .after_seq = req.after_seq,
         .request_id = req.request_id,
         .action = if (req.action) |action| try cloneOwnerAction(allocator, action) else null,
     };
@@ -347,6 +420,7 @@ fn cloneControlRes(allocator: std.mem.Allocator, res: ControlRes) !ControlRes {
             .status = if (v.status) |s| try allocator.dupe(u8, s) else null,
             .code = v.code,
             .signal = if (v.signal) |s| try allocator.dupe(u8, s) else null,
+            .snapshot = if (v.snapshot) |snapshot| try cloneScreenSnapshot(allocator, snapshot) else null,
         };
     }
     if (res.err) |e| {
@@ -356,6 +430,10 @@ fn cloneControlRes(allocator: std.mem.Allocator, res: ControlRes) !ControlRes {
         };
     }
     return out;
+}
+
+pub fn cloneControlResOwned(allocator: std.mem.Allocator, res: ControlRes) !ControlRes {
+    return cloneControlRes(allocator, res);
 }
 
 fn cloneOwnerControlReq(allocator: std.mem.Allocator, req: OwnerControlReq) !OwnerControlReq {
@@ -533,4 +611,47 @@ test "protocol encode/decode event message" {
     defer freeEventMsg(std.testing.allocator, &out);
     try std.testing.expectEqualStrings("session_exit", out.kind);
     try std.testing.expectEqual(@as(?i32, 0), out.code);
+}
+
+test "protocol control req preserves after_seq" {
+    const req = ControlReq{ .op = "attach", .path = "/tmp/s1.sock", .mode = "exclusive", .after_seq = 42 };
+    const payload = try encodeControlReq(std.testing.allocator, req);
+    defer std.testing.allocator.free(payload);
+
+    var out = try parseControlReq(std.testing.allocator, payload);
+    defer freeControlReq(std.testing.allocator, &out);
+
+    try std.testing.expectEqual(@as(?u64, 42), out.after_seq);
+}
+
+test "protocol control res preserves snapshot" {
+    var rows = try std.testing.allocator.alloc([]ScreenCell, 1);
+    rows[0] = try std.testing.allocator.alloc(ScreenCell, 1);
+    rows[0][0] = .{ .text = try std.testing.allocator.dupe(u8, "x") };
+
+    const res = ControlRes{ .ok = true, .value = .{ .snapshot = .{
+        .rows = 1,
+        .cols = 1,
+        .cursor_row = 0,
+        .cursor_col = 0,
+        .cursor_visible = true,
+        .alt_screen = false,
+        .title = try std.testing.allocator.dupe(u8, "t"),
+        .seq = 7,
+        .cells = rows,
+    } } };
+    const payload = try encodeControlRes(std.testing.allocator, res);
+    defer std.testing.allocator.free(payload);
+
+    var res_owned = res;
+    defer freeControlRes(std.testing.allocator, &res_owned);
+
+    var out = try parseControlRes(std.testing.allocator, payload);
+    defer freeControlRes(std.testing.allocator, &out);
+
+    try std.testing.expect(out.ok);
+    try std.testing.expect(out.value != null);
+    try std.testing.expect(out.value.?.snapshot != null);
+    try std.testing.expectEqual(@as(u64, 7), out.value.?.snapshot.?.seq);
+    try std.testing.expectEqualStrings("x", out.value.?.snapshot.?.cells[0][0].text);
 }

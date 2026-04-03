@@ -30,6 +30,14 @@ pub const RemoteStatus = struct {
     status: []const u8,
 };
 
+pub const RemoteSnapshot = struct {
+    snapshot: protocol.ScreenSnapshot,
+
+    pub fn deinit(self: *RemoteSnapshot, allocator: std.mem.Allocator) void {
+        protocol.freeScreenSnapshotOwned(allocator, &self.snapshot);
+    }
+};
+
 pub const ExitStatus = struct {
     code: ?i32 = null,
     signal: ?[]const u8 = null,
@@ -55,6 +63,13 @@ pub const SessionClient = struct {
         defer protocol.freeControlRes(self.allocator, &res);
         if (!res.ok) return Error.ProtocolError;
         return .{ .status = try self.allocator.dupe(u8, res.value.?.status orelse "unknown") };
+    }
+
+    pub fn getScreenSnapshot(self: *SessionClient) !RemoteSnapshot {
+        var res = try rpcCall(self.allocator, self.socket_path, .{ .op = "get_screen_snapshot" });
+        defer protocol.freeControlRes(self.allocator, &res);
+        if (!res.ok) return Error.ProtocolError;
+        return .{ .snapshot = try protocol.cloneScreenSnapshotOwned(self.allocator, res.value.?.snapshot.?) };
     }
 
     pub fn wait(self: *SessionClient) !ExitStatus {
@@ -90,6 +105,10 @@ pub const SessionClient = struct {
     }
 
     pub fn attach(self: *SessionClient, mode: AttachMode) !SessionAttachment {
+        return self.attachAfterSeq(mode, null);
+    }
+
+    pub fn attachAfterSeq(self: *SessionClient, mode: AttachMode, after_seq: ?u64) !SessionAttachment {
         const fd = try connectUnix(self.socket_path);
         errdefer _ = c.close(fd);
 
@@ -97,7 +116,7 @@ pub const SessionClient = struct {
             .exclusive => "exclusive",
             .takeover => "takeover",
         };
-        const req = try protocol.encodeControlReq(self.allocator, .{ .op = "attach", .mode = mode_str });
+        const req = try protocol.encodeControlReq(self.allocator, .{ .op = "attach", .mode = mode_str, .after_seq = after_seq });
         defer self.allocator.free(req);
         try protocol.writeFrame(fd, req);
 

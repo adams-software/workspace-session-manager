@@ -1,4 +1,5 @@
 const std = @import("std");
+const terminal_state_vterm = @import("terminal_state_vterm.zig");
 const c = @cImport({
     @cInclude("pty.h");
     @cInclude("sys/ioctl.h");
@@ -28,6 +29,8 @@ pub const SpawnOptions = struct {
     env: ?[]const []const u8 = null,
     cols: ?u16 = null,
     rows: ?u16 = null,
+    enable_terminal_state: bool = false,
+    replay_capacity: usize = 64,
 };
 
 pub const Error = error{
@@ -56,6 +59,37 @@ pub const PtyStream = struct {
     }
 };
 
+pub const ReplayChunk = struct {
+    seq: u64,
+    bytes: []u8,
+};
+
+pub const HostScreenCell = struct {
+    text: []const u8,
+};
+
+pub const HostScreenSnapshot = struct {
+    rows: u16,
+    cols: u16,
+    cursor_row: u16,
+    cursor_col: u16,
+    cursor_visible: bool,
+    alt_screen: bool,
+    title: ?[]const u8 = null,
+    seq: u64,
+    cells: [][]HostScreenCell,
+};
+
+
+pub fn freeScreenSnapshot(allocator: std.mem.Allocator, snapshot: *HostScreenSnapshot) void {
+    for (snapshot.cells) |row| {
+        for (row) |cell| allocator.free(cell.text);
+        allocator.free(row);
+    }
+    allocator.free(snapshot.cells);
+    if (snapshot.title) |title| allocator.free(title);
+}
+
 pub const SessionHost = struct {
     allocator: std.mem.Allocator,
     opts: SpawnOptions,
@@ -64,6 +98,10 @@ pub const SessionHost = struct {
     master_fd: ?c_int,
     exit_status: ?ExitStatus,
     pty: PtyStream,
+    terminal_state_enabled: bool,
+    screen_seq: u64,
+    replay_chunks: std.ArrayList(ReplayChunk),
+    terminal_state: ?terminal_state_vterm.VTermAdapter,
 
     pub fn init(allocator: std.mem.Allocator, opts: SpawnOptions) Error!SessionHost {
         if (opts.argv.len == 0) return Error.InvalidArgs;
@@ -75,12 +113,19 @@ pub const SessionHost = struct {
             .master_fd = null,
             .exit_status = null,
             .pty = undefined,
+            .terminal_state_enabled = opts.enable_terminal_state,
+            .screen_seq = 0,
+            .replay_chunks = .{},
+            .terminal_state = if (opts.enable_terminal_state) try terminal_state_vterm.VTermAdapter.init(allocator, opts.rows orelse 24, opts.cols orelse 80) else null,
         };
         self.pty = .{ .host = &self };
         return self;
     }
 
     pub fn deinit(self: *SessionHost) void {
+        if (self.terminal_state) |*ts| ts.deinit();
+        for (self.replay_chunks.items) |chunk| self.allocator.free(chunk.bytes);
+        self.replay_chunks.deinit(self.allocator);
         if (self.master_fd) |fd| {
             _ = c.close(fd);
             self.master_fd = null;
@@ -293,6 +338,60 @@ pub const SessionHost = struct {
         };
     }
 
+
+    pub fn observePtyOutput(self: *SessionHost, bytes: []const u8) Error!void {
+        return self.recordPtyOutput(bytes);
+    }
+
+    pub fn drainObservedPtyOutput(self: *SessionHost) Error![][]u8 {
+        const fd = self.master_fd orelse return Error.InvalidState;
+        var out = std.ArrayList([]u8){};
+        errdefer {
+            for (out.items) |chunk| self.allocator.free(chunk);
+            out.deinit(self.allocator);
+        }
+
+        while (true) {
+            var pfd = c.struct_pollfd{ .fd = fd, .events = c.POLLIN, .revents = 0 };
+            const pr = c.poll(&pfd, 1, 0);
+            if (pr < 0) return Error.IoError;
+            if (pr == 0 or (pfd.revents & c.POLLIN) == 0) break;
+
+            var buf: [4096]u8 = undefined;
+            const n = c.read(fd, &buf, buf.len);
+            if (n < 0) {
+                const e = std.c.errno(-1);
+                if (e == .INTR) continue;
+                if (e == .IO) break;
+                return Error.IoError;
+            }
+            if (n == 0) break;
+
+            // The PTY master must have exactly one reader. This API is that
+            // explicit drain point: read once, record into replay/terminal-state,
+            // then return the same bytes to the caller for optional forwarding.
+            const chunk = try self.allocator.dupe(u8, buf[0..@intCast(n)]);
+            try self.recordPtyOutput(chunk);
+            try out.append(self.allocator, chunk);
+        }
+
+        return out.toOwnedSlice(self.allocator);
+    }
+
+    fn recordPtyOutput(self: *SessionHost, bytes: []const u8) Error!void {
+        if (!self.terminal_state_enabled) return;
+        if (self.terminal_state) |*ts| ts.feed(bytes);
+        self.screen_seq += 1;
+        try self.replay_chunks.append(self.allocator, .{
+            .seq = self.screen_seq,
+            .bytes = try self.allocator.dupe(u8, bytes),
+        });
+        while (self.replay_chunks.items.len > self.opts.replay_capacity) {
+            const victim = self.replay_chunks.orderedRemove(0);
+            self.allocator.free(victim.bytes);
+        }
+    }
+
     pub fn refresh(self: *SessionHost) Error!void {
         switch (self.state) {
             .idle, .starting, .exited, .closed => return,
@@ -331,6 +430,40 @@ pub const SessionHost = struct {
             },
             .closed => {},
         };
+    }
+
+    pub fn getScreenSeq(self: *const SessionHost) Error!u64 {
+        if (!self.terminal_state_enabled) return Error.Unsupported;
+        return self.screen_seq;
+    }
+
+    pub fn getScreenSnapshot(self: *const SessionHost, allocator: std.mem.Allocator) Error!HostScreenSnapshot {
+        if (!self.terminal_state_enabled) return Error.Unsupported;
+        if (self.terminal_state) |*ts| {
+            var snap = try ts.snapshot(allocator);
+            snap.seq = self.screen_seq;
+            return snap;
+        }
+        return Error.Unsupported;
+    }
+
+    pub fn replayAfterSeq(self: *const SessionHost, allocator: std.mem.Allocator, after_seq: u64) Error![]ReplayChunk {
+        if (!self.terminal_state_enabled) return Error.Unsupported;
+        var first_idx: ?usize = null;
+        for (self.replay_chunks.items, 0..) |chunk, i| {
+            if (chunk.seq > after_seq) {
+                first_idx = i;
+                break;
+            }
+        }
+        if (after_seq != 0 and self.screen_seq > after_seq and first_idx == null) return Error.InvalidArgs;
+        if (first_idx == null) return try allocator.alloc(ReplayChunk, 0);
+        const start_idx = first_idx.?;
+        var out = try allocator.alloc(ReplayChunk, self.replay_chunks.items.len - start_idx);
+        for (self.replay_chunks.items[start_idx..], 0..) |chunk, i| {
+            out[i] = .{ .seq = chunk.seq, .bytes = try allocator.dupe(u8, chunk.bytes) };
+        }
+        return out;
     }
 
     pub fn getState(self: *const SessionHost) HostState {
@@ -466,4 +599,74 @@ test "host close is idempotent after closed" {
     try host.close();
     try host.close();
     try std.testing.expectEqual(HostState.closed, host.getState());
+}
+
+
+test "host replayAfterSeq returns only tail after snapshot boundary" {
+    var h = try SessionHost.init(std.testing.allocator, .{
+        .argv = &.{ "/bin/sh", "-i" },
+        .enable_terminal_state = true,
+        .rows = 24,
+        .cols = 80,
+        .replay_capacity = 64,
+    });
+    defer h.deinit();
+    try h.start();
+
+    var tries: usize = 0;
+    while (tries < 50) : (tries += 1) {
+        const drained = try h.drainObservedPtyOutput();
+        defer {
+            for (drained) |chunk| std.testing.allocator.free(chunk);
+            std.testing.allocator.free(drained);
+        }
+        _ = try h.refresh();
+        _ = c.usleep(10_000);
+    }
+
+    try h.writePty("printf pre\n");
+    tries = 0;
+    while (tries < 200 and h.screen_seq == 0) : (tries += 1) {
+        const drained = try h.drainObservedPtyOutput();
+        defer {
+            for (drained) |chunk| std.testing.allocator.free(chunk);
+            std.testing.allocator.free(drained);
+        }
+        _ = try h.refresh();
+        _ = c.usleep(10_000);
+    }
+    try std.testing.expect(h.screen_seq > 0);
+
+    var snap = try h.getScreenSnapshot(std.testing.allocator);
+    defer freeScreenSnapshot(std.testing.allocator, &snap);
+    const seq = snap.seq;
+
+    try h.writePty("printf post\n");
+    tries = 0;
+    while (tries < 200 and h.screen_seq <= seq) : (tries += 1) {
+        const drained = try h.drainObservedPtyOutput();
+        defer {
+            for (drained) |chunk| std.testing.allocator.free(chunk);
+            std.testing.allocator.free(drained);
+        }
+        _ = try h.refresh();
+        _ = c.usleep(10_000);
+    }
+    try std.testing.expect(h.screen_seq > seq);
+
+    const replays = try h.replayAfterSeq(std.testing.allocator, seq);
+    defer {
+        for (replays) |chunk| std.testing.allocator.free(chunk.bytes);
+        std.testing.allocator.free(replays);
+    }
+
+    var saw_post = false;
+    for (replays) |chunk| {
+        if (std.mem.indexOf(u8, chunk.bytes, "post") != null) saw_post = true;
+    }
+    try std.testing.expect(saw_post);
+
+    try h.terminate("KILL");
+    _ = try h.wait();
+    try h.close();
 }

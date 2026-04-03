@@ -82,15 +82,6 @@ pub fn parseArgv(allocator: std.mem.Allocator, argv: []const []const u8) Error!P
                 i += 1;
                 continue;
             }
-            if (i + 1 < argv.len and !std.mem.startsWith(u8, argv[i + 1], "-")) {
-                try options.append(allocator, .{
-                    .spelling = tok,
-                    .name = tok[2..],
-                    .value = argv[i + 1],
-                });
-                i += 2;
-                continue;
-            }
             try options.append(allocator, .{
                 .spelling = tok,
                 .name = tok[2..],
@@ -128,16 +119,6 @@ pub fn parseArgv(allocator: std.mem.Allocator, argv: []const []const u8) Error!P
                     .value = tok[(eq + 1)..],
                 });
                 i += 1;
-                continue;
-            }
-
-            if (i + 1 < argv.len and !std.mem.startsWith(u8, argv[i + 1], "-")) {
-                try options.append(allocator, .{
-                    .spelling = tok,
-                    .name = tok[2..],
-                    .value = argv[i + 1],
-                });
-                i += 2;
                 continue;
             }
 
@@ -201,4 +182,18 @@ test "argv_parse handles long option with equals" {
     try std.testing.expectEqual(@as(usize, 1), parsed.options.len);
     try std.testing.expectEqualStrings("session", parsed.options[0].name);
     try std.testing.expectEqualStrings("/tmp/x", parsed.options[0].value.?);
+}
+
+test "argv_parse treats bare long flag before positional as flag not valued option" {
+    const argv = [_][]const u8{ "create", "--vterm", "/tmp/x" };
+    const parsed = try parseArgv(std.testing.allocator, argv[0..]);
+    defer std.testing.allocator.free(parsed.options);
+    defer std.testing.allocator.free(parsed.positionals);
+
+    try std.testing.expectEqualStrings("create", parsed.command.?);
+    try std.testing.expectEqual(@as(usize, 1), parsed.options.len);
+    try std.testing.expectEqualStrings("vterm", parsed.options[0].name);
+    try std.testing.expect(parsed.options[0].value == null);
+    try std.testing.expectEqual(@as(usize, 1), parsed.positionals.len);
+    try std.testing.expectEqualStrings("/tmp/x", parsed.positionals[0]);
 }

@@ -34,6 +34,39 @@ pub const Connection = struct {
     fd: c_int,
 };
 
+fn toProtocolSnapshot(allocator: std.mem.Allocator, snapshot: host.HostScreenSnapshot) !protocol.ScreenSnapshot {
+    var rows = try allocator.alloc([]protocol.ScreenCell, snapshot.cells.len);
+    errdefer allocator.free(rows);
+
+    var r: usize = 0;
+    errdefer {
+        var i: usize = 0;
+        while (i < r) : (i += 1) {
+            for (rows[i]) |cell| allocator.free(cell.text);
+            allocator.free(rows[i]);
+        }
+    }
+
+    while (r < snapshot.cells.len) : (r += 1) {
+        rows[r] = try allocator.alloc(protocol.ScreenCell, snapshot.cells[r].len);
+        for (snapshot.cells[r], 0..) |cell, cidx| {
+            rows[r][cidx] = .{ .text = try allocator.dupe(u8, cell.text) };
+        }
+    }
+
+    return .{
+        .rows = snapshot.rows,
+        .cols = snapshot.cols,
+        .cursor_row = snapshot.cursor_row,
+        .cursor_col = snapshot.cursor_col,
+        .cursor_visible = snapshot.cursor_visible,
+        .alt_screen = snapshot.alt_screen,
+        .title = if (snapshot.title) |title| try allocator.dupe(u8, title) else null,
+        .seq = snapshot.seq,
+        .cells = rows,
+    };
+}
+
 pub const SessionServer = struct {
     allocator: std.mem.Allocator,
     session_host: *host.SessionHost,
@@ -142,6 +175,10 @@ pub const SessionServer = struct {
             .attaching => |owner| @intCast(owner.fd),
             .attached => |owner| @intCast(owner.fd),
         };
+    }
+
+    pub fn hasOwner(self: *const SessionServer) bool {
+        return self.ownerFd() != null;
     }
 
     fn ownerPending(self: *const SessionServer) ?server_model.ForwardedOwnerReq {
@@ -302,7 +339,74 @@ pub const SessionServer = struct {
                         return;
                     };
 
+                    if (req.after_seq) |after_seq| {
+                        const drained = self.session_host.drainObservedPtyOutput() catch &[_][]u8{};
+                        defer if (@TypeOf(drained) != *const [0][]u8) {
+                            for (drained) |chunk| self.allocator.free(chunk);
+                            self.allocator.free(drained);
+                        };
+                        const replays = self.session_host.replayAfterSeq(self.allocator, after_seq) catch |e| {
+                            const res: protocol.ControlRes = switch (e) {
+                                host.Error.Unsupported => .{ .ok = false, .err = .{ .code = "unsupported" } },
+                                host.Error.InvalidArgs => .{ .ok = false, .err = .{ .code = "replay_gap" } },
+                                else => .{ .ok = false, .err = .{ .code = "snapshot_required" } },
+                            };
+                            try writeControlRes(self.allocator, conn.fd, res);
+                            _ = c.close(conn.fd);
+                            return;
+                        };
+                        defer {
+                            for (replays) |chunk| self.allocator.free(chunk.bytes);
+                            self.allocator.free(replays);
+                        }
+                        try self.applyModelActions(&actions);
+                        for (replays) |chunk| {
+                            const b64_len = std.base64.standard.Encoder.calcSize(chunk.bytes.len);
+                            const b64 = self.allocator.alloc(u8, b64_len) catch return Error.OutOfMemory;
+                            defer self.allocator.free(b64);
+                            _ = std.base64.standard.Encoder.encode(b64, chunk.bytes);
+                            const payload = protocol.encodeDataMsg(self.allocator, .{ .stream = "stdout", .bytes_b64 = b64 }) catch return Error.ProtocolError;
+                            defer self.allocator.free(payload);
+                            protocol.writeFrame(conn.fd, payload) catch return Error.ProtocolError;
+                        }
+                        return;
+                    }
+
                     try self.applyModelActions(&actions);
+                    return;
+                }
+
+                if (std.mem.eql(u8, req.op, "get_screen_snapshot")) {
+                    const drained = self.session_host.drainObservedPtyOutput() catch &[_][]u8{};
+                    defer if (@TypeOf(drained) != *const [0][]u8) {
+                        for (drained) |chunk| self.allocator.free(chunk);
+                        self.allocator.free(drained);
+                    };
+                    var snapshot = self.session_host.getScreenSnapshot(self.allocator) catch |e| switch (e) {
+                        host.Error.Unsupported => {
+                            try writeControlRes(self.allocator, conn.fd, .{ .ok = false, .err = .{ .code = "unsupported" } });
+                            _ = c.close(conn.fd);
+                            return;
+                        },
+                        else => {
+                            try writeControlRes(self.allocator, conn.fd, .{ .ok = false, .err = .{ .code = "snapshot_unavailable" } });
+                            _ = c.close(conn.fd);
+                            return;
+                        },
+                    };
+                    defer host.freeScreenSnapshot(self.allocator, &snapshot);
+
+                    var res: protocol.ControlRes = .{
+                        .ok = true,
+                        .value = .{ .snapshot = toProtocolSnapshot(self.allocator, snapshot) catch {
+                            try writeControlRes(self.allocator, conn.fd, .{ .ok = false, .err = .{ .code = "snapshot_unavailable" } });
+                            _ = c.close(conn.fd);
+                            return;
+                        } },
+                    };
+                    defer protocol.freeControlRes(self.allocator, &res);
+                    try writeControlRes(self.allocator, conn.fd, res);
+                    _ = c.close(conn.fd);
                     return;
                 }
 
@@ -359,23 +463,72 @@ pub const SessionServer = struct {
         self.applyModelActions(&actions) catch return;
     }
 
-    fn pumpOwnerIo(self: *SessionServer) Error!void {
-        const owner_fd = self.ownerFd() orelse return;
+    fn pumpPtyOutput(self: *SessionServer) Error!void {
+        const owner_fd = self.ownerFd();
         const master_fd = self.session_host.getMasterFd() orelse {
-            self.dropOwner("pty_closed");
+            if (owner_fd != null) self.dropOwner("pty_closed");
             return;
         };
 
-        var pfds = [2]c.struct_pollfd{
-            .{ .fd = owner_fd, .events = c.POLLIN, .revents = 0 },
-            .{ .fd = master_fd, .events = c.POLLIN, .revents = 0 },
-        };
-        const pr = c.poll(&pfds, 2, 0);
+        var pfd = c.struct_pollfd{ .fd = master_fd, .events = c.POLLIN, .revents = 0 };
+        const pr = c.poll(&pfd, 1, 0);
         if (pr < 0) return Error.IoError;
         if (pr == 0) return;
 
-        if ((pfds[0].revents & c.POLLIN) != 0) {
-            const frame = protocol.readFrame(self.allocator, owner_fd, 256 * 1024) catch return Error.ProtocolError;
+        if ((pfd.revents & (c.POLLHUP | c.POLLERR | c.POLLNVAL)) != 0) {
+            if (owner_fd != null) self.dropOwner("pty_closed");
+            return;
+        }
+
+        const drained = self.session_host.drainObservedPtyOutput() catch |e| switch (e) {
+            host.Error.InvalidState, host.Error.NotStarted, host.Error.Closed => return,
+            host.Error.IoError => {
+                if (owner_fd != null) self.dropOwner("pty_closed");
+                return;
+            },
+            else => return Error.IoError,
+        };
+        defer {
+            for (drained) |chunk| self.allocator.free(chunk);
+            self.allocator.free(drained);
+        }
+        if (owner_fd) |fd| {
+            for (drained) |chunk| {
+                try writeData(self.allocator, fd, chunk);
+            }
+        }
+    }
+
+    fn drainReadablePtyForCheckpoint(self: *SessionServer) Error!void {
+        // Detach is a bounded checkpoint: consume all currently-readable PTY
+        // bytes so replay/terminal-state is up to date before owner release.
+        const drained = self.session_host.drainObservedPtyOutput() catch |e| switch (e) {
+            host.Error.InvalidState, host.Error.NotStarted, host.Error.Closed => return,
+            host.Error.IoError => return,
+            else => return Error.IoError,
+        };
+        defer {
+            for (drained) |chunk| self.allocator.free(chunk);
+            self.allocator.free(drained);
+        }
+    }
+
+    fn pumpOwnerIo(self: *SessionServer) Error!void {
+        const owner_fd = self.ownerFd() orelse return;
+
+        var pfd = c.struct_pollfd{ .fd = owner_fd, .events = c.POLLIN, .revents = 0 };
+        const pr = c.poll(&pfd, 1, 0);
+        if (pr < 0) return Error.IoError;
+        if (pr == 0) return;
+
+        if ((pfd.revents & c.POLLIN) != 0) {
+            const frame = protocol.readFrame(self.allocator, owner_fd, 256 * 1024) catch |e| switch (e) {
+                error.UnexpectedEof => {
+                    self.dropOwner(null);
+                    return;
+                },
+                else => return Error.ProtocolError,
+            };
             defer self.allocator.free(frame);
 
             var msg = protocol.parseMessage(self.allocator, frame) catch return Error.ProtocolError;
@@ -393,6 +546,7 @@ pub const SessionServer = struct {
                     const res = self.handleControlReq(req, owner_fd);
                     try writeControlRes(self.allocator, owner_fd, res);
                     if (std.mem.eql(u8, req.op, "detach") and res.ok) {
+                        try self.drainReadablePtyForCheckpoint();
                         _ = c.close(owner_fd);
                         return;
                     }
@@ -417,36 +571,13 @@ pub const SessionServer = struct {
             }
         }
 
-        if ((pfds[0].revents & (c.POLLHUP | c.POLLERR | c.POLLNVAL)) != 0) {
-            if (self.ownerPending() != null and (pfds[0].revents & c.POLLIN) != 0) {
+        if ((pfd.revents & (c.POLLHUP | c.POLLERR | c.POLLNVAL)) != 0) {
+            if (self.ownerPending() != null and (pfd.revents & c.POLLIN) != 0) {
                 // allow readable owner response path to win first
             } else {
                 self.dropOwner("owner_disconnected");
                 return;
             }
-        }
-
-        if ((pfds[1].revents & (c.POLLHUP | c.POLLERR | c.POLLNVAL)) != 0) {
-            self.dropOwner("pty_closed");
-            return;
-        }
-
-        if ((pfds[1].revents & c.POLLIN) != 0) {
-            var buf: [4096]u8 = undefined;
-            const n = c.read(master_fd, &buf, buf.len);
-            if (n < 0) {
-                const e = std.c.errno(-1);
-                if (e == .IO) {
-                    self.dropOwner("pty_closed");
-                    return;
-                }
-                return Error.IoError;
-            }
-            if (n == 0) {
-                self.dropOwner("pty_closed");
-                return;
-            }
-            try writeData(self.allocator, owner_fd, buf[0..@intCast(n)]);
         }
     }
 
@@ -457,6 +588,7 @@ pub const SessionServer = struct {
             return true;
         }
         try self.pumpOwnerIo();
+        try self.pumpPtyOutput();
         return true;
     }
 
@@ -845,6 +977,112 @@ test "server step owner_forward reports owner_busy when pending exists" {
     var requester1_res = try protocol.parseControlRes(std.testing.allocator, requester1_res_bytes);
     defer protocol.freeControlRes(std.testing.allocator, &requester1_res);
     try std.testing.expect(requester1_res.ok);
+
+    try h.terminate("KILL");
+    _ = try h.wait();
+    try h.close();
+}
+
+
+test "server snapshot and attach after_seq replays only tail" {
+    var h = try host.SessionHost.init(std.testing.allocator, .{
+        .argv = &.{ "/bin/sh", "-i" },
+        .enable_terminal_state = true,
+        .rows = 24,
+        .cols = 80,
+        .replay_capacity = 64,
+    });
+    defer h.deinit();
+    try h.start();
+
+    var s = SessionServer.init(std.testing.allocator, &h);
+    defer s.deinit();
+
+    const path = "/tmp/msr-server-snapshot-after-seq-test.sock";
+    SessionServer.unlinkBestEffort(path);
+    defer SessionServer.unlinkBestEffort(path);
+    try s.listen(path);
+
+    var tries: usize = 0;
+    while (tries < 50) : (tries += 1) {
+        const drained = try h.drainObservedPtyOutput();
+        defer {
+            for (drained) |chunk| std.testing.allocator.free(chunk);
+            std.testing.allocator.free(drained);
+        }
+        _ = try h.refresh();
+        _ = c.usleep(10_000);
+    }
+
+    try h.writePty("printf pre\n");
+    tries = 0;
+    while (tries < 200 and h.screen_seq == 0) : (tries += 1) {
+        const drained = try h.drainObservedPtyOutput();
+        defer {
+            for (drained) |chunk| std.testing.allocator.free(chunk);
+            std.testing.allocator.free(drained);
+        }
+        _ = try h.refresh();
+        _ = c.usleep(10_000);
+    }
+    try std.testing.expect(h.screen_seq > 0);
+
+    const snap_fd = try connectUnix(path);
+    defer _ = c.close(snap_fd);
+    const snap_req = try protocol.encodeControlReq(std.testing.allocator, .{ .op = "get_screen_snapshot" });
+    defer std.testing.allocator.free(snap_req);
+    try protocol.writeFrame(snap_fd, snap_req);
+    _ = try s.step();
+    const snap_res_bytes = try protocol.readFrame(std.testing.allocator, snap_fd, 256 * 1024);
+    defer std.testing.allocator.free(snap_res_bytes);
+    var snap_res = try protocol.parseControlRes(std.testing.allocator, snap_res_bytes);
+    defer protocol.freeControlRes(std.testing.allocator, &snap_res);
+    try std.testing.expect(snap_res.ok);
+    try std.testing.expect(snap_res.value != null);
+    try std.testing.expect(snap_res.value.?.snapshot != null);
+    const seq = snap_res.value.?.snapshot.?.seq;
+
+    try h.writePty("printf post\n");
+    tries = 0;
+    while (tries < 200 and h.screen_seq <= seq) : (tries += 1) {
+        const drained = try h.drainObservedPtyOutput();
+        defer {
+            for (drained) |chunk| std.testing.allocator.free(chunk);
+            std.testing.allocator.free(drained);
+        }
+        _ = try h.refresh();
+        _ = c.usleep(10_000);
+    }
+    try std.testing.expect(h.screen_seq > seq);
+
+    const attach_fd = try connectUnix(path);
+    defer _ = c.close(attach_fd);
+    const attach_req = try protocol.encodeControlReq(std.testing.allocator, .{ .op = "attach", .mode = "exclusive", .after_seq = seq });
+    defer std.testing.allocator.free(attach_req);
+    try protocol.writeFrame(attach_fd, attach_req);
+    _ = try s.step();
+
+    const attach_res_bytes = try protocol.readFrame(std.testing.allocator, attach_fd, 64 * 1024);
+    defer std.testing.allocator.free(attach_res_bytes);
+    var attach_res = try protocol.parseControlRes(std.testing.allocator, attach_res_bytes);
+    defer protocol.freeControlRes(std.testing.allocator, &attach_res);
+    try std.testing.expect(attach_res.ok);
+
+    const replay_frame = try protocol.readFrame(std.testing.allocator, attach_fd, 256 * 1024);
+    defer std.testing.allocator.free(replay_frame);
+    var replay_msg = try protocol.parseMessage(std.testing.allocator, replay_frame);
+    defer replay_msg.deinit(std.testing.allocator);
+    switch (replay_msg) {
+        .data => |msg| {
+            const decoded_len = try std.base64.standard.Decoder.calcSizeForSlice(msg.bytes_b64);
+            const decoded = try std.testing.allocator.alloc(u8, decoded_len);
+            defer std.testing.allocator.free(decoded);
+            try std.base64.standard.Decoder.decode(decoded, msg.bytes_b64);
+            try std.testing.expect(std.mem.indexOf(u8, decoded, "post") != null);
+            try std.testing.expect(std.mem.indexOf(u8, decoded, "pre") == null);
+        },
+        else => return error.TestUnexpectedResult,
+    }
 
     try h.terminate("KILL");
     _ = try h.wait();

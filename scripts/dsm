@@ -175,12 +175,12 @@ attach_name() {
   fi
   if "$MSR_BIN" status "$sock" >/dev/null 2>&1; then
     if [[ $nested -eq 1 ]]; then
-      exec "$MSR_BIN" attach "$sock"
+      "$MSR_BIN" attach "$sock"
     else
-      exec "$MSR_BIN" attach "$sock" --force
+      "$MSR_BIN" attach "$sock" --force
     fi
   else
-    exec env WSM_ROOT="${WSM_ROOT:-}" "$MSR_BIN" create -a "$sock"
+    env WSM_ROOT="${WSM_ROOT:-}" "$MSR_BIN" create -a "$sock"
   fi
 }
 
@@ -275,15 +275,15 @@ case "$cmd" in
         exit 1
       fi
       if [[ $attach_now -eq 1 ]]; then
-        exec env WSM_ROOT="${WSM_ROOT:-}" "$MSR_BIN" create -a "$(sock_for "$name")" -- "$@"
+        env WSM_ROOT="${WSM_ROOT:-}" "$MSR_BIN" create -a "$(sock_for "$name")" -- "$@"
       else
-        exec env WSM_ROOT="${WSM_ROOT:-}" "$MSR_BIN" create "$(sock_for "$name")" -- "$@"
+        env WSM_ROOT="${WSM_ROOT:-}" "$MSR_BIN" create "$(sock_for "$name")" -- "$@"
       fi
     else
       if [[ $attach_now -eq 1 ]]; then
-        exec env WSM_ROOT="${WSM_ROOT:-}" "$MSR_BIN" create -a "$(sock_for "$name")"
+        env WSM_ROOT="${WSM_ROOT:-}" "$MSR_BIN" create -a "$(sock_for "$name")"
       else
-        exec env WSM_ROOT="${WSM_ROOT:-}" "$MSR_BIN" create "$(sock_for "$name")"
+        env WSM_ROOT="${WSM_ROOT:-}" "$MSR_BIN" create "$(sock_for "$name")"
       fi
     fi
     ;;
@@ -295,7 +295,7 @@ case "$cmd" in
     ;;
 
   d|detach)
-    exec "$MSR_BIN" detach
+    "$MSR_BIN" detach
     ;;
 
   current)
@@ -338,15 +338,15 @@ case "$cmd" in
     if [[ $# -ge 1 && "$1" != --* ]]; then shift; fi
     sig="${1:-}"
     if [[ -n "$sig" ]]; then
-      exec "$MSR_BIN" terminate "$(sock_for "$name")" "$sig"
+      "$MSR_BIN" terminate "$(sock_for "$name")" "$sig"
     else
-      exec "$MSR_BIN" terminate "$(sock_for "$name")"
+      "$MSR_BIN" terminate "$(sock_for "$name")"
     fi
     ;;
 
   wait)
     name="$(require_name "${1:-}")"
-    exec "$MSR_BIN" wait "$(sock_for "$name")"
+    "$MSR_BIN" wait "$(sock_for "$name")"
     ;;
 
   status)

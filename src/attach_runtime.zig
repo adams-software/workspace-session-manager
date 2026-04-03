@@ -26,6 +26,15 @@ pub const BridgeTransition = union(enum) {
     replace_attachment: client.SessionAttachment,
 };
 
+pub const BridgeExit = enum {
+    clean,
+    remote_closed,
+    stdin_closed,
+    stdin_suspended,
+    remote_error,
+    stdout_unavailable,
+};
+
 fn decodeDataFrame(allocator: std.mem.Allocator, frame: []const u8) ![]u8 {
     var msg = try protocol.parseDataMsg(allocator, frame);
     defer protocol.freeDataMsg(allocator, &msg);
@@ -50,7 +59,11 @@ fn writeAll(fd: c_int, bytes: []const u8) !void {
     var off: usize = 0;
     while (off < bytes.len) {
         const n = c.write(fd, bytes.ptr + off, bytes.len - off);
-        if (n < 0) return error.IoError;
+        if (n < 0) {
+            const e = std.c.errno(-1);
+            if (e == .INTR) continue;
+            return error.IoError;
+        }
         if (n == 0) return error.IoError;
         off += @intCast(n);
     }
@@ -130,7 +143,7 @@ pub fn handleOwnerControlReq(allocator: std.mem.Allocator, attachment: *client.S
     return try executeOwnerControlDecision(allocator, attachment, req, decision);
 }
 
-pub fn runAttachBridge(allocator: std.mem.Allocator, attachment: *client.SessionAttachment, in_fd: c_int, out_fd: c_int) !void {
+pub fn runAttachBridge(allocator: std.mem.Allocator, attachment: *client.SessionAttachment, in_fd: c_int, out_fd: c_int) !BridgeExit {
     var stdin_open = true;
     var in_buf: [4096]u8 = undefined;
 
@@ -159,17 +172,27 @@ pub fn runAttachBridge(allocator: std.mem.Allocator, attachment: *client.Session
     sendResizeIfAvailable(attachment, in_fd);
 
     while (true) {
+        const attachment_idx: usize = 1;
         var pfds = [2]c.struct_pollfd{
             .{ .fd = if (stdin_open) in_fd else -1, .events = if (stdin_open) c.POLLIN else 0, .revents = 0 },
             .{ .fd = attachment.fd, .events = c.POLLIN, .revents = 0 },
         };
 
-        const pr = c.poll(&pfds, 2, -1);
-        if (pr < 0) return error.IoError;
+        while (true) {
+            const pr = c.poll(&pfds, 2, -1);
+            if (pr >= 0) break;
+            const e = std.c.errno(-1);
+            if (e == .INTR) continue;
+            return error.IoError;
+        }
 
         if (stdin_open and (pfds[0].revents & c.POLLIN) != 0) {
             const n = c.read(in_fd, &in_buf, in_buf.len);
-            if (n < 0) return error.IoError;
+            if (n < 0) {
+                const e = std.c.errno(-1);
+                if (e == .INTR) continue;
+                return error.IoError;
+            }
             if (n == 0) {
                 stdin_open = false;
             } else {
@@ -180,11 +203,14 @@ pub fn runAttachBridge(allocator: std.mem.Allocator, attachment: *client.Session
             stdin_open = false;
         }
 
-        const attachment_idx: usize = 1;
         if ((pfds[attachment_idx].revents & c.POLLIN) != 0) {
             var msg = attachment.readMessage() catch |e| switch (e) {
-                error.UnexpectedEof => return,
-                else => return e,
+                error.UnexpectedEof => {
+                    return .remote_closed;
+                },
+                else => {
+                    return e;
+                },
             };
             defer msg.deinit(allocator);
 
@@ -194,13 +220,13 @@ pub fn runAttachBridge(allocator: std.mem.Allocator, attachment: *client.Session
                     const decoded = try allocator.alloc(u8, decoded_len);
                     defer allocator.free(decoded);
                     try std.base64.standard.Decoder.decode(decoded, data_msg.bytes_b64);
-                    try writeAll(out_fd, decoded);
+                    writeAll(out_fd, decoded) catch return .stdout_unavailable;
                 },
                 .owner_control_req => |req| {
                     const transition = try handleOwnerControlReq(allocator, attachment, req);
                     switch (transition) {
                         .stay => {},
-                        .exit => return,
+                        .exit => return .clean,
                         .replace_attachment => |next_attachment| {
                             attachment.close();
                             attachment.* = next_attachment;
@@ -216,7 +242,10 @@ pub fn runAttachBridge(allocator: std.mem.Allocator, attachment: *client.Session
         }
 
         if ((pfds[attachment_idx].revents & (c.POLLHUP | c.POLLERR | c.POLLNVAL)) != 0) {
-            return;
+            if ((pfds[attachment_idx].revents & c.POLLHUP) != 0 and (pfds[attachment_idx].revents & (c.POLLERR | c.POLLNVAL)) == 0) {
+                return .remote_closed;
+            }
+            return .remote_error;
         }
 
         if (winch_changed) {
@@ -224,4 +253,30 @@ pub fn runAttachBridge(allocator: std.mem.Allocator, attachment: *client.Session
             sendResizeIfAvailable(attachment, in_fd);
         }
     }
+}
+
+test "owner control detach decision exits bridge cleanly" {
+    var attachment = client.SessionAttachment{ .allocator = std.testing.allocator, .fd = -1 };
+    const req = protocol.OwnerControlReq{
+        .request_id = 1,
+        .action = .{ .op = "detach" },
+    };
+    try std.testing.expectEqual(BridgeTransition.exit, try handleOwnerControlReq(std.testing.allocator, &attachment, req));
+}
+
+test "owner control attach decision requests replacement" {
+    const req = protocol.OwnerControlReq{
+        .request_id = 2,
+        .action = .{ .op = "attach", .path = "/tmp/other.sock" },
+    };
+    const decision = try decideOwnerControlReq(std.testing.allocator, req);
+    defer switch (decision.action) {
+        .attach => |path| std.testing.allocator.free(path),
+        else => {},
+    };
+    switch (decision.action) {
+        .attach => |path| try std.testing.expectEqualStrings("/tmp/other.sock", path),
+        else => return error.UnexpectedResult,
+    }
+    try std.testing.expect(!decision.should_exit);
 }

@@ -11,6 +11,10 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     host_mod.linkSystemLibrary("util", .{});
+    host_mod.addIncludePath(.{ .cwd_relative = "/usr/include" });
+    host_mod.addIncludePath(b.path("src"));
+    host_mod.addCSourceFile(.{ .file = b.path("src/vterm_shim.c") });
+    host_mod.linkSystemLibrary("vterm", .{});
 
     const protocol_mod = b.addModule("protocol", .{
         .root_source_file = b.path("src/protocol.zig"),
@@ -109,13 +113,32 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe);
 
+    const terminal_state_vterm_test_root = b.createModule(.{
+        .root_source_file = b.path("src/terminal_state_vterm.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    terminal_state_vterm_test_root.addIncludePath(.{ .cwd_relative = "/usr/include" });
+    terminal_state_vterm_test_root.addIncludePath(b.path("src"));
+    terminal_state_vterm_test_root.addCSourceFile(.{ .file = b.path("src/vterm_shim.c") });
+    terminal_state_vterm_test_root.linkSystemLibrary("vterm", .{});
+    const terminal_state_vterm_tests = b.addTest(.{
+        .root_module = terminal_state_vterm_test_root,
+    });
+
+    const host_test_root = b.createModule(.{
+        .root_source_file = b.path("src/host.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    host_test_root.addIncludePath(.{ .cwd_relative = "/usr/include" });
+    host_test_root.addIncludePath(b.path("src"));
+    host_test_root.addCSourceFile(.{ .file = b.path("src/vterm_shim.c") });
+    host_test_root.linkSystemLibrary("vterm", .{});
     const host_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/host.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-        }),
+        .root_module = host_test_root,
     });
 
     const protocol_tests = b.addTest(.{
@@ -216,6 +239,7 @@ pub fn build(b: *std.Build) void {
         .root_module = server_model_test_root,
     });
 
+    const run_terminal_state_vterm_tests = b.addRunArtifact(terminal_state_vterm_tests);
     const run_host_tests = b.addRunArtifact(host_tests);
     const run_protocol_tests = b.addRunArtifact(protocol_tests);
     const run_server_tests = b.addRunArtifact(server_tests);
@@ -227,6 +251,7 @@ pub fn build(b: *std.Build) void {
     const run_cli_parse_tests = b.addRunArtifact(cli_parse_tests);
 
     const test_step = b.step("test", "Run v2 tests");
+    test_step.dependOn(&run_terminal_state_vterm_tests.step);
     test_step.dependOn(&run_host_tests.step);
     test_step.dependOn(&run_protocol_tests.step);
     test_step.dependOn(&run_server_tests.step);
@@ -236,6 +261,9 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_server_model_tests.step);
     test_step.dependOn(&run_argv_parse_tests.step);
     test_step.dependOn(&run_cli_parse_tests.step);
+
+    const test_terminal_state_vterm_step = b.step("test-vterm", "Run libvterm adapter tests");
+    test_terminal_state_vterm_step.dependOn(&run_terminal_state_vterm_tests.step);
 
     const test_host_step = b.step("test-host", "Run host module tests");
     test_host_step.dependOn(&run_host_tests.step);
