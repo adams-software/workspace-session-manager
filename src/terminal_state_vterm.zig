@@ -4,6 +4,14 @@ const c = @cImport({
 });
 const host = @import("host.zig");
 
+fn convertColor(raw: c.msr_vterm_color) host.HostColor {
+    return switch (raw.type) {
+        1 => .{ .kind = .indexed, .palette_index = raw.palette_index },
+        2 => .{ .kind = .rgb, .red = raw.red, .green = raw.green, .blue = raw.blue },
+        else => .{ .kind = .default },
+    };
+}
+
 pub const VTermAdapter = struct {
     handle: ?*c.msr_vterm_handle,
 
@@ -54,7 +62,18 @@ pub const VTermAdapter = struct {
                 const cp: u21 = @intCast(if (raw_cp == 0) ' ' else raw_cp);
                 var buf: [4]u8 = undefined;
                 const n = std.unicode.utf8Encode(cp, &buf) catch return error.InvalidState;
-                out_rows[r][cidx] = .{ .text = try allocator.dupe(u8, buf[0..n]) };
+                var raw_style: c.msr_vterm_cell_style = undefined;
+                c.msr_vterm_get_cell_style(handle, @intCast(r), @intCast(cidx), &raw_style);
+                out_rows[r][cidx] = .{
+                    .text = try allocator.dupe(u8, buf[0..n]),
+                    .style = .{
+                        .fg = convertColor(raw_style.fg),
+                        .bg = convertColor(raw_style.bg),
+                        .bold = raw_style.bold != 0,
+                        .underline = raw_style.underline != 0,
+                        .inverse = raw_style.inverse != 0,
+                    },
+                };
             }
         }
 

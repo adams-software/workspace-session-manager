@@ -104,7 +104,7 @@ fn parseU16(s: []const u8) !u16 {
     return std.fmt.parseInt(u16, s, 10);
 }
 
-fn spawnHostDetached(argv0: []const u8, path: []const u8, child_argv: []const []const u8, enable_vterm: bool) !void {
+fn spawnHostDetached(argv0: []const u8, path: []const u8, child_argv: []const []const u8) !void {
     const pid = c.fork();
     if (pid < 0) return error.ForkFailed;
 
@@ -115,17 +115,13 @@ fn spawnHostDetached(argv0: []const u8, path: []const u8, child_argv: []const []
         defer arena.deinit();
         const a = arena.allocator();
 
-        const n = 4 + (if (enable_vterm) @as(usize, 1) else 0) + child_argv.len + 1;
+        const n = 4 + child_argv.len + 1;
         const av = a.alloc(?[*:0]u8, n) catch c._exit(127);
 
         av[0] = (a.dupeZ(u8, argv0) catch c._exit(127)).ptr;
         av[1] = (a.dupeZ(u8, "_host") catch c._exit(127)).ptr;
         av[2] = (a.dupeZ(u8, path) catch c._exit(127)).ptr;
         var arg_base: usize = 3;
-        if (enable_vterm) {
-            av[arg_base] = (a.dupeZ(u8, "--vterm") catch c._exit(127)).ptr;
-            arg_base += 1;
-        }
         av[arg_base] = (a.dupeZ(u8, "--") catch c._exit(127)).ptr;
         arg_base += 1;
         for (child_argv, 0..) |arg, i| {
@@ -174,40 +170,14 @@ fn defaultShellArgv() [2][]const u8 {
     return .{ shell, "-i" };
 }
 
-fn renderSnapshot(snapshot: client.RemoteSnapshot) void {
-    out("\x1b[?1049h\x1b[H\x1b[2J", .{});
-    for (snapshot.snapshot.cells, 0..) |row, r| {
-        for (row) |cell| out("{s}", .{cell.text});
-        if (r + 1 < snapshot.snapshot.cells.len) out("\n", .{});
-    }
-    out("\x1b[{d};{d}H", .{ snapshot.snapshot.cursor_row + 1, snapshot.snapshot.cursor_col + 1 });
-    if (snapshot.snapshot.cursor_visible) out("\x1b[?25h", .{}) else out("\x1b[?25l", .{});
-}
 
 fn runAttachDirect(path: []const u8, mode: client.AttachMode) u8 {
     var cli = client.SessionClient.init(std.heap.page_allocator, path) catch return 1;
     defer cli.deinit();
 
-    // Plain attach is live-stream only. When terminal-state support is available,
-    // upgrade attach to snapshot + after_seq replay so reattach can restore the
-    // visible screen and then stream the missing tail.
-    var used_snapshot = false;
-    var att = blk: {
-        const snap = cli.getScreenSnapshot() catch null;
-        if (snap) |snapshot| {
-            var owned_snapshot = snapshot;
-            defer owned_snapshot.deinit(std.heap.page_allocator);
-            if (cli.attachAfterSeq(mode, owned_snapshot.snapshot.seq)) |att_snapshot| {
-                renderSnapshot(.{ .snapshot = owned_snapshot.snapshot });
-                used_snapshot = true;
-                break :blk att_snapshot;
-            } else |_| {}
-        }
-
-        break :blk cli.attach(mode) catch {
-            err("msr: attach rejected (session unavailable, ownership conflict, or takeover required)\n", .{});
-            return 1;
-        };
+    var att = cli.attach(mode) catch {
+        err("msr: attach rejected (session unavailable, ownership conflict, or takeover required)\n", .{});
+        return 1;
     };
     defer att.close();
     const bridge_exit = attach_runtime.runAttachBridge(std.heap.page_allocator, &att, c.STDIN_FILENO, c.STDOUT_FILENO) catch {
@@ -305,7 +275,7 @@ pub fn main(init: std.process.Init) !u8 {
         const env_entry = try std.fmt.allocPrint(std.heap.page_allocator, "MSR_SESSION={s}", .{path});
         defer std.heap.page_allocator.free(env_entry);
         const env = [_][]const u8{env_entry};
-        var session_host = try host.SessionHost.init(std.heap.page_allocator, .{ .argv = child_argv, .env = env[0..], .enable_terminal_state = enable_vterm, .rows = 24, .cols = 80, .replay_capacity = 128 });
+        var session_host = try host.SessionHost.init(std.heap.page_allocator, .{ .argv = child_argv, .env = env[0..], .rows = 24, .cols = 80 });
         defer session_host.deinit();
         try session_host.start();
 
@@ -537,7 +507,7 @@ pub fn main(init: std.process.Init) !u8 {
                     const shell_argv = defaultShellArgv();
                     const child_argv = args.child_argv orelse shell_argv[0..];
 
-                    spawnHostDetached(argv[0], path, child_argv, args.vterm) catch return 1;
+                    spawnHostDetached(argv[0], path, child_argv) catch return 1;
                     if (!waitForReady(path, 2000)) return 1;
                     if (args.attach_after_create) {
                         return runAttachDirect(path, .exclusive);

@@ -1,6 +1,23 @@
 #include "vterm_shim.h"
 #include <stdlib.h>
 
+static msr_vterm_color convert_color(VTermColor color) {
+  msr_vterm_color out = {0, 0, 0, 0, 0};
+  if (VTERM_COLOR_IS_INDEXED(&color)) {
+    out.type = 1;
+    out.palette_index = color.indexed.idx;
+    return out;
+  }
+  if (VTERM_COLOR_IS_RGB(&color)) {
+    out.type = 2;
+    out.red = color.rgb.red;
+    out.green = color.rgb.green;
+    out.blue = color.rgb.blue;
+    return out;
+  }
+  return out;
+}
+
 msr_vterm_handle *msr_vterm_new(int rows, int cols) {
   msr_vterm_handle *h = (msr_vterm_handle *)calloc(1, sizeof(msr_vterm_handle));
   if (!h) return NULL;
@@ -69,4 +86,32 @@ uint32_t msr_vterm_get_cell_codepoint(msr_vterm_handle *handle, int row, int col
   VTermPos pos = { row, col };
   if (!vterm_screen_get_cell(handle->screen, pos, &cell)) return 0;
   return cell.chars[0];
+}
+
+void msr_vterm_get_cell_style(msr_vterm_handle *handle, int row, int col, msr_vterm_cell_style *out) {
+  if (!out) return;
+  out->bold = 0;
+  out->underline = 0;
+  out->inverse = 0;
+  out->fg.type = 0;
+  out->fg.palette_index = 0;
+  out->fg.red = 0;
+  out->fg.green = 0;
+  out->fg.blue = 0;
+  out->bg.type = 0;
+  out->bg.palette_index = 0;
+  out->bg.red = 0;
+  out->bg.green = 0;
+  out->bg.blue = 0;
+
+  if (!handle || !handle->screen) return;
+  VTermScreenCell cell;
+  VTermPos pos = { row, col };
+  if (!vterm_screen_get_cell(handle->screen, pos, &cell)) return;
+
+  out->bold = cell.attrs.bold ? 1 : 0;
+  out->underline = cell.attrs.underline ? 1 : 0;
+  out->inverse = cell.attrs.reverse ? 1 : 0;
+  out->fg = convert_color(cell.fg);
+  out->bg = convert_color(cell.bg);
 }

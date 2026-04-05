@@ -7,12 +7,17 @@ pub const ForwardedOwnerReq = struct {
     action: protocol.OwnerAction,
 };
 
+pub const Size = struct {
+    cols: u16,
+    rows: u16,
+};
+
 pub const OwnerSession = union(enum) {
     none,
-    attaching: struct {
+    attached_unready: struct {
         fd: i32,
     },
-    attached: struct {
+    attached_ready: struct {
         fd: i32,
         pending: ?ForwardedOwnerReq = null,
     },
@@ -20,12 +25,13 @@ pub const OwnerSession = union(enum) {
 
 pub const Model = struct {
     owner: OwnerSession = .none,
+    session_size: Size = .{ .cols = 80, .rows = 24 },
 
     pub fn deinit(self: *Model, allocator: std.mem.Allocator) void {
         switch (self.owner) {
             .none => {},
-            .attaching => {},
-            .attached => |*owner| {
+            .attached_unready => {},
+            .attached_ready => |*owner| {
                 if (owner.pending) |*pending| {
                     protocol.freeOwnerAction(allocator, @constCast(&pending.action));
                     owner.pending = null;
@@ -47,6 +53,7 @@ pub const Action = union(enum) {
     close_fd: i32,
     install_owner: i32,
     owner_ready: i32,
+    session_size_changed: Size,
     clear_owner,
 };
 
@@ -89,14 +96,18 @@ pub fn appendOwnerReady(actions: *ActionList, fd: i32) !void {
     try actions.append(.{ .owner_ready = fd });
 }
 
+pub fn appendSessionSizeChanged(actions: *ActionList, size: Size) !void {
+    try actions.append(.{ .session_size_changed = size });
+}
+
 pub fn handleAttach(model: *Model, allocator: std.mem.Allocator, client_fd: i32, mode: []const u8, actions: *ActionList) !void {
     switch (model.owner) {
         .none => {
-            model.owner = .{ .attaching = .{ .fd = client_fd } };
+            model.owner = .{ .attached_unready = .{ .fd = client_fd } };
             try appendInstallOwner(actions, client_fd);
             try appendSendControlRes(allocator, actions, client_fd, .{ .ok = true, .value = .{} });
         },
-        .attaching => |owner| {
+        .attached_unready => |owner| {
             _ = owner;
             if (std.mem.eql(u8, mode, "exclusive")) {
                 try appendSendControlRes(allocator, actions, client_fd, .{ .ok = false, .err = .{ .code = "attach_conflict" } });
@@ -109,15 +120,15 @@ pub fn handleAttach(model: *Model, allocator: std.mem.Allocator, client_fd: i32,
                 return;
             }
             switch (model.owner) {
-                .attaching => |attaching_owner| try appendClose(actions, attaching_owner.fd),
+                .attached_unready => |attaching_owner| try appendClose(actions, attaching_owner.fd),
                 else => {},
             }
-            model.owner = .{ .attaching = .{ .fd = client_fd } };
+            model.owner = .{ .attached_unready = .{ .fd = client_fd } };
             try appendClearOwner(actions);
             try appendInstallOwner(actions, client_fd);
             try appendSendControlRes(allocator, actions, client_fd, .{ .ok = true, .value = .{} });
         },
-        .attached => |owner| {
+        .attached_ready => |owner| {
             if (std.mem.eql(u8, mode, "exclusive")) {
                 try appendSendControlRes(allocator, actions, client_fd, .{ .ok = false, .err = .{ .code = "attach_conflict" } });
                 try appendClose(actions, client_fd);
@@ -135,7 +146,7 @@ pub fn handleAttach(model: *Model, allocator: std.mem.Allocator, client_fd: i32,
                 protocol.freeOwnerAction(allocator, @constCast(&pending.action));
             }
             try appendClose(actions, owner.fd);
-            model.owner = .{ .attached = .{ .fd = client_fd, .pending = null } };
+            model.owner = .{ .attached_unready = .{ .fd = client_fd } };
             try appendClearOwner(actions);
             try appendInstallOwner(actions, client_fd);
             try appendSendControlRes(allocator, actions, client_fd, .{ .ok = true, .value = .{} });
@@ -160,11 +171,11 @@ pub fn handleOwnerForward(model: *Model, allocator: std.mem.Allocator, requester
             try appendSendControlRes(allocator, actions, requester_fd, .{ .ok = false, .err = .{ .code = "no_owner_client" } });
             try appendClose(actions, requester_fd);
         },
-        .attaching => {
+        .attached_unready => {
             try appendSendControlRes(allocator, actions, requester_fd, .{ .ok = false, .err = .{ .code = "owner_not_ready" } });
             try appendClose(actions, requester_fd);
         },
-        .attached => |*owner| {
+        .attached_ready => |*owner| {
             if (owner.pending != null) {
                 try appendSendControlRes(allocator, actions, requester_fd, .{ .ok = false, .err = .{ .code = "owner_busy" } });
                 try appendClose(actions, requester_fd);
@@ -187,19 +198,47 @@ pub fn handleOwnerForward(model: *Model, allocator: std.mem.Allocator, requester
 pub fn handleOwnerReady(model: *Model, actions: *ActionList) !void {
     switch (model.owner) {
         .none => return error.InvalidState,
-        .attaching => |owner| {
-            model.owner = .{ .attached = .{ .fd = owner.fd, .pending = null } };
+        .attached_unready => |owner| {
+            model.owner = .{ .attached_ready = .{ .fd = owner.fd, .pending = null } };
             try appendOwnerReady(actions, owner.fd);
         },
-        .attached => {},
+        .attached_ready => {},
+    }
+}
+
+pub fn handleOwnerResize(model: *Model, cols: u16, rows: u16, actions: *ActionList) !void {
+    if (cols == 0 or rows == 0) return error.InvalidArgs;
+    switch (model.owner) {
+        .none => return error.InvalidState,
+        .attached_unready => return error.InvalidState,
+        .attached_ready => {
+            model.session_size = .{ .cols = cols, .rows = rows };
+            try appendSessionSizeChanged(actions, model.session_size);
+        },
+    }
+}
+
+pub fn handleOwnerDetach(model: *Model, fd: i32, actions: *ActionList) !void {
+    switch (model.owner) {
+        .none => return error.InvalidState,
+        .attached_unready => |owner| {
+            if (owner.fd != fd) return error.InvalidState;
+            model.owner = .none;
+            try appendClearOwner(actions);
+        },
+        .attached_ready => |owner| {
+            if (owner.fd != fd) return error.InvalidState;
+            model.owner = .none;
+            try appendClearOwner(actions);
+        },
     }
 }
 
 pub fn handleOwnerControlRes(model: *Model, allocator: std.mem.Allocator, res: protocol.OwnerControlRes, actions: *ActionList) !void {
     switch (model.owner) {
         .none => return error.InvalidState,
-        .attaching => return error.InvalidState,
-        .attached => |*owner| {
+        .attached_unready => return error.InvalidState,
+        .attached_ready => |*owner| {
             const pending = owner.pending orelse return error.InvalidState;
             if (pending.request_id != res.request_id) return error.InvalidState;
 
@@ -227,12 +266,12 @@ pub fn handleOwnerControlRes(model: *Model, allocator: std.mem.Allocator, res: p
 pub fn handleOwnerClosed(model: *Model, allocator: std.mem.Allocator, actions: *ActionList) !void {
     switch (model.owner) {
         .none => {},
-        .attaching => |owner| {
+        .attached_unready => |owner| {
             try appendClose(actions, owner.fd);
             model.owner = .none;
             try appendClearOwner(actions);
         },
-        .attached => |*owner| {
+        .attached_ready => |*owner| {
             if (owner.pending) |pending| {
                 try appendSendControlRes(allocator, actions, pending.requester_fd, .{ .ok = false, .err = .{ .code = "owner_disconnected" } });
                 try appendClose(actions, pending.requester_fd);
@@ -249,12 +288,12 @@ pub fn handleOwnerClosed(model: *Model, allocator: std.mem.Allocator, actions: *
 pub fn handlePtyClosed(model: *Model, allocator: std.mem.Allocator, actions: *ActionList) !void {
     switch (model.owner) {
         .none => {},
-        .attaching => |owner| {
+        .attached_unready => |owner| {
             try appendClose(actions, owner.fd);
             model.owner = .none;
             try appendClearOwner(actions);
         },
-        .attached => |*owner| {
+        .attached_ready => |*owner| {
             if (owner.pending) |pending| {
                 try appendSendControlRes(allocator, actions, pending.requester_fd, .{ .ok = false, .err = .{ .code = "pty_closed" } });
                 try appendClose(actions, pending.requester_fd);
@@ -292,14 +331,14 @@ test "model attach exclusive when no owner installs owner and replies ok" {
 
     try std.testing.expectEqual(@as(usize, 2), actions.items.len);
     switch (model.owner) {
-        .attaching => |owner| try std.testing.expectEqual(@as(i32, 10), owner.fd),
-        .attached => |owner| try std.testing.expectEqual(@as(i32, 10), owner.fd),
+        .attached_unready => |owner| try std.testing.expectEqual(@as(i32, 10), owner.fd),
+        .attached_ready => |owner| try std.testing.expectEqual(@as(i32, 10), owner.fd),
         else => return error.TestUnexpectedResult,
     }
 }
 
 test "model attach exclusive when owner exists returns conflict and closes requester" {
-    var model = Model{ .owner = .{ .attached = .{ .fd = 10, .pending = null } } };
+    var model = Model{ .owner = .{ .attached_ready = .{ .fd = 10, .pending = null } } };
     defer model.deinit(std.testing.allocator);
     var actions = ActionList.init(std.testing.allocator);
     defer deinitActionList(std.testing.allocator, &actions);
@@ -336,8 +375,8 @@ test "model owner forward when no owner returns no_owner_client" {
     }
 }
 
-test "model owner forward while owner attaching returns owner_not_ready" {
-    var model = Model{ .owner = .{ .attaching = .{ .fd = 10 } } };
+test "model owner forward while owner unready returns owner_not_ready" {
+    var model = Model{ .owner = .{ .attached_unready = .{ .fd = 10 } } };
     defer model.deinit(std.testing.allocator);
     var actions = ActionList.init(std.testing.allocator);
     defer deinitActionList(std.testing.allocator, &actions);
@@ -351,8 +390,8 @@ test "model owner forward while owner attaching returns owner_not_ready" {
     }
 }
 
-test "model owner ready transitions attaching to attached" {
-    var model = Model{ .owner = .{ .attaching = .{ .fd = 10 } } };
+test "model owner ready transitions unready to ready" {
+    var model = Model{ .owner = .{ .attached_unready = .{ .fd = 10 } } };
     defer model.deinit(std.testing.allocator);
     var actions = ActionList.init(std.testing.allocator);
     defer deinitActionList(std.testing.allocator, &actions);
@@ -360,7 +399,7 @@ test "model owner ready transitions attaching to attached" {
     try handleOwnerReady(&model, &actions);
 
     switch (model.owner) {
-        .attached => |owner| {
+        .attached_ready => |owner| {
             try std.testing.expectEqual(@as(i32, 10), owner.fd);
             try std.testing.expect(owner.pending == null);
         },
@@ -370,7 +409,7 @@ test "model owner ready transitions attaching to attached" {
 
 test "model owner forward when pending exists returns owner_busy" {
     var model = Model{
-        .owner = .{ .attached = .{ .fd = 10, .pending = .{ .requester_fd = 20, .request_id = 1, .action = .{ .op = try std.testing.allocator.dupe(u8, "detach") } } } },
+        .owner = .{ .attached_ready = .{ .fd = 10, .pending = .{ .requester_fd = 20, .request_id = 1, .action = .{ .op = try std.testing.allocator.dupe(u8, "detach") } } } },
     };
     defer model.deinit(std.testing.allocator);
     var actions = ActionList.init(std.testing.allocator);
@@ -386,7 +425,7 @@ test "model owner forward when pending exists returns owner_busy" {
 }
 
 test "model owner forward with owner stores pending and emits owner_control_req" {
-    var model = Model{ .owner = .{ .attached = .{ .fd = 10, .pending = null } } };
+    var model = Model{ .owner = .{ .attached_ready = .{ .fd = 10, .pending = null } } };
     defer model.deinit(std.testing.allocator);
     var actions = ActionList.init(std.testing.allocator);
     defer deinitActionList(std.testing.allocator, &actions);
@@ -403,7 +442,7 @@ test "model owner forward with owner stores pending and emits owner_control_req"
         else => return error.TestUnexpectedResult,
     }
     switch (model.owner) {
-        .attached => |owner| {
+        .attached_ready => |owner| {
             try std.testing.expect(owner.pending != null);
             try std.testing.expectEqual(@as(i32, 20), owner.pending.?.requester_fd);
         },
@@ -413,7 +452,7 @@ test "model owner forward with owner stores pending and emits owner_control_req"
 
 test "model owner response resolves requester and clears pending" {
     var model = Model{
-        .owner = .{ .attached = .{ .fd = 10, .pending = .{ .requester_fd = 20, .request_id = 7, .action = .{ .op = try std.testing.allocator.dupe(u8, "detach") } } } },
+        .owner = .{ .attached_ready = .{ .fd = 10, .pending = .{ .requester_fd = 20, .request_id = 7, .action = .{ .op = try std.testing.allocator.dupe(u8, "detach") } } } },
     };
     defer model.deinit(std.testing.allocator);
     var actions = ActionList.init(std.testing.allocator);
@@ -443,7 +482,7 @@ test "model owner response resolves requester and clears pending" {
 
 test "model owner closed with pending fails requester and clears owner" {
     var model = Model{
-        .owner = .{ .attached = .{ .fd = 10, .pending = .{ .requester_fd = 20, .request_id = 7, .action = .{ .op = try std.testing.allocator.dupe(u8, "detach") } } } },
+        .owner = .{ .attached_ready = .{ .fd = 10, .pending = .{ .requester_fd = 20, .request_id = 7, .action = .{ .op = try std.testing.allocator.dupe(u8, "detach") } } } },
     };
     defer model.deinit(std.testing.allocator);
     var actions = ActionList.init(std.testing.allocator);
@@ -461,7 +500,7 @@ test "model owner closed with pending fails requester and clears owner" {
 
 test "model pty closed with pending fails requester and clears owner" {
     var model = Model{
-        .owner = .{ .attached = .{ .fd = 10, .pending = .{ .requester_fd = 20, .request_id = 7, .action = .{ .op = try std.testing.allocator.dupe(u8, "detach") } } } },
+        .owner = .{ .attached_ready = .{ .fd = 10, .pending = .{ .requester_fd = 20, .request_id = 7, .action = .{ .op = try std.testing.allocator.dupe(u8, "detach") } } } },
     };
     defer model.deinit(std.testing.allocator);
     var actions = ActionList.init(std.testing.allocator);

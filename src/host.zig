@@ -64,6 +64,11 @@ pub const ReplayChunk = struct {
     bytes: []u8,
 };
 
+pub const Size = struct {
+    cols: u16,
+    rows: u16,
+};
+
 pub const HostScreenCell = struct {
     text: []const u8,
 };
@@ -239,11 +244,18 @@ pub const SessionHost = struct {
                     .ws_ypixel = 0,
                 };
                 if (c.ioctl(fd, c.TIOCSWINSZ, &ws) != 0) break :blk Error.InvalidArgs;
+                self.opts.rows = rows;
+                self.opts.cols = cols;
                 break :blk;
             },
             .exited => Error.InvalidState,
             .closed => Error.Closed,
         };
+    }
+
+    pub fn applySessionSize(self: *SessionHost, size: Size) Error!void {
+        try self.resize(size.cols, size.rows);
+        try self.signalWinch();
     }
 
     pub fn signalWinch(self: *SessionHost) Error!void {
