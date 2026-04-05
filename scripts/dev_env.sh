@@ -7,10 +7,25 @@
 #   source scripts/dev_env.sh
 #
 # Optional:
+#   export MSR_REPO_ROOT=/absolute/path/to/repo
 #   source scripts/dev_env.sh --build   # build msr first if zig-out/bin/msr is missing
+#
+# This script resolves its real location, so sourcing through a symlink works.
+# If you copy it elsewhere, set MSR_REPO_ROOT first so it can find the repo.
 
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+resolve_source_path() {
+  local src="${BASH_SOURCE[0]}"
+  while [[ -L "$src" ]]; do
+    local dir
+    dir="$(cd -- "$(dirname -- "$src")" && pwd)"
+    src="$(readlink -- "$src")"
+    [[ "$src" != /* ]] && src="$dir/$src"
+  done
+  cd -- "$(dirname -- "$src")" && pwd
+}
+
+SCRIPT_DIR="$(resolve_source_path)"
+REPO_DIR="${MSR_REPO_ROOT:-$(cd -- "$SCRIPT_DIR/.." && pwd)}"
 BIN_DIR="$REPO_DIR/zig-out/bin"
 SCRIPTS_DIR="$REPO_DIR/scripts"
 
@@ -35,6 +50,7 @@ path_prepend "$BIN_DIR"
 path_prepend "$SCRIPTS_DIR"
 export PATH
 export MSR_REPO_DIR="$REPO_DIR"
+export MSR_REPO_ROOT="$REPO_DIR"
 
 # Best-effort bash completions.
 if [[ -n "${BASH_VERSION-}" ]]; then
