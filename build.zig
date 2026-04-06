@@ -113,6 +113,38 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe);
 
+    const vpty_terminal_mod = b.addModule("vpty_terminal", .{
+        .root_source_file = b.path("src/vpty_terminal.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+
+    const vpty_render_mod = b.addModule("vpty_render", .{
+        .root_source_file = b.path("src/vpty_render.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    vpty_render_mod.addImport("host", host_mod);
+
+    const vpty_root = b.createModule(.{
+        .root_source_file = b.path("src/vpty_main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    vpty_root.linkSystemLibrary("util", .{});
+    vpty_root.addImport("host", host_mod);
+    vpty_root.addImport("vpty_terminal", vpty_terminal_mod);
+    vpty_root.addImport("vpty_render", vpty_render_mod);
+
+    const vpty_exe = b.addExecutable(.{
+        .name = "vpty",
+        .root_module = vpty_root,
+    });
+    b.installArtifact(vpty_exe);
+
     const terminal_state_vterm_test_root = b.createModule(.{
         .root_source_file = b.path("src/terminal_state_vterm.zig"),
         .target = target,

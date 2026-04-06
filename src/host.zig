@@ -1,5 +1,13 @@
 const std = @import("std");
 const terminal_state_vterm = @import("terminal_state_vterm.zig");
+const screen_types = @import("vterm_screen_types.zig");
+pub const HostColor = screen_types.HostColor;
+pub const HostCellAttrs = screen_types.HostCellAttrs;
+pub const HostScreenCell = screen_types.HostScreenCell;
+pub const HostScreenLine = screen_types.HostScreenLine;
+pub const HostScreenSnapshot = screen_types.HostScreenSnapshot;
+pub const freeScreenSnapshot = screen_types.freeScreenSnapshot;
+
 const c = @cImport({
     @cInclude("pty.h");
     @cInclude("sys/ioctl.h");
@@ -69,32 +77,6 @@ pub const Size = struct {
     rows: u16,
 };
 
-pub const HostScreenCell = struct {
-    text: []const u8,
-};
-
-pub const HostScreenSnapshot = struct {
-    rows: u16,
-    cols: u16,
-    cursor_row: u16,
-    cursor_col: u16,
-    cursor_visible: bool,
-    alt_screen: bool,
-    title: ?[]const u8 = null,
-    seq: u64,
-    cells: [][]HostScreenCell,
-};
-
-
-pub fn freeScreenSnapshot(allocator: std.mem.Allocator, snapshot: *HostScreenSnapshot) void {
-    for (snapshot.cells) |row| {
-        for (row) |cell| allocator.free(cell.text);
-        allocator.free(row);
-    }
-    allocator.free(snapshot.cells);
-    if (snapshot.title) |title| allocator.free(title);
-}
-
 pub const SessionHost = struct {
     allocator: std.mem.Allocator,
     opts: SpawnOptions,
@@ -121,7 +103,7 @@ pub const SessionHost = struct {
             .terminal_state_enabled = opts.enable_terminal_state,
             .screen_seq = 0,
             .replay_chunks = .{},
-            .terminal_state = if (opts.enable_terminal_state) try terminal_state_vterm.VTermAdapter.init(allocator, opts.rows orelse 24, opts.cols orelse 80) else null,
+            .terminal_state = if (opts.enable_terminal_state) try terminal_state_vterm.VTermAdapter.init(opts.rows orelse 24, opts.cols orelse 80) else null,
         };
         self.pty = .{ .host = &self };
         return self;
@@ -232,26 +214,33 @@ pub const SessionHost = struct {
     }
 
     pub fn resize(self: *SessionHost, cols: u16, rows: u16) Error!void {
-        if (cols == 0 or rows == 0) return Error.InvalidArgs;
-        return switch (self.state) {
-            .idle, .starting => Error.NotStarted,
-            .running => blk: {
-                const fd = self.master_fd orelse return Error.InvalidState;
-                var ws = c.struct_winsize{
-                    .ws_row = @intCast(rows),
-                    .ws_col = @intCast(cols),
-                    .ws_xpixel = 0,
-                    .ws_ypixel = 0,
-                };
-                if (c.ioctl(fd, c.TIOCSWINSZ, &ws) != 0) break :blk Error.InvalidArgs;
-                self.opts.rows = rows;
-                self.opts.cols = cols;
-                break :blk;
-            },
-            .exited => Error.InvalidState,
-            .closed => Error.Closed,
-        };
-    }
+    if (cols == 0 or rows == 0) return Error.InvalidArgs;
+    return switch (self.state) {
+        .idle, .starting => Error.NotStarted,
+        .running => blk: {
+            const fd = self.master_fd orelse return Error.InvalidState;
+            var ws = c.struct_winsize{
+                .ws_row = @intCast(rows),
+                .ws_col = @intCast(cols),
+                .ws_xpixel = 0,
+                .ws_ypixel = 0,
+            };
+            if (c.ioctl(fd, c.TIOCSWINSZ, &ws) != 0) break :blk Error.InvalidArgs;
+
+            self.opts.rows = rows;
+            self.opts.cols = cols;
+
+            if (self.terminal_state) |*ts| {
+                ts.resize(rows, cols);
+                ts.forceFullDamage();
+            }
+
+            break :blk;
+        },
+        .exited => Error.InvalidState,
+        .closed => Error.Closed,
+    };
+}
 
     pub fn applySessionSize(self: *SessionHost, size: Size) Error!void {
         try self.resize(size.cols, size.rows);

@@ -1,5 +1,61 @@
 #include "vterm_shim.h"
 #include <stdlib.h>
+#include <string.h>
+
+static int on_damage(VTermRect rect, void *user) {
+  msr_vterm_handle *h = (msr_vterm_handle *)user;
+  if (!h || !h->dirty_rows) return 1;
+  for (int row = rect.start_row; row < rect.end_row && row < h->rows; row++) {
+    if (row >= 0) h->dirty_rows[row] = 1;
+  }
+  return 1;
+}
+
+static int on_moverect(VTermRect dest, VTermRect src, void *user) {
+  (void)src;
+  return on_damage(dest, user);
+}
+
+static int on_movecursor(VTermPos pos, VTermPos oldpos, int visible, void *user) {
+  msr_vterm_handle *h = (msr_vterm_handle *)user;
+  if (!h) return 1;
+  h->cursor_visible = visible;
+  if (h->dirty_rows) {
+    if (oldpos.row >= 0 && oldpos.row < h->rows) h->dirty_rows[oldpos.row] = 1;
+    if (pos.row >= 0 && pos.row < h->rows) h->dirty_rows[pos.row] = 1;
+  }
+  return 1;
+}
+
+static int on_settermprop(VTermProp prop, VTermValue *val, void *user) {
+  msr_vterm_handle *h = (msr_vterm_handle *)user;
+  if (!h) return 1;
+  if (prop == VTERM_PROP_CURSORVISIBLE) h->cursor_visible = val->boolean;
+  if (prop == VTERM_PROP_ALTSCREEN) {
+    h->alt_screen = val->boolean;
+    h->full_damage = 1;
+  }
+  return 1;
+}
+
+static int on_resize(int rows, int cols, void *user) {
+  msr_vterm_handle *h = (msr_vterm_handle *)user;
+  if (!h) return 1;
+  h->rows = rows;
+  h->cols = cols;
+  h->full_damage = 1;
+  h->dirty_rows = (uint8_t *)realloc(h->dirty_rows, rows > 0 ? (size_t)rows : 1u);
+  if (h->dirty_rows) memset(h->dirty_rows, 1, rows > 0 ? (size_t)rows : 1u);
+  return 1;
+}
+
+static VTermScreenCallbacks screen_cbs = {
+  .damage = on_damage,
+  .moverect = on_moverect,
+  .movecursor = on_movecursor,
+  .settermprop = on_settermprop,
+  .resize = on_resize,
+};
 
 static msr_vterm_color convert_color(VTermColor color) {
   msr_vterm_color out = {0, 0, 0, 0, 0};
@@ -21,20 +77,37 @@ static msr_vterm_color convert_color(VTermColor color) {
 msr_vterm_handle *msr_vterm_new(int rows, int cols) {
   msr_vterm_handle *h = (msr_vterm_handle *)calloc(1, sizeof(msr_vterm_handle));
   if (!h) return NULL;
+
   h->vt = vterm_new(rows, cols);
   if (!h->vt) {
     free(h);
     return NULL;
   }
+
+  // ←←← ADD THIS LINE (this is the official way)
+  vterm_set_utf8(h->vt, 1);
+
   h->screen = vterm_obtain_screen(h->vt);
+  h->rows = rows;
+  h->cols = cols;
+  h->cursor_visible = 1;
+  h->alt_screen = 0;
+  h->full_damage = 1;
+  h->dirty_rows = (uint8_t *)calloc(rows > 0 ? (size_t)rows : 1u, 1);
+  if (h->dirty_rows) memset(h->dirty_rows, 1, rows > 0 ? (size_t)rows : 1u);
+
+  vterm_screen_set_callbacks(h->screen, &screen_cbs, h);
   vterm_screen_enable_altscreen(h->screen, 1);
   vterm_screen_reset(h->screen, 1);
   vterm_screen_flush_damage(h->screen);
+  vterm_screen_set_damage_merge(h->screen, VTERM_DAMAGE_SCROLL);
+
   return h;
 }
 
 void msr_vterm_free(msr_vterm_handle *handle) {
   if (!handle) return;
+  free(handle->dirty_rows);
   if (handle->vt) vterm_free(handle->vt);
   free(handle);
 }
@@ -72,46 +145,66 @@ void msr_vterm_get_cursor(msr_vterm_handle *handle, int *row, int *col, int *vis
   vterm_state_get_cursorpos(state, &pos);
   if (row) *row = pos.row;
   if (col) *col = pos.col;
-  if (visible) *visible = 1;
+  if (visible) *visible = handle->cursor_visible;
 }
 
 int msr_vterm_get_alt_screen(msr_vterm_handle *handle) {
-  (void)handle;
-  return 0;
+  if (!handle) return 0;
+  return handle->alt_screen;
 }
 
-uint32_t msr_vterm_get_cell_codepoint(msr_vterm_handle *handle, int row, int col) {
-  if (!handle || !handle->screen) return 0;
-  VTermScreenCell cell;
-  VTermPos pos = { row, col };
-  if (!vterm_screen_get_cell(handle->screen, pos, &cell)) return 0;
-  return cell.chars[0];
+size_t msr_vterm_get_rect_text(msr_vterm_handle *handle, int row, int start_col, int end_col, char *buf, size_t len) {
+  if (!handle || !handle->screen || !buf || len == 0) return 0;
+  VTermRect rect = { .start_row = row, .end_row = row + 1, .start_col = start_col, .end_col = end_col };
+  return vterm_screen_get_text(handle->screen, buf, len, rect);
 }
 
-void msr_vterm_get_cell_style(msr_vterm_handle *handle, int row, int col, msr_vterm_cell_style *out) {
+// New: expose a way to force a full redraw when needed
+void msr_vterm_force_full_damage(msr_vterm_handle *handle) {
+  if (!handle) return;
+  handle->full_damage = 1;
+  if (handle->dirty_rows) memset(handle->dirty_rows, 1, handle->rows > 0 ? (size_t)handle->rows : 1u);
+}
+
+// Already had this, make sure it's here
+void msr_vterm_flush_damage(msr_vterm_handle *handle) {
+  if (handle && handle->screen) vterm_screen_flush_damage(handle->screen);
+}
+
+void msr_vterm_get_cell(msr_vterm_handle *handle, int row, int col, msr_vterm_cell *out) {
   if (!out) return;
-  out->bold = 0;
-  out->underline = 0;
-  out->inverse = 0;
-  out->fg.type = 0;
-  out->fg.palette_index = 0;
-  out->fg.red = 0;
-  out->fg.green = 0;
-  out->fg.blue = 0;
-  out->bg.type = 0;
-  out->bg.palette_index = 0;
-  out->bg.red = 0;
-  out->bg.green = 0;
-  out->bg.blue = 0;
+  memset(out, 0, sizeof(*out));
+  out->width = 1;
 
   if (!handle || !handle->screen) return;
+
   VTermScreenCell cell;
   VTermPos pos = { row, col };
   if (!vterm_screen_get_cell(handle->screen, pos, &cell)) return;
 
-  out->bold = cell.attrs.bold ? 1 : 0;
-  out->underline = cell.attrs.underline ? 1 : 0;
-  out->inverse = cell.attrs.reverse ? 1 : 0;
+  size_t n = 0;
+  while (n < VTERM_MAX_CHARS_PER_CELL && cell.chars[n]) {
+    out->chars[n] = cell.chars[n];
+    n++;
+  }
+  out->chars_len = (uint8_t)n;
+  out->width = (uint8_t)cell.width;
   out->fg = convert_color(cell.fg);
   out->bg = convert_color(cell.bg);
+
+  out->attrs.bold = cell.attrs.bold ? 1 : 0;
+  out->attrs.italic = cell.attrs.italic ? 1 : 0;
+  out->attrs.underline = cell.attrs.underline ? 1 : 0;
+  out->attrs.blink = cell.attrs.blink ? 1 : 0;
+  out->attrs.reverse = cell.attrs.reverse ? 1 : 0;
+  out->attrs.conceal = cell.attrs.conceal ? 1 : 0;
+  out->attrs.strike = cell.attrs.strike ? 1 : 0;
+  out->attrs.font = cell.attrs.font;
+}
+
+int msr_vterm_row_is_eol(msr_vterm_handle *handle, int row) {
+  if (!handle || !handle->screen) return 0;
+  if (row < 0 || row >= handle->rows) return 0;
+  VTermPos pos = { row, handle->cols > 0 ? handle->cols - 1 : 0 };
+  return vterm_screen_is_eol(handle->screen, pos);
 }

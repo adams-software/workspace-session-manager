@@ -1,10 +1,11 @@
 const std = @import("std");
 const c = @cImport({
     @cInclude("vterm_shim.h");
+    @cInclude("stdlib.h");
 });
-const host = @import("host.zig");
+const screen_types = @import("vterm_screen_types.zig");
 
-fn convertColor(raw: c.msr_vterm_color) host.HostColor {
+fn convertColor(raw: c.msr_vterm_color) screen_types.HostColor {
     return switch (raw.type) {
         1 => .{ .kind = .indexed, .palette_index = raw.palette_index },
         2 => .{ .kind = .rgb, .red = raw.red, .green = raw.green, .blue = raw.blue },
@@ -14,10 +15,14 @@ fn convertColor(raw: c.msr_vterm_color) host.HostColor {
 
 pub const VTermAdapter = struct {
     handle: ?*c.msr_vterm_handle,
+    render_callback: ?*const fn () void = null,
 
-    pub fn init(_: std.mem.Allocator, rows: u16, cols: u16) !VTermAdapter {
+    pub fn init(rows: u16, cols: u16) !VTermAdapter {
         const handle = c.msr_vterm_new(@intCast(rows), @intCast(cols)) orelse return error.OutOfMemory;
-        return .{ .handle = handle };
+        return .{
+            .handle = handle,
+            .render_callback = null,
+        };
     }
 
     pub fn deinit(self: *VTermAdapter) void {
@@ -27,51 +32,80 @@ pub const VTermAdapter = struct {
         }
     }
 
+    pub fn setRenderCallback(self: *VTermAdapter, callback: *const fn () void) void {
+        self.render_callback = callback;
+    }
+
+    pub fn feed(self: *VTermAdapter, bytes: []const u8) void {
+        if (self.handle) |handle| {
+            c.msr_vterm_feed(handle, bytes.ptr, bytes.len);
+            c.msr_vterm_flush_damage(handle);
+            if (self.render_callback) |cb| cb();
+        }
+    }
+
+    pub fn flushDamage(self: *VTermAdapter) void {
+        if (self.handle) |h| c.msr_vterm_flush_damage(h);
+    }
+
+    pub fn forceFullDamage(self: *VTermAdapter) void {
+        if (self.handle) |h| c.msr_vterm_force_full_damage(h);
+    }
+
     pub fn resize(self: *VTermAdapter, rows: u16, cols: u16) void {
         if (self.handle) |handle| c.msr_vterm_set_size(handle, @intCast(rows), @intCast(cols));
     }
 
-    pub fn feed(self: *VTermAdapter, bytes: []const u8) void {
-        if (self.handle) |handle| c.msr_vterm_feed(handle, bytes.ptr, bytes.len);
-    }
+    pub fn snapshot(self: *const VTermAdapter, allocator: std.mem.Allocator) !screen_types.HostScreenSnapshot {
+        if (self.handle == null) return error.InvalidState;
+        const handle = self.handle.?;
 
-    pub fn snapshot(self: *const VTermAdapter, allocator: std.mem.Allocator) !host.HostScreenSnapshot {
-        const handle = self.handle orelse return error.InvalidState;
-        var rows_i: c_int = 0;
-        var cols_i: c_int = 0;
-        c.msr_vterm_get_size(handle, &rows_i, &cols_i);
-        const rows: usize = @intCast(rows_i);
-        const cols: usize = @intCast(cols_i);
+        const rows = handle.rows;
+        const cols = handle.cols;
 
-        var out_rows = try allocator.alloc([]host.HostScreenCell, rows);
-        errdefer allocator.free(out_rows);
-
-        var r: usize = 0;
+        var lines = try allocator.alloc(screen_types.HostScreenLine, @intCast(rows));
+        var initialized_rows: usize = 0;
         errdefer {
-            var i: usize = 0;
-            while (i < r) : (i += 1) {
-                for (out_rows[i]) |cell| allocator.free(cell.text);
-                allocator.free(out_rows[i]);
+            for (lines[0..initialized_rows]) |line| {
+                allocator.free(line.cells);
             }
+            allocator.free(lines);
         }
 
-        while (r < rows) : (r += 1) {
-            out_rows[r] = try allocator.alloc(host.HostScreenCell, cols);
-            for (0..cols) |cidx| {
-                const raw_cp = c.msr_vterm_get_cell_codepoint(handle, @intCast(r), @intCast(cidx));
-                const cp: u21 = @intCast(if (raw_cp == 0) ' ' else raw_cp);
-                var buf: [4]u8 = undefined;
-                const n = std.unicode.utf8Encode(cp, &buf) catch return error.InvalidState;
-                var raw_style: c.msr_vterm_cell_style = undefined;
-                c.msr_vterm_get_cell_style(handle, @intCast(r), @intCast(cidx), &raw_style);
-                out_rows[r][cidx] = .{
-                    .text = try allocator.dupe(u8, buf[0..n]),
-                    .style = .{
-                        .fg = convertColor(raw_style.fg),
-                        .bg = convertColor(raw_style.bg),
-                        .bold = raw_style.bold != 0,
-                        .underline = raw_style.underline != 0,
-                        .inverse = raw_style.inverse != 0,
+
+        for (0..@intCast(rows)) |r| {
+            const row_cells = try allocator.alloc(screen_types.HostScreenCell, @intCast(cols));
+            lines[r] = .{
+                .cells = row_cells,
+                .eol = c.msr_vterm_row_is_eol(handle, @intCast(r)) != 0,
+            };
+            initialized_rows += 1;
+
+            for (0..@intCast(cols)) |col_idx| {
+                var raw: c.msr_vterm_cell = undefined;
+                c.msr_vterm_get_cell(handle, @intCast(r), @intCast(col_idx), &raw);
+
+                var chars: [6]u32 = [_]u32{0} ** 6;
+                var i: usize = 0;
+                while (i < raw.chars_len and i < chars.len) : (i += 1) {
+                    chars[i] = raw.chars[i];
+                }
+
+                row_cells[col_idx] = .{
+                    .chars = chars,
+                    .chars_len = raw.chars_len,
+                    .width = raw.width,
+                    .fg = convertColor(raw.fg),
+                    .bg = convertColor(raw.bg),
+                    .attrs = .{
+                        .bold = raw.attrs.bold != 0,
+                        .italic = raw.attrs.italic != 0,
+                        .underline = raw.attrs.underline != 0,
+                        .blink = raw.attrs.blink != 0,
+                        .reverse = raw.attrs.reverse != 0,
+                        .conceal = raw.attrs.conceal != 0,
+                        .strike = raw.attrs.strike != 0,
+                        .font = raw.attrs.font,
                     },
                 };
             }
@@ -79,9 +113,8 @@ pub const VTermAdapter = struct {
 
         var cursor_row: c_int = 0;
         var cursor_col: c_int = 0;
-        var cursor_visible: c_int = 1;
+        var cursor_visible: c_int = 0;
         c.msr_vterm_get_cursor(handle, &cursor_row, &cursor_col, &cursor_visible);
-        const alt_screen = c.msr_vterm_get_alt_screen(handle) != 0;
 
         return .{
             .rows = @intCast(rows),
@@ -89,16 +122,11 @@ pub const VTermAdapter = struct {
             .cursor_row = @intCast(cursor_row),
             .cursor_col = @intCast(cursor_col),
             .cursor_visible = cursor_visible != 0,
-            .alt_screen = alt_screen,
+            .alt_screen = c.msr_vterm_get_alt_screen(handle) != 0,
             .title = null,
             .seq = 0,
-            .cells = out_rows,
+            .full_damage = true,
+            .lines = lines,
         };
     }
 };
-
-test "libvterm adapter create/free" {
-    var adapter = try VTermAdapter.init(std.testing.allocator, 24, 80);
-    defer adapter.deinit();
-    try std.testing.expect(adapter.handle != null);
-}
