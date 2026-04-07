@@ -1,8 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-WSM_BIN="$ROOT_DIR/scripts/wsm"
+resolve_source_path() {
+  local src="${BASH_SOURCE[0]}"
+  while [[ -L "$src" ]]; do
+    local dir
+    dir="$(cd -- "$(dirname -- "$src")" && pwd)"
+    src="$(readlink -- "$src")"
+    [[ "$src" != /* ]] && src="$dir/$src"
+  done
+  cd -- "$(dirname -- "$src")" && pwd
+}
+
+SCRIPT_DIR="$(resolve_source_path)"
+REPO_ROOT="${MSR_REPO_ROOT:-$(cd -- "$SCRIPT_DIR/../.." && pwd)}"
+WSM_BIN="$REPO_ROOT/wsm/scripts/wsm"
 
 err() { printf '%s\n' "$*" >&2; }
 out() { printf '%s\n' "$*"; }

@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-DSM="$ROOT/scripts/dsm"
-MSR="$ROOT/zig-out/bin/msr"
+SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
+REPO_ROOT="${MSR_REPO_ROOT:-$(cd -- "$SCRIPT_DIR/../.." && pwd)}"
+BIN_DIR="${MSR_BIN_DIR:-$REPO_ROOT/zig-out/bin}"
+DSM="$REPO_ROOT/dsm/scripts/dsm"
+MSR="$BIN_DIR/msr"
 TMP="$(mktemp -d)"
 cleanup() {
   "$MSR" terminate "$TMP/alpha.msr" >/dev/null 2>&1 || true

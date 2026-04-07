@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cd "$(dirname "$0")/.."
+SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
+REPO_ROOT="${MSR_REPO_ROOT:-$(cd -- "$SCRIPT_DIR/../.." && pwd)}"
+BIN_DIR="${MSR_BIN_DIR:-$REPO_ROOT/zig-out/bin}"
+cd "$REPO_ROOT"
 zig build >/dev/null
-bin=./zig-out/bin/msr
+bin="$BIN_DIR/msr"
 sock=/tmp/msr-smoke-takeover-output-$$.sock
 out1=/tmp/msr-smoke-takeover-output-1-$$.out
 err1=/tmp/msr-smoke-takeover-output-1-$$.err

@@ -1,8 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-MSR_BIN="$ROOT/zig-out/bin/msr"
+resolve_source_path() {
+  local src="${BASH_SOURCE[0]}"
+  while [[ -L "$src" ]]; do
+    local dir
+    dir="$(cd -- "$(dirname -- "$src")" && pwd)"
+    src="$(readlink -- "$src")"
+    [[ "$src" != /* ]] && src="$dir/$src"
+  done
+  cd -- "$(dirname -- "$src")" && pwd
+}
+
+SCRIPT_DIR="$(resolve_source_path)"
+REPO_ROOT="${MSR_REPO_ROOT:-$(cd -- "$SCRIPT_DIR/../.." && pwd)}"
+BIN_DIR="${MSR_BIN_DIR:-$REPO_ROOT/zig-out/bin}"
+MSR_BIN="$BIN_DIR/msr"
 
 err() { printf '%s\n' "$*" >&2; }
 out() { printf '%s\n' "$*"; }

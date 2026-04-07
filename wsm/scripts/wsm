@@ -1,11 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-DSM_BIN="$ROOT_DIR/scripts/dsm"
-MSR_BIN="$ROOT_DIR/zig-out/bin/msr"
-VPTY_BIN="$ROOT_DIR/zig-out/bin/vpty"
-WSM_MENU_BIN="$ROOT_DIR/scripts/wsm_menu"
+resolve_source_path() {
+  local src="${BASH_SOURCE[0]}"
+  while [[ -L "$src" ]]; do
+    local dir
+    dir="$(cd -- "$(dirname -- "$src")" && pwd)"
+    src="$(readlink -- "$src")"
+    [[ "$src" != /* ]] && src="$dir/$src"
+  done
+  cd -- "$(dirname -- "$src")" && pwd
+}
+
+SCRIPT_DIR="$(resolve_source_path)"
+REPO_ROOT="${MSR_REPO_ROOT:-$(cd -- "$SCRIPT_DIR/../.." && pwd)}"
+BIN_DIR="${MSR_BIN_DIR:-$REPO_ROOT/zig-out/bin}"
+
+DSM_BIN="$REPO_ROOT/dsm/scripts/dsm"
+MSR_BIN="$BIN_DIR/msr"
+VPTY_BIN="$BIN_DIR/vpty"
+WSM_MENU_BIN="$REPO_ROOT/wsm/scripts/wsm_menu"
 
 err() { printf '%s\n' "$*" >&2; }
 out() { printf '%s\n' "$*"; }

@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-cd "$ROOT"
+SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
+REPO_ROOT="${MSR_REPO_ROOT:-$(cd -- "$SCRIPT_DIR/../.." && pwd)}"
+BIN_DIR="${MSR_BIN_DIR:-$REPO_ROOT/zig-out/bin}"
+cd "$REPO_ROOT"
 
-BIN="$ROOT/zig-out/bin/msr"
+BIN="$BIN_DIR/msr"
 TMPDIR="$(mktemp -d /tmp/msr-smoke-XXXXXX)"
 SRC="$TMPDIR/src.sock"
 DST="$TMPDIR/dst.sock"
