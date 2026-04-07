@@ -5,7 +5,11 @@ const c = @cImport({
 });
 const screen_types = @import("vterm_screen_types");
 
-fn convertColor(raw: c.msr_vterm_color) screen_types.HostColor {
+fn convertColor(raw: c.msr_vterm_color, is_fg: bool) screen_types.HostColor {
+    if ((is_fg and raw.is_default_fg != 0) or (!is_fg and raw.is_default_bg != 0)) {
+        return .{ .kind = .default };
+    }
+
     return switch (raw.type) {
         1 => .{ .kind = .indexed, .palette_index = raw.palette_index },
         2 => .{ .kind = .rgb, .red = raw.red, .green = raw.green, .blue = raw.blue },
@@ -95,8 +99,8 @@ pub const VTermAdapter = struct {
                     .chars = chars,
                     .chars_len = raw.chars_len,
                     .width = raw.width,
-                    .fg = convertColor(raw.fg),
-                    .bg = convertColor(raw.bg),
+                    .fg = convertColor(raw.fg, true),
+                    .bg = convertColor(raw.bg, false),
                     .attrs = .{
                         .bold = raw.attrs.bold != 0,
                         .italic = raw.attrs.italic != 0,

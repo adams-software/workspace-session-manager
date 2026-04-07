@@ -9,7 +9,10 @@ const c = @cImport({
 const host = @import("host");
 const vpty_terminal = @import("vpty_terminal");
 const vpty_render = @import("vpty_render");
+const side_effects = @import("side_effects");
 var winch_changed: bool = false;
+var terminate_requested: bool = false;
+var terminate_signal: c_int = 0;
 var wake_pipe: [2]c_int = .{ -1, -1 };
 
 fn out(comptime fmt: []const u8, args: anytype) void {
@@ -48,39 +51,12 @@ fn childExitCode(status: host.ExitStatus) u8 {
 }
 
 fn handleTerminationSignal(sig: c_int) callconv(.c) void {
-    const msg = switch (sig) {
-        c.SIGINT => "\x1b[?25h\n",
-        c.SIGTERM => "\x1b[?25h\n",
-        else => "\x1b[?25h\n",
-    };
-    _ = c.write(c.STDOUT_FILENO, msg.ptr, msg.len);
-    _ = c.signal(sig, c.SIG_DFL);
-    _ = c.raise(sig);
-}
-
-fn onViewerAttach(
-    session_host: *host.SessionHost,
-    rows: u16,
-    cols: u16,
-) void {
-    session_host.applySessionSize(.{ .cols = cols, .rows = rows }) catch {};
-    if (session_host.terminal_state) |*ts| {
-        ts.forceFullDamage();
+    terminate_requested = true;
+    terminate_signal = sig;
+    if (wake_pipe[1] >= 0) {
+        const b: u8 = 1;
+        _ = c.write(wake_pipe[1], &b, 1);
     }
-    vpty_render.reset();
-    vpty_render.doRender();
-}
-
-fn onViewerResize(
-    session_host: *host.SessionHost,
-    rows: u16,
-    cols: u16,
-) void {
-    session_host.applySessionSize(.{ .cols = cols, .rows = rows }) catch {};
-    if (session_host.terminal_state) |*ts| {
-        ts.forceFullDamage();
-    }
-    vpty_render.renderDamaged();
 }
 
 fn applyViewerSize(
@@ -106,7 +82,7 @@ fn handleSigwinch(_: c_int) callconv(.c) void {
     }
 }
 
-fn pumpUntilExit(session_host: *host.SessionHost, terminal: *vpty_terminal.TerminalMode) !host.ExitStatus {
+fn pumpUntilExit(session_host: *host.SessionHost, terminal: *vpty_terminal.TerminalMode, forwarder: *side_effects.SideEffectForwarder) !host.ExitStatus {
     var stdin_open = true;
     var buf: [4096]u8 = undefined;
 
@@ -116,6 +92,24 @@ fn pumpUntilExit(session_host: *host.SessionHost, terminal: *vpty_terminal.Termi
             const size = terminal.currentSize() catch vpty_terminal.Size{ .rows = 24, .cols = 80 };
             applyViewerSize(session_host, size.rows, size.cols);
         }
+        if (terminate_requested) {
+            _ = session_host.terminate(
+                if (terminate_signal == c.SIGINT) "INT"
+                else if (terminate_signal == c.SIGTERM) "TERM"
+                else null,
+            ) catch {};
+
+            // Wait for child to exit cleanly if possible.
+            while (session_host.getState() != .exited) {
+                session_host.refresh() catch {};
+                if (session_host.getState() == .exited) break;
+                _ = c.usleep(10_000);
+            }
+
+            return session_host.getExitStatus() orelse host.ExitStatus{
+                .signal = if (terminate_signal == c.SIGINT) "INT" else "TERM",
+            };
+        }
 
         var pfds = [3]c.struct_pollfd{
             .{ .fd = if (stdin_open) terminal.stdin_fd else -1, .events = if (stdin_open) c.POLLIN else 0, .revents = 0 },
@@ -123,7 +117,7 @@ fn pumpUntilExit(session_host: *host.SessionHost, terminal: *vpty_terminal.Termi
             .{ .fd = wake_pipe[0], .events = c.POLLIN, .revents = 0 },
         };
 
-        const pr = c.poll(&pfds, 2, 10);
+        const pr = c.poll(&pfds, 3, 10);
         if (pr < 0) {
             const e = std.c.errno(-1);
             if (e == .INTR) continue;
@@ -151,6 +145,7 @@ fn pumpUntilExit(session_host: *host.SessionHost, terminal: *vpty_terminal.Termi
                 defer if (@TypeOf(bytes) != *const [0]u8) std.heap.page_allocator.free(bytes);
                 if (@TypeOf(bytes) == *const [0]u8 or bytes.len == 0) break;
 
+                try forwarder.feed(bytes);
                 if (session_host.terminal_state) |*ts| {
                     ts.feed(bytes);
                 }
@@ -227,6 +222,9 @@ pub fn main(init: std.process.Init) !u8 {
     var terminal = vpty_terminal.TerminalMode.init(c.STDIN_FILENO, c.STDOUT_FILENO);
     defer terminal.restore();
 
+    var forwarder = side_effects.SideEffectForwarder.init(allocator);
+    defer forwarder.deinit();
+
     const size = terminal.currentSize() catch vpty_terminal.Size{ .rows = 24, .cols = 80 };
 
     var session_host = try host.SessionHost.init(allocator, .{
@@ -265,7 +263,9 @@ pub fn main(init: std.process.Init) !u8 {
     }
     winch_changed = true;
 
-    const status = try pumpUntilExit(&session_host, &terminal);
+    const status = try pumpUntilExit(&session_host, &terminal, &forwarder);
+    vpty_render.shutdown();
+    terminal.restore();
     _ = session_host.close() catch {};
     return childExitCode(status);
 }

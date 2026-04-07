@@ -83,10 +83,6 @@ fn encodeCodepoints(buf: *[32]u8, cell: host.HostScreenCell) []const u8 {
     return buf[0..len];
 }
 
-fn isDefaultColor(color: host.HostColor) bool {
-    return color.kind == .default;
-}
-
 const StyleState = struct {
     fg: host.HostColor = .{},
     bg: host.HostColor = .{},
@@ -163,7 +159,7 @@ fn lineVisibleEnd(line: host.HostScreenLine) usize {
     var col = line.cells.len;
     while (col > 0) {
         const cell = line.cells[col - 1];
-        if (cell.width == 0 or cell.chars_len == 0) {
+        if (cell.width == 0) {
             col -= 1;
             continue;
         }
@@ -322,16 +318,6 @@ pub fn doRender() void {
     freeLastFrame();
     last_frame = snapshot;
 
-    // restore state to outer after exit
-    restoreTerminalStateForFutureOutput();
-    moveCursor(snapshot.cursor_row, snapshot.cursor_col);
-
-    if (snapshot.cursor_visible != global_output_state.cursor_visible) {
-        writeBytes(if (snapshot.cursor_visible) "\x1b[?25h" else "\x1b[?25l");
-        global_output_state.cursor_visible = snapshot.cursor_visible;
-    } else if (snapshot.cursor_visible) {
-        writeBytes("\x1b[?25h");
-    }
 }
 
 pub fn setGlobalSessionHost(h: *host.SessionHost) void {
@@ -344,6 +330,17 @@ pub fn reset() void {
     needs_render = true;
 }
 
+pub fn shutdown() void {
+    if (global_output_state.alt_screen) {
+        writeBytes("\x1b[?1049l");
+    }
+    writeBytes("\x1b[?25h");
+    resetStyle();
+    writeBytes("\x1b(B");
+    freeLastFrame();
+    global_output_state = .{};
+    needs_render = false;
+}
 
 fn restoreTerminalStateForFutureOutput() void {
     resetStyle();

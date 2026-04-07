@@ -16,7 +16,6 @@ pub const HostColor = struct {
 
 pub const HostCellAttrs = struct {
     bold: bool = false,
-    dim: bool = false,
     italic: bool = false,
     underline: bool = false,
     blink: bool = false,

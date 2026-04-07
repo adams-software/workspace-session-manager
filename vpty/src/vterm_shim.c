@@ -58,7 +58,10 @@ static VTermScreenCallbacks screen_cbs = {
 };
 
 static msr_vterm_color convert_color(VTermColor color) {
-  msr_vterm_color out = {0, 0, 0, 0, 0};
+  msr_vterm_color out = {0};
+  out.is_default_fg = VTERM_COLOR_IS_DEFAULT_FG(&color) ? 1 : 0;
+  out.is_default_bg = VTERM_COLOR_IS_DEFAULT_BG(&color) ? 1 : 0;
+
   if (VTERM_COLOR_IS_INDEXED(&color)) {
     out.type = 1;
     out.palette_index = color.indexed.idx;

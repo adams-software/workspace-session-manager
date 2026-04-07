@@ -151,10 +151,17 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+    const side_effects = b.createModule(.{
+        .root_source_file = b.path("vpty/src/side_effects.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
     vpty_root.linkSystemLibrary("util", .{});
     vpty_root.addImport("host", host_mod);
     vpty_root.addImport("vpty_terminal", vpty_terminal_mod);
     vpty_root.addImport("vpty_render", vpty_render_mod);
+    vpty_root.addImport("side_effects", side_effects);
 
     const vpty_exe = b.addExecutable(.{
         .name = "vpty",
