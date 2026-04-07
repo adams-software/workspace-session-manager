@@ -4,27 +4,44 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const vterm_screen_types_mod = b.addModule("vterm_screen_types", .{
+        .root_source_file = b.path("vpty/src/vterm_screen_types.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+
+    const terminal_state_vterm_mod = b.addModule("terminal_state_vterm", .{
+        .root_source_file = b.path("vpty/src/terminal_state_vterm.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    terminal_state_vterm_mod.addIncludePath(.{ .cwd_relative = "/usr/include" });
+    terminal_state_vterm_mod.addIncludePath(b.path("vpty/src"));
+    terminal_state_vterm_mod.addCSourceFile(.{ .file = b.path("vpty/src/vterm_shim.c") });
+    terminal_state_vterm_mod.linkSystemLibrary("vterm", .{});
+    terminal_state_vterm_mod.addImport("vterm_screen_types", vterm_screen_types_mod);
+
     const host_mod = b.addModule("host", .{
-        .root_source_file = b.path("src/host.zig"),
+        .root_source_file = b.path("shared/src/host.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
     host_mod.linkSystemLibrary("util", .{});
-    host_mod.addIncludePath(.{ .cwd_relative = "/usr/include" });
-    host_mod.addIncludePath(b.path("src"));
-    host_mod.addCSourceFile(.{ .file = b.path("src/vterm_shim.c") });
-    host_mod.linkSystemLibrary("vterm", .{});
+    host_mod.addImport("terminal_state_vterm", terminal_state_vterm_mod);
+    host_mod.addImport("vterm_screen_types", vterm_screen_types_mod);
 
     const protocol_mod = b.addModule("protocol", .{
-        .root_source_file = b.path("src/protocol.zig"),
+        .root_source_file = b.path("msr/src/protocol.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
 
     const client_mod = b.addModule("client", .{
-        .root_source_file = b.path("src/client.zig"),
+        .root_source_file = b.path("msr/src/client.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -34,7 +51,7 @@ pub fn build(b: *std.Build) void {
     client_mod.addImport("protocol", protocol_mod);
 
     const nested_client_mod = b.addModule("nested_client", .{
-        .root_source_file = b.path("src/nested_client.zig"),
+        .root_source_file = b.path("msr/src/nested_client.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -43,7 +60,7 @@ pub fn build(b: *std.Build) void {
     nested_client_mod.addImport("protocol", protocol_mod);
 
     const server_mod = b.addModule("server", .{
-        .root_source_file = b.path("src/server.zig"),
+        .root_source_file = b.path("msr/src/server.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -51,7 +68,7 @@ pub fn build(b: *std.Build) void {
     server_mod.addImport("host", host_mod);
     server_mod.addImport("protocol", protocol_mod);
     const server_model_mod = b.createModule(.{
-        .root_source_file = b.path("src/server_model.zig"),
+        .root_source_file = b.path("msr/src/server_model.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -60,7 +77,7 @@ pub fn build(b: *std.Build) void {
     server_mod.addImport("server_model", server_model_mod);
 
     const attach_runtime_mod = b.addModule("attach_runtime", .{
-        .root_source_file = b.path("src/attach_runtime.zig"),
+        .root_source_file = b.path("msr/src/attach_runtime.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -70,21 +87,21 @@ pub fn build(b: *std.Build) void {
     attach_runtime_mod.addImport("protocol", protocol_mod);
 
     const argv_parse_mod = b.addModule("argv_parse", .{
-        .root_source_file = b.path("src/argv_parse.zig"),
+        .root_source_file = b.path("msr/src/argv_parse.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
 
     const command_spec_mod = b.addModule("command_spec", .{
-        .root_source_file = b.path("src/command_spec.zig"),
+        .root_source_file = b.path("msr/src/command_spec.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
 
     const cli_parse_mod = b.addModule("cli_parse", .{
-        .root_source_file = b.path("src/cli_parse.zig"),
+        .root_source_file = b.path("msr/src/cli_parse.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -93,7 +110,7 @@ pub fn build(b: *std.Build) void {
     cli_parse_mod.addImport("command_spec", command_spec_mod);
 
     const exe_root = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
+        .root_source_file = b.path("msr/src/main.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -114,14 +131,14 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(exe);
 
     const vpty_terminal_mod = b.addModule("vpty_terminal", .{
-        .root_source_file = b.path("src/vpty_terminal.zig"),
+        .root_source_file = b.path("vpty/src/vpty_terminal.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
 
     const vpty_render_mod = b.addModule("vpty_render", .{
-        .root_source_file = b.path("src/vpty_render.zig"),
+        .root_source_file = b.path("vpty/src/vpty_render.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -129,7 +146,7 @@ pub fn build(b: *std.Build) void {
     vpty_render_mod.addImport("host", host_mod);
 
     const vpty_root = b.createModule(.{
-        .root_source_file = b.path("src/vpty_main.zig"),
+        .root_source_file = b.path("vpty/src/vpty_main.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -146,7 +163,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(vpty_exe);
 
     const alt_root = b.createModule(.{
-        .root_source_file = b.path("src/alt.zig"),
+        .root_source_file = b.path("alt/src/main.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -160,36 +177,34 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(alt_exe);
 
     const terminal_state_vterm_test_root = b.createModule(.{
-        .root_source_file = b.path("src/terminal_state_vterm.zig"),
+        .root_source_file = b.path("vpty/src/terminal_state_vterm.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
     terminal_state_vterm_test_root.addIncludePath(.{ .cwd_relative = "/usr/include" });
-    terminal_state_vterm_test_root.addIncludePath(b.path("src"));
-    terminal_state_vterm_test_root.addCSourceFile(.{ .file = b.path("src/vterm_shim.c") });
+    terminal_state_vterm_test_root.addIncludePath(b.path("vpty/src"));
+    terminal_state_vterm_test_root.addCSourceFile(.{ .file = b.path("vpty/src/vterm_shim.c") });
     terminal_state_vterm_test_root.linkSystemLibrary("vterm", .{});
     const terminal_state_vterm_tests = b.addTest(.{
         .root_module = terminal_state_vterm_test_root,
     });
 
     const host_test_root = b.createModule(.{
-        .root_source_file = b.path("src/host.zig"),
+        .root_source_file = b.path("shared/src/host.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
-    host_test_root.addIncludePath(.{ .cwd_relative = "/usr/include" });
-    host_test_root.addIncludePath(b.path("src"));
-    host_test_root.addCSourceFile(.{ .file = b.path("src/vterm_shim.c") });
-    host_test_root.linkSystemLibrary("vterm", .{});
+    host_test_root.addImport("terminal_state_vterm", terminal_state_vterm_mod);
+    host_test_root.addImport("vterm_screen_types", vterm_screen_types_mod);
     const host_tests = b.addTest(.{
         .root_module = host_test_root,
     });
 
     const protocol_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/protocol.zig"),
+            .root_source_file = b.path("msr/src/protocol.zig"),
             .target = target,
             .optimize = optimize,
             .link_libc = true,
@@ -197,7 +212,7 @@ pub fn build(b: *std.Build) void {
     });
 
     const server_test_root = b.createModule(.{
-        .root_source_file = b.path("src/server.zig"),
+        .root_source_file = b.path("msr/src/server.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -210,7 +225,7 @@ pub fn build(b: *std.Build) void {
     });
 
     const client_test_root = b.createModule(.{
-        .root_source_file = b.path("src/client.zig"),
+        .root_source_file = b.path("msr/src/client.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -223,7 +238,7 @@ pub fn build(b: *std.Build) void {
     });
 
     const client_integration_root = b.createModule(.{
-        .root_source_file = b.path("src/client_integration_test.zig"),
+        .root_source_file = b.path("msr/src/client_integration_test.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -239,7 +254,7 @@ pub fn build(b: *std.Build) void {
     });
 
     const attach_runtime_logic_root = b.createModule(.{
-        .root_source_file = b.path("src/attach_runtime_logic_test.zig"),
+        .root_source_file = b.path("msr/src/attach_runtime_logic_test.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -253,7 +268,7 @@ pub fn build(b: *std.Build) void {
     });
 
     const argv_parse_test_root = b.createModule(.{
-        .root_source_file = b.path("src/argv_parse.zig"),
+        .root_source_file = b.path("msr/src/argv_parse.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -263,7 +278,7 @@ pub fn build(b: *std.Build) void {
     });
 
     const cli_parse_test_root = b.createModule(.{
-        .root_source_file = b.path("src/cli_parse.zig"),
+        .root_source_file = b.path("msr/src/cli_parse.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -275,7 +290,7 @@ pub fn build(b: *std.Build) void {
     });
 
     const server_model_test_root = b.createModule(.{
-        .root_source_file = b.path("src/server_model.zig"),
+        .root_source_file = b.path("msr/src/server_model.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -336,7 +351,7 @@ pub fn build(b: *std.Build) void {
     const test_cli_parse_step = b.step("test-cli-parse", "Run msr CLI parser tests");
     test_cli_parse_step.dependOn(&run_cli_parse_tests.step);
 
-    const smoke_cmd = b.addSystemCommand(&.{ "python3", "-u", "scripts/smoke_msr_binary.py" });
+    const smoke_cmd = b.addSystemCommand(&.{ "python3", "-u", "msr/scripts/smoke_msr_binary.py" });
     smoke_cmd.setCwd(b.path("."));
     const smoke_step = b.step("smoke-binary", "Run real-binary smoke test for msr");
     smoke_step.dependOn(b.getInstallStep());
