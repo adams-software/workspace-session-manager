@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 DSM_BIN="$ROOT_DIR/scripts/dsm"
 MSR_BIN="$ROOT_DIR/zig-out/bin/msr"
+VPTY_BIN="$ROOT_DIR/zig-out/bin/vpty"
+WSM_MENU_BIN="$ROOT_DIR/scripts/wsm_menu"
 
 err() { printf '%s\n' "$*" >&2; }
 out() { printf '%s\n' "$*"; }
@@ -11,7 +13,7 @@ out() { printf '%s\n' "$*"; }
 usage_body() {
   cat <<'EOU'
 NAME
-  wsm - workspace session manager for recursive workspace-wide session attach
+  wsm - workspace session manager for recursive workspace-wide sessions
 
 DESCRIPTION
   wsm wraps dsm/msr for multi-directory workspaces rooted at one tree.
@@ -31,9 +33,11 @@ USAGE
   wsm prev
   wsm next
   wsm list
+  wsm root
+  wsm menu
 
 COMMANDS
-  c, create     create a session at a canonical workspace-relative target
+  c, create     create and attach to a session at a canonical workspace-relative target
   a, attach     resolve a workspace-wide target/query and attach to it
   d, detach     detach the current session
   current       print the current canonical workspace-relative id
@@ -45,6 +49,8 @@ COMMANDS
   p, prev       delegate local previous-session navigation to DSM in the current node
   n, next       delegate local next-session navigation to DSM in the current node
   ls, list      list canonical ids under the workspace root
+  root          print the resolved workspace root 
+  menu, m       bring up interactive menu
 
 WORKSPACE ROOT
   --root=<path> or --root <path> overrides WSM_ROOT
@@ -63,25 +69,29 @@ EOU
 
 usage() {
   usage_body
+  cat <<EOF
+
+WORKSPACE:
+  $WSM_ROOT_RESOLVED
+
+EOF
 }
 
 nested_usage() {
+  usage_body
+  cat <<EOF
+
+WORKSPACE:
+  $WSM_ROOT_RESOLVED
+EOF
   local current_id="$1"
   local root="$2"
   cat <<EOF2
-NESTED MODE
-  current session: $current_id
-  workspace root: $root
 
-  In this context:
-    d detaches the current session
-    current prints the current canonical workspace-relative id
-    attach resolves globally under the workspace root
-    status and exists resolve globally under the workspace root
-    first/last/prev/next delegate local navigation to DSM in the current node
+SESSION:
+  $current_id
 
 EOF2
-  usage_body
 }
 
 ROOT_OVERRIDE=""
@@ -93,13 +103,45 @@ elif [[ $# -ge 2 && "$1" == "--root" ]]; then
   shift 2
 fi
 
+expand_path() {
+  local p="${1:-}"
+  case "$p" in
+    "~") printf '%s\n' "$HOME" ;;
+    "~/"*) printf '%s/%s\n' "$HOME" "${p#~/}" ;;
+    *) printf '%s\n' "$p" ;;
+  esac
+}
+expand_user_path() {
+  local p="${1:-}"
+  case "$p" in
+    "~")
+      p="$HOME"
+      ;;
+    "~/"*)
+      p="$HOME/${p#\~/}"
+      ;;
+  esac
+  printf '%s\n' "$p"
+}
+
+normalize_path() {
+  local p
+  p="$(expand_user_path "${1:-}")"
+
+  if [[ "$p" != /* ]]; then
+    p="$PWD/$p"
+  fi
+
+  printf '%s\n' "$p"
+}
+
 resolve_root() {
   if [[ -n "$ROOT_OVERRIDE" ]]; then
-    printf '%s\n' "$ROOT_OVERRIDE"
+    normalize_path "$ROOT_OVERRIDE"
     return
   fi
   if [[ -n "${WSM_ROOT:-}" ]]; then
-    printf '%s\n' "$WSM_ROOT"
+    normalize_path "$WSM_ROOT"
     return
   fi
   pwd
@@ -218,11 +260,12 @@ create_canonical() {
   sock="$(sock_for_canonical "$id")"
   dir="$(dirname -- "$sock")"
   mkdir -p "$dir"
+
   if [[ $# -gt 1 ]]; then
     shift
-    env WSM_ROOT="$WSM_ROOT_RESOLVED" "$MSR_BIN" create "$sock" -- "$@"
+    env WSM_ROOT="$WSM_ROOT_RESOLVED" "$MSR_BIN" create -a "$sock" -- "$VPTY_BIN" -- "$@"
   else
-    env WSM_ROOT="$WSM_ROOT_RESOLVED" "$MSR_BIN" create "$sock"
+    env WSM_ROOT="$WSM_ROOT_RESOLVED" "$MSR_BIN" create -a "$sock" -- "$VPTY_BIN" -- "$SHELL" -i
   fi
 }
 
@@ -257,7 +300,9 @@ case "$cmd" in
   c|create)
     [[ $# -ge 1 ]] || { err "wsm: create requires <target>"; exit 1; }
     target="$1"
+    [[ "$target" != -* ]] || { err "wsm: create requires <target>; got flag-like value: $target"; exit 1; }
     shift || true
+
     if [[ ${1:-} == -- ]]; then
       shift || true
       create_canonical "$target" "$@"
@@ -392,9 +437,18 @@ case "$cmd" in
     list_ids
     ;;
 
+  root)
+    out "$WSM_ROOT_RESOLVED"
+    ;;
+
+  menu|m)
+    exec "$WSM_MENU_BIN" --root "$WSM_ROOT_RESOLVED"
+    ;;
+
   *)
     err "wsm: unknown command: $cmd"
     usage
     exit 1
     ;;
 esac
+

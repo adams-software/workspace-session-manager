@@ -145,6 +145,20 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(vpty_exe);
 
+    const alt_root = b.createModule(.{
+        .root_source_file = b.path("src/alt.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    alt_root.linkSystemLibrary("util", .{});
+
+    const alt_exe = b.addExecutable(.{
+        .name = "alt",
+        .root_module = alt_root,
+    });
+    b.installArtifact(alt_exe);
+
     const terminal_state_vterm_test_root = b.createModule(.{
         .root_source_file = b.path("src/terminal_state_vterm.zig"),
         .target = target,

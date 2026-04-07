@@ -1,0 +1,344 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+WSM_BIN="$ROOT_DIR/scripts/wsm"
+
+err() { printf '%s\n' "$*" >&2; }
+out() { printf '%s\n' "$*"; }
+
+ROOT_OVERRIDE=""
+
+if [[ $# -ge 1 && "$1" == --root=* ]]; then
+  ROOT_OVERRIDE="${1#--root=}"
+  shift
+elif [[ $# -ge 2 && "$1" == "--root" ]]; then
+  ROOT_OVERRIDE="$2"
+  shift 2
+fi
+
+wsm_cmd() {
+  if [[ -n "$ROOT_OVERRIDE" ]]; then
+    "$WSM_BIN" --root "$ROOT_OVERRIDE" "$@"
+  else
+    "$WSM_BIN" "$@"
+  fi
+}
+
+CURRENT_ROOT=""
+CURRENT_SESSION=""
+CURRENT_STATUS=""
+
+read_key() {
+  local key
+  IFS= read -rsn1 key < /dev/tty || return 1
+
+  if [[ "$key" == $'\e' ]]; then
+    local rest=""
+    IFS= read -rsn1 -t 0.01 rest < /dev/tty || true
+    if [[ -n "$rest" ]]; then
+      key+="$rest"
+      while IFS= read -rsn1 -t 0.001 rest < /dev/tty; do
+        key+="$rest"
+      done
+    fi
+  fi
+
+  printf '%s' "$key"
+}
+
+prompt_line() {
+  local prompt="$1"
+  local buf=""
+  local key
+
+  while true; do
+    printf '\r\033[2K%s%s' "$prompt" "$buf" > /dev/tty
+    key="$(read_key)" || return 1
+
+    case "$key" in
+      $'\e')
+        printf '\n' > /dev/tty
+        return 130
+        ;;
+      $'\n'|$'\r')
+        printf '\n' > /dev/tty
+        printf '%s' "$buf"
+        return 0
+        ;;
+      $'\177'|$'\010')
+        if [[ -n "$buf" ]]; then
+          buf="${buf%?}"
+        fi
+        ;;
+      $'\e['*)
+        ;;
+      [[:print:]])
+        buf+="$key"
+        ;;
+    esac
+  done
+}
+
+wait_back() {
+  printf '\n[enter/esc] back... ' > /dev/tty
+  while true; do
+    local key
+    key="$(read_key)" || return 0
+    case "$key" in
+      $'\e'|$'\n'|$'\r')
+        printf '\n' > /dev/tty
+        return 0
+        ;;
+    esac
+  done
+}
+
+pause() {
+  wait_back
+}
+
+refresh_context() {
+  CURRENT_ROOT="${ROOT_OVERRIDE:-${WSM_ROOT:-$PWD}}"
+
+  if current="$(wsm_cmd current 2>/dev/null)"; then
+    CURRENT_SESSION="$current"
+    if status="$(wsm_cmd status 2>/dev/null)"; then
+      CURRENT_STATUS="$status"
+    else
+      CURRENT_STATUS="attached"
+    fi
+  else
+    CURRENT_SESSION=""
+    CURRENT_STATUS="not attached"
+  fi
+}
+
+clear_screen() {
+  printf '\033[H\033[2J'
+}
+
+render_header() {
+  clear_screen
+  printf 'WSM MENU\n'
+  printf '========\n\n'
+  printf 'root: %s\n' "$CURRENT_ROOT"
+  if [[ -n "$CURRENT_SESSION" ]]; then
+    printf 'current: %s\n' "$CURRENT_SESSION"
+  else
+    printf 'current: none\n'
+  fi
+  printf 'status: %s\n' "$CURRENT_STATUS"
+  printf '\n'
+}
+
+render_menu() {
+  printf '[a] attach\n'
+  printf '[c] create\n'
+  printf '[n] next\n'
+  printf '[p] prev\n'
+  printf '[d] detach\n'
+  printf '[s] status\n'
+  printf '[l] list\n'
+  printf '[r] refresh\n'
+  printf '[q] quit\n'
+  printf '\n'
+}
+
+list_ids() {
+  wsm_cmd list
+}
+
+attach_flow() {
+  local query choice
+  local -a matches=()
+
+  while true; do
+    render_header
+    printf 'ATTACH\n'
+    printf '%s\n\n' '----'
+    printf 'search sessions by substring.\n'
+    printf 'blank query shows all sessions.\n'
+    printf 'esc or q cancels.\n\n'
+
+    query="$(prompt_line 'search> ')" || {
+      rc=$?
+      [[ $rc -eq 130 ]] && return 0
+      return 0
+    }
+    [[ "$query" == "q" ]] && return 0
+
+    mapfile -t all_ids < <(list_ids)
+    matches=()
+
+    local q_lc id id_lc
+    q_lc="${query,,}"
+
+    for id in "${all_ids[@]}"; do
+      if [[ -z "$q_lc" ]]; then
+        matches+=("$id")
+        continue
+      fi
+
+      id_lc="${id,,}"
+      if [[ "$id_lc" == *"$q_lc"* ]]; then
+        matches+=("$id")
+      fi
+    done
+    render_header
+    printf 'ATTACH\n'
+    printf '%s\n\n' '----'
+    printf 'query: %s\n\n' "${query:-<all>}"
+
+    if [[ ${#matches[@]} -eq 0 ]]; then
+      printf 'no matches\n\n'
+      pause
+      continue
+    fi
+
+    local i
+    for i in "${!matches[@]}"; do
+      printf '  %d) %s\n' "$((i + 1))" "${matches[$i]}"
+    done
+
+    printf '\n'
+
+    choice="$(prompt_line 'select number (enter to search again, q to cancel)> ')" || {
+      rc=$?
+      [[ $rc -eq 130 ]] && return 0
+      return 0
+    }
+    [[ -z "$choice" ]] && continue
+    [[ "$choice" == "q" ]] && return 0
+
+    if [[ ! "$choice" =~ ^[0-9]+$ ]]; then
+      printf '\ninvalid selection\n'
+      pause
+      continue
+    fi
+
+    if (( choice < 1 || choice > ${#matches[@]} )); then
+      printf '\nout of range\n'
+      pause
+      continue
+    fi
+
+    wsm_cmd attach "${matches[$((choice - 1))]}"
+    return 0
+  done
+}
+
+create_flow() {
+  local target
+  render_header
+  printf 'CREATE\n'
+  printf '%s\n\n' '----'
+  printf 'enter a canonical workspace-relative target.\n'
+  printf 'examples: api/0, services/backend/dev\n'
+  printf 'blank input cancels. esc goes back.\n\n'
+  target="$(prompt_line 'target> ')" || {
+    rc=$?
+    [[ $rc -eq 130 ]] && return 0
+    return 0
+  }
+
+  [[ -z "$target" ]] && return 0
+  if [[ "$target" == -* ]]; then
+    printf '\ninvalid target: %s\n' "$target"
+    pause
+    return 1
+  fi
+
+  wsm_cmd create "$target"
+}
+
+next_flow() {
+  if [[ -z "$CURRENT_SESSION" ]]; then
+    printf '\nno current session for next\n'
+    pause
+    return 1
+  fi
+  wsm_cmd next
+}
+
+prev_flow() {
+  if [[ -z "$CURRENT_SESSION" ]]; then
+    printf '\nno current session for prev\n'
+    pause
+    return 1
+  fi
+  wsm_cmd prev
+}
+
+detach_flow() {
+  if [[ -z "$CURRENT_SESSION" ]]; then
+    printf '\nno current session to detach\n'
+    pause
+    return 1
+  fi
+  wsm_cmd detach
+}
+
+status_flow() {
+  render_header
+  printf 'STATUS\n'
+  printf '%s\n\n' '----'
+
+  if [[ -n "$CURRENT_SESSION" ]]; then
+    if status_out="$(wsm_cmd status 2>&1)"; then
+      printf '%s\n' "$status_out"
+    else
+      printf '%s\n' "$status_out"
+    fi
+  else
+    printf 'no current session\n'
+  fi
+
+  printf '\n'
+  pause
+}
+
+list_flow() {
+  render_header
+  printf '%s\n' 'LIST'
+  printf '%s\n\n' '----'
+  if ! list_ids; then
+    printf '%s\n' 'no sessions found'
+  fi
+  printf '\n'
+  pause
+}
+
+main_loop() {
+  local choice
+  while true; do
+    refresh_context
+    render_header
+    render_menu
+        printf 'choice> '
+    choice="$(read_key)" || exit 0
+    printf '\n'
+
+    case "$choice" in
+      $'\e')
+        exit 0
+        ;;
+      [Aa]) attach_flow ;;
+      [Cc]) create_flow ;;
+      [Nn]) next_flow ;;
+      [Pp]) prev_flow ;;
+      [Dd]) detach_flow ;;
+      [Ss]) status_flow ;;
+      [Ll]) list_flow ;;
+      [Rr]) ;;
+      [Qq]) exit 0 ;;
+      '') ;;
+      *)
+        printf '\nunknown choice: %s\n' "$choice"
+        pause
+        ;;
+    esac
+  done
+}
+
+main_loop
