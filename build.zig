@@ -50,6 +50,7 @@ pub fn build(b: *std.Build) void {
     client_mod.addImport("host", host_mod);
     client_mod.addImport("protocol", protocol_mod);
 
+
     const nested_client_mod = b.addModule("nested_client", .{
         .root_source_file = b.path("msr/src/nested_client.zig"),
         .target = target,
@@ -87,11 +88,12 @@ pub fn build(b: *std.Build) void {
     attach_runtime_mod.addImport("protocol", protocol_mod);
 
     const argv_parse_mod = b.addModule("argv_parse", .{
-        .root_source_file = b.path("shared/src/argv_parse.zig"),
+        .root_source_file = b.path("msr/src/argv_parse.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
+
 
     const command_spec_mod = b.addModule("command_spec", .{
         .root_source_file = b.path("msr/src/command_spec.zig"),
@@ -275,7 +277,7 @@ pub fn build(b: *std.Build) void {
     });
 
     const argv_parse_test_root = b.createModule(.{
-        .root_source_file = b.path("shared/src/argv_parse.zig"),
+        .root_source_file = b.path("msr/src/argv_parse.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -306,6 +308,40 @@ pub fn build(b: *std.Build) void {
     const server_model_tests = b.addTest(.{
         .root_module = server_model_test_root,
     });
+
+    // msr v2 stuff
+    const session_core = b.addModule("session_core", .{
+        .root_source_file = b.path("msr/src/session_core"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    const session_wire = b.addModule("session_wire", .{
+        .root_source_file = b.path("msr/src/session_wire"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    session_wire.addImport("session_core", session_core);
+
+    const session_client = b.addModule("session_client", .{
+        .root_source_file = b.path("msr/src/session_client.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    session_client.addImport("session_core", session_core);
+    session_client.addImport("session_wire", session_wire);
+
+    const attach_bridge = b.addModule("session_server", .{
+        .root_source_file = b.path("msr/src/session_server.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    attach_bridge.addImport("session_core", session_core);
+    attach_bridge.addImport("session_wire", session_wire);
+    attach_bridge.addImport("session_client", session_client);
 
     const run_terminal_state_vterm_tests = b.addRunArtifact(terminal_state_vterm_tests);
     const run_host_tests = b.addRunArtifact(host_tests);

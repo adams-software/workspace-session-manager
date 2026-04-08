@@ -185,7 +185,7 @@ attach_flow() {
           query=""
           continue
         fi
-        return 0
+        break
       fi
       return 0
     }
@@ -228,7 +228,7 @@ attach_flow() {
     prompt_line 'select number (enter to search again, esc to cancel)> ' choice || {
       rc=$?
       if [[ $rc -eq 130 ]]; then
-        return 0
+        break
       fi
       return 0
     }
@@ -346,8 +346,8 @@ main_loop() {
       $'\e')
         exit 0
         ;;
-      [Aa]) attach_flow; exit $? ;;
-      [Cc]) create_flow; exit $? ;;
+      [Aa]) attach_flow ;;
+      [Cc]) create_flow ;;
       [Nn]) next_flow; exit $? ;;
       [Pp]) prev_flow; exit $? ;;
       [Dd]) detach_flow; exit $? ;;

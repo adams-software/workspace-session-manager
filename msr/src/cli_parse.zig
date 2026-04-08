@@ -164,9 +164,15 @@ pub fn parseArgv(allocator: std.mem.Allocator, argv: []const []const u8) (std.me
     if (parsed.command == null) return .{ .fail = .{ .kind = .no_command } };
 
     var current_session: ?[]const u8 = envCurrentSession();
+    var positionals_offset: usize = 0;
     if (argv_parse.findOption(parsed, &.{ "session" })) |opt| {
-        if (opt.value == null) return .{ .fail = .{ .kind = .missing_argument, .command = null } };
-        current_session = opt.value.?;
+        if (opt.value) |value| {
+            current_session = value;
+        } else {
+            if (parsed.positionals.len == 0) return .{ .fail = .{ .kind = .missing_argument, .command = null } };
+            current_session = parsed.positionals[0];
+            positionals_offset = 1;
+        }
     }
 
     const kind = commandKindFor(parsed.command.?) orelse return .{ .fail = .{ .kind = .unknown_command } };
@@ -186,9 +192,9 @@ pub fn parseArgv(allocator: std.mem.Allocator, argv: []const []const u8) (std.me
             const attach_after_create = hasFlag(parsed, .create, "a") or hasFlag(parsed, .create, "attach");
             if (flagHasUnexpectedValue(parsed, .create, "vterm")) return .{ .fail = .{ .kind = .unexpected_argument, .command = .create } };
             const vterm = hasFlag(parsed, .create, "vterm");
-            if (parsed.positionals.len != 1) return .{ .fail = .{ .kind = .missing_argument, .command = .create } };
+            if (parsed.positionals.len - positionals_offset != 1) return .{ .fail = .{ .kind = .missing_argument, .command = .create } };
             return .{ .ok = .{ .current_session = current_session, .command = .{ .create = .{
-                .path = parsed.positionals[0],
+                .path = parsed.positionals[positionals_offset],
                 .attach_after_create = attach_after_create,
                 .vterm = vterm,
                 .child_argv = if (parsed.literal_tail) |tail| try allocator.dupe([]const u8, tail) else null,
@@ -197,35 +203,36 @@ pub fn parseArgv(allocator: std.mem.Allocator, argv: []const []const u8) (std.me
         .attach => {
             if (flagHasUnexpectedValue(parsed, .attach, "f") or flagHasUnexpectedValue(parsed, .attach, "force")) return .{ .fail = .{ .kind = .unexpected_argument, .command = .attach } };
             const force = hasFlag(parsed, .attach, "f") or hasFlag(parsed, .attach, "force");
-            if (parsed.positionals.len != 1) return .{ .fail = .{ .kind = .missing_argument, .command = .attach } };
-            return .{ .ok = .{ .current_session = current_session, .command = .{ .attach = .{ .target = parsed.positionals[0], .force = force } } } };
+            if (parsed.positionals.len - positionals_offset != 1) return .{ .fail = .{ .kind = .missing_argument, .command = .attach } };
+            return .{ .ok = .{ .current_session = current_session, .command = .{ .attach = .{ .target = parsed.positionals[positionals_offset], .force = force } } } };
         },
         .resize => {
             if (flagHasUnexpectedValue(parsed, .resize, "f") or flagHasUnexpectedValue(parsed, .resize, "force")) return .{ .fail = .{ .kind = .unexpected_argument, .command = .resize } };
             const force = hasFlag(parsed, .resize, "f") or hasFlag(parsed, .resize, "force");
-            if (parsed.positionals.len != 3) return .{ .fail = .{ .kind = .missing_argument, .command = .resize } };
-            const cols = parseU16(parsed.positionals[1]) orelse return .{ .fail = .{ .kind = .invalid_argument, .command = .resize } };
-            const rows = parseU16(parsed.positionals[2]) orelse return .{ .fail = .{ .kind = .invalid_argument, .command = .resize } };
-            return .{ .ok = .{ .current_session = current_session, .command = .{ .resize = .{ .path = parsed.positionals[0], .cols = cols, .rows = rows, .force = force } } } };
+            if (parsed.positionals.len - positionals_offset != 3) return .{ .fail = .{ .kind = .missing_argument, .command = .resize } };
+            const cols = parseU16(parsed.positionals[positionals_offset + 1]) orelse return .{ .fail = .{ .kind = .invalid_argument, .command = .resize } };
+            const rows = parseU16(parsed.positionals[positionals_offset + 2]) orelse return .{ .fail = .{ .kind = .invalid_argument, .command = .resize } };
+            return .{ .ok = .{ .current_session = current_session, .command = .{ .resize = .{ .path = parsed.positionals[positionals_offset], .cols = cols, .rows = rows, .force = force } } } };
         },
         .terminate => {
             if (flagHasUnexpectedValue(parsed, .terminate, "f") or flagHasUnexpectedValue(parsed, .terminate, "force")) return .{ .fail = .{ .kind = .unexpected_argument, .command = .terminate } };
             const force = hasFlag(parsed, .terminate, "f") or hasFlag(parsed, .terminate, "force");
-            if (parsed.positionals.len < 1 or parsed.positionals.len > 2) return .{ .fail = .{ .kind = .missing_argument, .command = .terminate } };
-            const sig: SignalSpec = if (force) .kill else if (parsed.positionals.len == 2) signalFromString(parsed.positionals[1]) orelse return .{ .fail = .{ .kind = .invalid_argument, .command = .terminate } } else .term;
-            return .{ .ok = .{ .current_session = current_session, .command = .{ .terminate = .{ .path = parsed.positionals[0], .signal = sig } } } };
+            const positional_count = parsed.positionals.len - positionals_offset;
+            if (positional_count < 1 or positional_count > 2) return .{ .fail = .{ .kind = .missing_argument, .command = .terminate } };
+            const sig: SignalSpec = if (force) .kill else if (positional_count == 2) signalFromString(parsed.positionals[positionals_offset + 1]) orelse return .{ .fail = .{ .kind = .invalid_argument, .command = .terminate } } else .term;
+            return .{ .ok = .{ .current_session = current_session, .command = .{ .terminate = .{ .path = parsed.positionals[positionals_offset], .signal = sig } } } };
         },
         .wait => {
-            if (parsed.positionals.len != 1) return .{ .fail = .{ .kind = .missing_argument, .command = .wait } };
-            return .{ .ok = .{ .current_session = current_session, .command = .{ .wait = .{ .path = parsed.positionals[0] } } } };
+            if (parsed.positionals.len - positionals_offset != 1) return .{ .fail = .{ .kind = .missing_argument, .command = .wait } };
+            return .{ .ok = .{ .current_session = current_session, .command = .{ .wait = .{ .path = parsed.positionals[positionals_offset] } } } };
         },
         .status => {
-            if (parsed.positionals.len != 1) return .{ .fail = .{ .kind = .missing_argument, .command = .status } };
-            return .{ .ok = .{ .current_session = current_session, .command = .{ .status = .{ .path = parsed.positionals[0] } } } };
+            if (parsed.positionals.len - positionals_offset != 1) return .{ .fail = .{ .kind = .missing_argument, .command = .status } };
+            return .{ .ok = .{ .current_session = current_session, .command = .{ .status = .{ .path = parsed.positionals[positionals_offset] } } } };
         },
         .exists => {
-            if (parsed.positionals.len != 1) return .{ .fail = .{ .kind = .missing_argument, .command = .exists } };
-            return .{ .ok = .{ .current_session = current_session, .command = .{ .exists = .{ .path = parsed.positionals[0] } } } };
+            if (parsed.positionals.len - positionals_offset != 1) return .{ .fail = .{ .kind = .missing_argument, .command = .exists } };
+            return .{ .ok = .{ .current_session = current_session, .command = .{ .exists = .{ .path = parsed.positionals[positionals_offset] } } } };
         },
     }
 }
