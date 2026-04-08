@@ -167,87 +167,121 @@ list_ids() {
 }
 
 attach_flow() {
-  local query="" choice
-  local -a matches=()
+  local query=""
+  local -a matches=() visible=() all_ids=()
+  local selection=0
+  local max_visible=10
+  local key id
+
+  mapfile -t all_ids < <(list_ids)
 
   while true; do
-    render_header
-    printf 'ATTACH\n'
-    printf '%s\n\n' '----'
-    printf 'search sessions by substring.\n'
-    printf 'blank query shows all sessions.\n'
-    printf 'esc goes back.\n\n'
+    matches=()
+    for id in "${all_ids[@]}"; do
+      if [[ -z "$query" || "$id" == "$query"* ]]; then
+        matches+=("$id")
+      fi
+    done
 
-    prompt_line 'search> ' query || {
-      rc=$?
-      if [[ $rc -eq 130 ]]; then
+    if (( ${#matches[@]} == 0 )); then
+      selection=0
+    else
+      if (( selection >= ${#matches[@]} )); then
+        selection=$((${#matches[@]} - 1))
+      fi
+      if (( selection < 0 )); then
+        selection=0
+      fi
+    fi
+
+    visible=()
+    local limit=${#matches[@]}
+    if (( limit > max_visible )); then
+      limit=$max_visible
+    fi
+    local i
+    for ((i=0; i<limit; i++)); do
+      visible+=("${matches[$i]}")
+    done
+
+    render_header
+    printf 'ATTACH
+'
+    printf '%s
+
+' '----'
+    printf 'type a canonical prefix. enter attaches selection.
+'
+    printf 'up/down changes selection. esc clears/back.
+
+'
+    printf 'search> %s
+
+' "$query"
+
+    if (( ${#matches[@]} == 0 )); then
+      printf '  no matches
+'
+    else
+      for ((i=0; i<${#visible[@]}; i++)); do
+        if (( i == selection )); then
+          printf '> %s
+' "${visible[$i]}"
+        else
+          printf '  %s
+' "${visible[$i]}"
+        fi
+      done
+      if (( ${#matches[@]} > max_visible )); then
+        printf '
+  ... %d more
+' "$((${#matches[@]} - max_visible))"
+      fi
+    fi
+
+    printf '
+' > /dev/tty
+    key="$(read_key)" || return 0
+
+    case "$key" in
+      ''|$'
+'|$'')
+        if (( ${#matches[@]} > 0 )); then
+          wsm_cmd attach "${matches[$selection]}"
+          return 0
+        fi
+        ;;
+      $'\e')
         if [[ -n "$query" ]]; then
           query=""
-          continue
+          selection=0
+        else
+          return 0
         fi
-        break
-      fi
-      return 0
-    }
-
-    mapfile -t all_ids < <(list_ids)
-    matches=()
-
-    local q_lc id id_lc
-    q_lc="${query,,}"
-
-    for id in "${all_ids[@]}"; do
-      if [[ -z "$q_lc" ]]; then
-        matches+=("$id")
-        continue
-      fi
-
-      id_lc="${id,,}"
-      if [[ "$id_lc" == *"$q_lc"* ]]; then
-        matches+=("$id")
-      fi
-    done
-    render_header
-    printf 'ATTACH\n'
-    printf '%s\n\n' '----'
-    printf 'query: %s\n\n' "${query:-<all>}"
-
-    if [[ ${#matches[@]} -eq 0 ]]; then
-      printf 'no matches\n\n'
-      pause
-      continue
-    fi
-
-    local i
-    for i in "${!matches[@]}"; do
-      printf '  %d) %s\n' "$((i + 1))" "${matches[$i]}"
-    done
-
-    printf '\n'
-
-    prompt_line 'select number (enter to search again, esc to cancel)> ' choice || {
-      rc=$?
-      if [[ $rc -eq 130 ]]; then
-        break
-      fi
-      return 0
-    }
-    [[ -z "$choice" ]] && continue
-
-    if [[ ! "$choice" =~ ^[0-9]+$ ]]; then
-      printf '\ninvalid selection\n'
-      pause
-      continue
-    fi
-
-    if (( choice < 1 || choice > ${#matches[@]} )); then
-      printf '\nout of range\n'
-      pause
-      continue
-    fi
-
-    wsm_cmd attach "${matches[$((choice - 1))]}"
-    return 0
+        ;;
+      $'\e[A')
+        if (( ${#matches[@]} > 0 && selection > 0 )); then
+          selection=$((selection - 1))
+        fi
+        ;;
+      $'\e[B')
+        if (( ${#matches[@]} > 0 && selection + 1 < ${#matches[@]} && selection + 1 < max_visible )); then
+          selection=$((selection + 1))
+        fi
+        ;;
+      $''|$'')
+        if [[ -n "$query" ]]; then
+          query="${query%?}"
+          selection=0
+        fi
+        ;;
+      $'\e['*)
+        ;;
+      [[:print:]])
+        query+="$key"
+        selection=0
+        ;;
+    esac
   done
 }
 
