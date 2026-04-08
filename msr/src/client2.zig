@@ -1,6 +1,6 @@
 const std = @import("std");
-const core = @import("session_core");
-const wire = @import("session_wire");
+const core = @import("session_core2");
+const wire = @import("session_wire2");
 const c = @cImport({
     @cInclude("unistd.h");
     @cInclude("sys/socket.h");

@@ -185,14 +185,14 @@ test "argv_parse handles long option with equals" {
 }
 
 test "argv_parse treats bare long flag before positional as flag not valued option" {
-    const argv = [_][]const u8{ "create", "--vterm", "/tmp/x" };
+    const argv = [_][]const u8{ "create", "--attach", "/tmp/x" };
     const parsed = try parseArgv(std.testing.allocator, argv[0..]);
     defer std.testing.allocator.free(parsed.options);
     defer std.testing.allocator.free(parsed.positionals);
 
     try std.testing.expectEqualStrings("create", parsed.command.?);
     try std.testing.expectEqual(@as(usize, 1), parsed.options.len);
-    try std.testing.expectEqualStrings("vterm", parsed.options[0].name);
+    try std.testing.expectEqualStrings("attach", parsed.options[0].name);
     try std.testing.expect(parsed.options[0].value == null);
     try std.testing.expectEqual(@as(usize, 1), parsed.positionals.len);
     try std.testing.expectEqualStrings("/tmp/x", parsed.positionals[0]);

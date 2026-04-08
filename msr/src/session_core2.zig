@@ -53,7 +53,7 @@ pub const ForwardAction = union(enum) {
         };
     }
 
-    pub fn validate(self: ForwardAction) Error!void {
+    pub fn validate(self: ForwardAction) error{InvalidArgs}!void {
         switch (self) {
             .detach => {},
             .attach => |path| {

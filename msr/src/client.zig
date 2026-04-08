@@ -36,6 +36,7 @@ pub const ExitStatus = struct {
     signal: ?[]const u8 = null,
 };
 
+
 pub const SessionClient = struct {
     allocator: std.mem.Allocator,
     socket_path: []u8,
@@ -170,6 +171,11 @@ pub const SessionAttachment = struct {
         try protocol.writeFrame(self.fd, bytes);
     }
 
+    pub fn sendOwnerReady(self: *SessionAttachment) !void {
+        const bytes = try protocol.encodeOwnerReady(self.allocator);
+        defer self.allocator.free(bytes);
+        try protocol.writeFrame(self.fd, bytes);
+    }
     pub fn sendOwnerResize(self: *SessionAttachment, cols: u16, rows: u16) !void {
         const bytes = try protocol.encodeOwnerResize(self.allocator, .{ .cols = cols, .rows = rows });
         defer self.allocator.free(bytes);

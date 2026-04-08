@@ -220,9 +220,7 @@ pub fn runAttachBridge(allocator: std.mem.Allocator, attachment: *client.Session
             if (n == 0) {
                 stdin_open = false;
             } else {
-                std.debug.print("bridge: before attachment.write n={d}\n", .{n});
                 try attachment.write(in_buf[0..@intCast(n)]);
-                std.debug.print("bridge: after attachment.write n={d}\n", .{n});
             }
         }
 
@@ -272,9 +270,7 @@ fn pumpAttachmentToStdout(
                     const decoded = try allocator.alloc(u8, decoded_len);
                     defer allocator.free(decoded);
                     try std.base64.standard.Decoder.decode(decoded, data_msg.bytes_b64);
-                    std.debug.print("bridge: before stdout write n={d}\n", .{decoded.len});
                     writeAll(out_fd, decoded) catch return error.IoError;
-                    std.debug.print("bridge: after stdout write n={d}\n", .{decoded.len});
                 },
                 .owner_control_req => |req| {
                     const transition = try handleOwnerControlReq(allocator, attachment, req);

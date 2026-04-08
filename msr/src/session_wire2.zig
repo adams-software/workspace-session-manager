@@ -1,5 +1,5 @@
 const std = @import("std");
-const core = @import("session_core");
+const core = @import("session_core2");
 const c = @cImport({
     @cInclude("unistd.h");
 });
@@ -308,16 +308,28 @@ fn encodeSignal(sig: Signal) u8 {
     return @intFromEnum(sig);
 }
 
-fn decodeSignal(v: u8) !Signal {
-    return std.meta.intToEnum(Signal, v) catch Error.InvalidEnumValue;
-}
-
 fn encodeSessionStatus(status: SessionStatus) u8 {
     return @intFromEnum(status);
 }
 
+fn decodeSignal(v: u8) !Signal {
+    return switch (v) {
+        @intFromEnum(Signal.term) => .term,
+        @intFromEnum(Signal.int) => .int,
+        @intFromEnum(Signal.kill) => .kill,
+        else => Error.InvalidEnumValue,
+    };
+}
+
 fn decodeSessionStatus(v: u8) !SessionStatus {
-    return std.meta.intToEnum(SessionStatus, v) catch Error.InvalidEnumValue;
+    return switch (v) {
+        @intFromEnum(SessionStatus.starting) => .starting,
+        @intFromEnum(SessionStatus.running) => .running,
+        @intFromEnum(SessionStatus.exited) => .exited,
+        @intFromEnum(SessionStatus.idle) => .idle,
+        @intFromEnum(SessionStatus.closed) => .closed,
+        else => Error.InvalidEnumValue,
+    };
 }
 
 fn appendForwardAction(
@@ -609,7 +621,17 @@ pub fn readFrameOwned(
     var kind_buf: [1]u8 = undefined;
     try readExact(fd, &kind_buf);
 
-    const kind = std.meta.intToEnum(Kind, kind_buf[0]) catch return Error.BadMessageType;
+    const kind: Kind = switch (kind_buf[0]) {
+    @intFromEnum(Kind.control_req) => .control_req,
+    @intFromEnum(Kind.control_res) => .control_res,
+    @intFromEnum(Kind.owner_req) => .owner_req,
+    @intFromEnum(Kind.owner_res) => .owner_res,
+    @intFromEnum(Kind.owner_ready) => .owner_ready,
+    @intFromEnum(Kind.owner_resize) => .owner_resize,
+    @intFromEnum(Kind.stdin_bytes) => .stdin_bytes,
+    @intFromEnum(Kind.stdout_bytes) => .stdout_bytes,
+    else => return Error.BadMessageType,
+};
     const payload_len: usize = total_len - 1;
 
     const payload = try allocator.alloc(u8, payload_len);
@@ -758,16 +780,15 @@ test "wire2 owner req attach path roundtrip" {
         _ = c.close(fds[1]);
     }
 
-    try writeMessage(
-        std.testing.allocator,
-        fds[1],
-        .{
-            .owner_req = .{
-                .request_id = 42,
-                .action = .{ .attach = try std.testing.allocator.dupe(u8, "/tmp/next.sock") },
-            },
+    var msg_out = Message{
+        .owner_req = .{
+            .request_id = 42,
+            .action = .{ .attach = try std.testing.allocator.dupe(u8, "/tmp/next.sock") },
         },
-    );
+    };
+    defer msg_out.deinit(std.testing.allocator);
+
+    try writeMessage(std.testing.allocator, fds[1], msg_out);
 
     var msg = try readMessage(std.testing.allocator, fds[0], 4096);
     defer msg.deinit(std.testing.allocator);
@@ -792,15 +813,14 @@ test "wire2 control exit signal text roundtrip" {
         _ = c.close(fds[1]);
     }
 
-    try writeMessage(
-        std.testing.allocator,
-        fds[1],
-        .{
-            .control_res = .{
-                .exit = .{ .signal_text = try std.testing.allocator.dupe(u8, "SEGV") },
-            },
+    var msg_out = Message{
+        .control_res = .{
+            .exit = .{ .signal_text = try std.testing.allocator.dupe(u8, "SEGV") },
         },
-    );
+    };
+    defer msg_out.deinit(std.testing.allocator);
+
+    try writeMessage(std.testing.allocator, fds[1], msg_out);
 
     var msg = try readMessage(std.testing.allocator, fds[0], 4096);
     defer msg.deinit(std.testing.allocator);

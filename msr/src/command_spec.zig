@@ -79,7 +79,7 @@ pub fn hasFlagAlias(cmd: *const CommandSpec, alias: []const u8) bool {
 
 pub fn usageLine(cmd: *const CommandSpec) []const u8 {
     switch (cmd.id) {
-        .create => return "  msr create [-a|--attach] [--vterm] <path> [-- <cmd...>]\n",
+        .create => return "  msr create [-a|--attach] <path> [-- <cmd...>]\n",
         .attach => return "  msr attach [-f|--force] <path>\n",
         .detach => return "  msr detach\n",
         .current => return "  msr current\n",
@@ -118,7 +118,6 @@ pub fn shortUsage(id: CommandId) []const u8 {
 
 pub const create_flags = [_]FlagSpec{
     .{ .long = "attach", .short = 'a', .help = "attach immediately after the session becomes ready" },
-    .{ .long = "vterm", .help = "enable terminal-state snapshot/replay support for resumable attach" },
 };
 
 pub const create_positionals = [_]PositionalSpec{
@@ -159,7 +158,7 @@ pub const commands = [_]CommandSpec{
         .name = "create",
         .aliases = &.{ "c", "create" },
         .summary = "create a session",
-        .description = "Creates a persistent PTY-backed session at the given socket path. If no command is provided after --, the default interactive shell is used. --vterm enables terminal-state snapshot/replay support for resumable attach.",
+        .description = "Creates a persistent PTY-backed session at the given socket path. If no command is provided after --, the default interactive shell is used.",
         .positionals = &create_positionals,
         .flags = &create_flags,
         .examples = &.{
