@@ -61,6 +61,7 @@ read_key() {
 
 prompt_line() {
   local prompt="$1"
+  local __outvar="${2:-}"
   local buf=""
   local key
 
@@ -69,14 +70,18 @@ prompt_line() {
     key="$(read_key)" || return 1
 
     case "$key" in
+      ''|$'\n'|$'\r')
+        printf '\n' > /dev/tty
+        if [[ -n "$__outvar" ]]; then
+          printf -v "$__outvar" '%s' "$buf"
+        else
+          printf '%s' "$buf"
+        fi
+        return 0
+        ;;
       $'\e')
         printf '\n' > /dev/tty
         return 130
-        ;;
-      $'\n'|$'\r')
-        printf '\n' > /dev/tty
-        printf '%s' "$buf"
-        return 0
         ;;
       $'\177'|$'\010')
         if [[ -n "$buf" ]]; then
@@ -162,7 +167,7 @@ list_ids() {
 }
 
 attach_flow() {
-  local query choice
+  local query="" choice
   local -a matches=()
 
   while true; do
@@ -171,14 +176,19 @@ attach_flow() {
     printf '%s\n\n' '----'
     printf 'search sessions by substring.\n'
     printf 'blank query shows all sessions.\n'
-    printf 'esc or q cancels.\n\n'
+    printf 'esc goes back.\n\n'
 
-    query="$(prompt_line 'search> ')" || {
+    prompt_line 'search> ' query || {
       rc=$?
-      [[ $rc -eq 130 ]] && return 0
+      if [[ $rc -eq 130 ]]; then
+        if [[ -n "$query" ]]; then
+          query=""
+          continue
+        fi
+        return 0
+      fi
       return 0
     }
-    [[ "$query" == "q" ]] && return 0
 
     mapfile -t all_ids < <(list_ids)
     matches=()
@@ -215,13 +225,14 @@ attach_flow() {
 
     printf '\n'
 
-    choice="$(prompt_line 'select number (enter to search again, q to cancel)> ')" || {
+    prompt_line 'select number (enter to search again, esc to cancel)> ' choice || {
       rc=$?
-      [[ $rc -eq 130 ]] && return 0
+      if [[ $rc -eq 130 ]]; then
+        return 0
+      fi
       return 0
     }
     [[ -z "$choice" ]] && continue
-    [[ "$choice" == "q" ]] && return 0
 
     if [[ ! "$choice" =~ ^[0-9]+$ ]]; then
       printf '\ninvalid selection\n'
@@ -335,11 +346,11 @@ main_loop() {
       $'\e')
         exit 0
         ;;
-      [Aa]) attach_flow ;;
-      [Cc]) create_flow ;;
-      [Nn]) next_flow ;;
-      [Pp]) prev_flow ;;
-      [Dd]) detach_flow ;;
+      [Aa]) attach_flow; exit $? ;;
+      [Cc]) create_flow; exit $? ;;
+      [Nn]) next_flow; exit $? ;;
+      [Pp]) prev_flow; exit $? ;;
+      [Dd]) detach_flow; exit $? ;;
       [Ss]) status_flow ;;
       [Ll]) list_flow ;;
       [Rr]) ;;

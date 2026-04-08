@@ -87,7 +87,7 @@ pub fn build(b: *std.Build) void {
     attach_runtime_mod.addImport("protocol", protocol_mod);
 
     const argv_parse_mod = b.addModule("argv_parse", .{
-        .root_source_file = b.path("msr/src/argv_parse.zig"),
+        .root_source_file = b.path("shared/src/argv_parse.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -275,7 +275,7 @@ pub fn build(b: *std.Build) void {
     });
 
     const argv_parse_test_root = b.createModule(.{
-        .root_source_file = b.path("msr/src/argv_parse.zig"),
+        .root_source_file = b.path("shared/src/argv_parse.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,

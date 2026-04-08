@@ -292,12 +292,21 @@ pub fn main(init: std.process.Init) !u8 {
         };
 
         while (true) {
-            _ = session_server.step() catch |e| {
-                err("msr: internal server step failed: {s}\n", .{@errorName(e)});
-                _ = session_server.stop() catch {};
-                _ = session_host.close() catch {};
-                return 1;
+            const progressed = session_server.step() catch |e| blk: {
+                switch (e) {
+                    server.Error.ProtocolError => {
+                        err("msr: ignoring client protocol error\n", .{});
+                        break :blk false;
+                    },
+                    else => {
+                        err("msr: internal server step failed: {s}\n", .{@errorName(e)});
+                        _ = session_server.stop() catch {};
+                        _ = session_host.close() catch {};
+                        return 1;
+                    },
+                }
             };
+
             if (!session_server.hasOwner()) {
                 const drained = session_host.drainObservedPtyOutput() catch &[_][]u8{};
                 if (@TypeOf(drained) != *const [0][]u8) {
@@ -305,10 +314,12 @@ pub fn main(init: std.process.Init) !u8 {
                     std.heap.page_allocator.free(drained);
                 }
             }
+
             _ = session_host.refresh() catch {};
+
             switch (session_host.getState()) {
                 .running, .starting => {
-                    _ = c.usleep(10_000);
+                    if (!progressed) _ = c.usleep(1_000);
                     continue;
                 },
                 .exited => {
@@ -507,9 +518,30 @@ pub fn main(init: std.process.Init) !u8 {
                     const shell_argv = defaultShellArgv();
                     const child_argv = args.child_argv orelse shell_argv[0..];
 
+                    var existing_cli = client.SessionClient.init(std.heap.page_allocator, path) catch null;
+                    if (existing_cli) |*cli| {
+                        defer cli.deinit();
+                        _ = cli.status() catch {
+                            spawnHostDetached(argv[0], path, child_argv) catch return 1;
+                            if (!waitForReady(path, 2000)) return 1;
+                            if (args.attach_after_create) {
+                                if (current_session) |session| {
+                                    return runAttachNested(session, path, false);
+                                }
+                                return runAttachDirect(path, .exclusive);
+                            }
+                            return 0;
+                        };
+                        err("msr: session already exists at {s}\n", .{path});
+                        return 1;
+                    }
+
                     spawnHostDetached(argv[0], path, child_argv) catch return 1;
                     if (!waitForReady(path, 2000)) return 1;
                     if (args.attach_after_create) {
+                        if (current_session) |session| {
+                            return runAttachNested(session, path, false);
+                        }
                         return runAttachDirect(path, .exclusive);
                     }
                     return 0;

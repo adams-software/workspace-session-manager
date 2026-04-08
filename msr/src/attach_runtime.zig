@@ -61,7 +61,7 @@ fn writeAll(fd: c_int, bytes: []const u8) !void {
         const n = c.write(fd, bytes.ptr + off, bytes.len - off);
         if (n < 0) {
             const e = std.c.errno(-1);
-            if (e == .INTR) continue;
+            if (e == .INTR or e == .AGAIN) continue;
             return error.IoError;
         }
         if (n == 0) return error.IoError;
@@ -145,7 +145,7 @@ pub fn handleOwnerControlReq(allocator: std.mem.Allocator, attachment: *client.S
 
 pub fn runAttachBridge(allocator: std.mem.Allocator, attachment: *client.SessionAttachment, in_fd: c_int, out_fd: c_int) !BridgeExit {
     var stdin_open = true;
-    var in_buf: [4096]u8 = undefined;
+    var in_buf: [32768]u8 = undefined;
 
     const old_winch = c.signal(c.SIGWINCH, handleSigwinch);
     defer _ = c.signal(c.SIGWINCH, old_winch);
@@ -177,6 +177,25 @@ pub fn runAttachBridge(allocator: std.mem.Allocator, attachment: *client.Session
             .{ .fd = if (stdin_open) in_fd else -1, .events = if (stdin_open) c.POLLIN else 0, .revents = 0 },
             .{ .fd = attachment.fd, .events = c.POLLIN, .revents = 0 },
         };
+        const pre_transition = pumpAttachmentToStdout(allocator, attachment, out_fd) catch |e| switch (e) {
+            error.UnexpectedEof => return .remote_closed,
+            else => return e,
+        };
+
+        if (pre_transition) |transition| {
+            switch (transition) {
+                .stay => {},
+                .exit => return .clean,
+                .replace_attachment => |next_attachment| {
+                    attachment.close();
+                    attachment.* = next_attachment;
+                    const re_ready_bytes = try protocol.encodeOwnerReady(allocator);
+                    defer allocator.free(re_ready_bytes);
+                    try protocol.writeFrame(attachment.fd, re_ready_bytes);
+                    sendResizeIfAvailable(attachment, in_fd);
+                },
+            }
+        }
 
         while (true) {
             const pr = c.poll(&pfds, 2, -1);
@@ -186,58 +205,24 @@ pub fn runAttachBridge(allocator: std.mem.Allocator, attachment: *client.Session
             return error.IoError;
         }
 
+
+        if (stdin_open and (pfds[0].revents & (c.POLLHUP | c.POLLERR | c.POLLNVAL)) != 0) {
+            stdin_open = false;
+        }
+
         if (stdin_open and (pfds[0].revents & c.POLLIN) != 0) {
             const n = c.read(in_fd, &in_buf, in_buf.len);
             if (n < 0) {
                 const e = std.c.errno(-1);
-                if (e == .INTR) continue;
+                if (e == .INTR or e == .AGAIN) continue;
                 return error.IoError;
             }
             if (n == 0) {
                 stdin_open = false;
             } else {
+                std.debug.print("bridge: before attachment.write n={d}\n", .{n});
                 try attachment.write(in_buf[0..@intCast(n)]);
-            }
-        }
-        if (stdin_open and (pfds[0].revents & (c.POLLHUP | c.POLLERR | c.POLLNVAL)) != 0) {
-            stdin_open = false;
-        }
-
-        if ((pfds[attachment_idx].revents & c.POLLIN) != 0) {
-            var msg = attachment.readMessage() catch |e| switch (e) {
-                error.UnexpectedEof => {
-                    return .remote_closed;
-                },
-                else => {
-                    return e;
-                },
-            };
-            defer msg.deinit(allocator);
-
-            switch (msg) {
-                .data => |data_msg| {
-                    const decoded_len = try std.base64.standard.Decoder.calcSizeForSlice(data_msg.bytes_b64);
-                    const decoded = try allocator.alloc(u8, decoded_len);
-                    defer allocator.free(decoded);
-                    try std.base64.standard.Decoder.decode(decoded, data_msg.bytes_b64);
-                    writeAll(out_fd, decoded) catch return .stdout_unavailable;
-                },
-                .owner_control_req => |req| {
-                    const transition = try handleOwnerControlReq(allocator, attachment, req);
-                    switch (transition) {
-                        .stay => {},
-                        .exit => return .clean,
-                        .replace_attachment => |next_attachment| {
-                            attachment.close();
-                            attachment.* = next_attachment;
-                            const re_ready_bytes = try protocol.encodeOwnerReady(allocator);
-                            defer allocator.free(re_ready_bytes);
-                            try protocol.writeFrame(attachment.fd, re_ready_bytes);
-                            sendResizeIfAvailable(attachment, in_fd);
-                        },
-                    }
-                },
-                else => return error.ProtocolError,
+                std.debug.print("bridge: after attachment.write n={d}\n", .{n});
             }
         }
 
@@ -251,6 +236,59 @@ pub fn runAttachBridge(allocator: std.mem.Allocator, attachment: *client.Session
         if (winch_changed) {
             winch_changed = false;
             sendResizeIfAvailable(attachment, in_fd);
+        }
+    }
+}
+fn pumpAttachmentToStdout(
+    allocator: std.mem.Allocator,
+    attachment: *client.SessionAttachment,
+    out_fd: c_int,
+) !?BridgeTransition {
+    while (true) {
+        var pfd = c.struct_pollfd{
+            .fd = attachment.fd,
+            .events = c.POLLIN,
+            .revents = 0,
+        };
+
+        const pr = c.poll(&pfd, 1, 0);
+        if (pr < 0) {
+            const e = std.c.errno(-1);
+            if (e == .INTR) continue;
+            return error.IoError;
+        }
+        if (pr == 0) return null;
+
+        if ((pfd.revents & c.POLLIN) != 0) {
+            var msg = attachment.readMessage() catch |e| switch (e) {
+                error.UnexpectedEof => return error.UnexpectedEof,
+                else => return e,
+            };
+            defer msg.deinit(allocator);
+
+            switch (msg) {
+                .data => |data_msg| {
+                    const decoded_len = try std.base64.standard.Decoder.calcSizeForSlice(data_msg.bytes_b64);
+                    const decoded = try allocator.alloc(u8, decoded_len);
+                    defer allocator.free(decoded);
+                    try std.base64.standard.Decoder.decode(decoded, data_msg.bytes_b64);
+                    std.debug.print("bridge: before stdout write n={d}\n", .{decoded.len});
+                    writeAll(out_fd, decoded) catch return error.IoError;
+                    std.debug.print("bridge: after stdout write n={d}\n", .{decoded.len});
+                },
+                .owner_control_req => |req| {
+                    const transition = try handleOwnerControlReq(allocator, attachment, req);
+                    switch (transition) {
+                        .stay => {},
+                        else => return transition,
+                    }
+                },
+                else => return error.ProtocolError,
+            }
+        }
+
+        if ((pfd.revents & (c.POLLHUP | c.POLLERR | c.POLLNVAL)) != 0) {
+            return error.UnexpectedEof;
         }
     }
 }

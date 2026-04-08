@@ -287,8 +287,26 @@ fn writeAll(fd: c_int, bytes: []const u8) !void {
         const rc = c.write(fd, bytes.ptr + offset, bytes.len - offset);
         if (rc < 0) {
             const err = std.c.errno(rc);
-            if (err == .INTR) continue;
-            return std.posix.unexpectedErrno(err);
+            switch (err) {
+                .INTR => continue,
+                .AGAIN => {
+                    var pfd = c.struct_pollfd{
+                        .fd = fd,
+                        .events = c.POLLOUT,
+                        .revents = 0,
+                    };
+                    while (true) {
+                        const prc = c.poll(&pfd, 1, -1);
+                        if (prc < 0) {
+                            if (std.c.errno(prc) == .INTR) continue;
+                            return Error.PollFailed;
+                        }
+                        break;
+                    }
+                    continue;
+                },
+                else => return std.posix.unexpectedErrno(err),
+            }
         }
         offset += @intCast(rc);
     }

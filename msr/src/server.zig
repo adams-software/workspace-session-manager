@@ -370,40 +370,55 @@ pub const SessionServer = struct {
         self.applyModelActions(&actions) catch return;
     }
 
-    fn pumpPtyOutput(self: *SessionServer) Error!void {
+    fn pumpPtyOutput(self: *SessionServer) Error!bool {
         const owner_fd = self.ownerFd();
         const master_fd = self.session_host.getMasterFd() orelse {
             if (owner_fd != null) self.dropOwner("pty_closed");
-            return;
+            return false;
         };
 
-        var pfd = c.struct_pollfd{ .fd = master_fd, .events = c.POLLIN, .revents = 0 };
-        const pr = c.poll(&pfd, 1, 0);
-        if (pr < 0) return Error.IoError;
-        if (pr == 0) return;
+        var progressed = false;
 
-        if ((pfd.revents & (c.POLLHUP | c.POLLERR | c.POLLNVAL)) != 0) {
-            if (owner_fd != null) self.dropOwner("pty_closed");
-            return;
-        }
+        while (true) {
+            var pfd = c.struct_pollfd{
+                .fd = master_fd,
+                .events = c.POLLIN,
+                .revents = 0,
+            };
 
-        const drained = self.session_host.drainObservedPtyOutput() catch |e| switch (e) {
-            host.Error.InvalidState, host.Error.NotStarted, host.Error.Closed => return,
-            host.Error.IoError => {
+            const pr = c.poll(&pfd, 1, 0);
+            if (pr < 0) return Error.IoError;
+            if (pr == 0) break;
+
+            if ((pfd.revents & (c.POLLHUP | c.POLLERR | c.POLLNVAL)) != 0) {
                 if (owner_fd != null) self.dropOwner("pty_closed");
-                return;
-            },
-            else => return Error.IoError,
-        };
-        defer {
-            for (drained) |chunk| self.allocator.free(chunk);
-            self.allocator.free(drained);
-        }
-        if (owner_fd) |fd| {
-            for (drained) |chunk| {
-                try writeData(self.allocator, fd, chunk);
+                return progressed;
+            }
+
+            const drained = self.session_host.drainObservedPtyOutput() catch |e| switch (e) {
+                host.Error.InvalidState, host.Error.NotStarted, host.Error.Closed => return progressed,
+                host.Error.IoError => {
+                    if (owner_fd != null) self.dropOwner("pty_closed");
+                    return progressed;
+                },
+                else => return Error.IoError,
+            };
+            defer {
+                for (drained) |chunk| self.allocator.free(chunk);
+                self.allocator.free(drained);
+            }
+
+            if (drained.len == 0) break;
+            progressed = true;
+
+            if (owner_fd) |fd| {
+                for (drained) |chunk| {
+                    try writeData(self.allocator, fd, chunk);
+                }
             }
         }
+
+        return progressed;
     }
 
     fn drainReadablePtyForCheckpoint(self: *SessionServer) Error!void {
@@ -417,83 +432,99 @@ pub const SessionServer = struct {
             self.allocator.free(drained);
         }
     }
+    fn pumpOwnerIo(self: *SessionServer) Error!bool {
+        const owner_fd = self.ownerFd() orelse return false;
+        var progressed = false;
 
-    fn pumpOwnerIo(self: *SessionServer) Error!void {
-        const owner_fd = self.ownerFd() orelse return;
-
-        var pfd = c.struct_pollfd{ .fd = owner_fd, .events = c.POLLIN, .revents = 0 };
-        const pr = c.poll(&pfd, 1, 0);
-        if (pr < 0) return Error.IoError;
-        if (pr == 0) return;
-
-        if ((pfd.revents & c.POLLIN) != 0) {
-            const frame = protocol.readFrame(self.allocator, owner_fd, 256 * 1024) catch |e| switch (e) {
-                error.UnexpectedEof => {
-                    self.dropOwner(null);
-                    return;
-                },
-                else => return Error.ProtocolError,
+        while (true) {
+            var pfd = c.struct_pollfd{
+                .fd = owner_fd,
+                .events = c.POLLIN,
+                .revents = 0,
             };
-            defer self.allocator.free(frame);
 
-            var msg = protocol.parseMessage(self.allocator, frame) catch return Error.ProtocolError;
-            defer msg.deinit(self.allocator);
+            const pr = c.poll(&pfd, 1, 0);
+            if (pr < 0) return Error.IoError;
+            if (pr == 0) break;
 
-            switch (msg) {
-                .data => |data_msg| {
-                    const decoded_len = std.base64.standard.Decoder.calcSizeForSlice(data_msg.bytes_b64) catch return Error.ProtocolError;
-                    const decoded = self.allocator.alloc(u8, decoded_len) catch return Error.OutOfMemory;
-                    defer self.allocator.free(decoded);
-                    std.base64.standard.Decoder.decode(decoded, data_msg.bytes_b64) catch return Error.ProtocolError;
-                    try self.session_host.pty.write(decoded);
-                },
-                .control_req => |req| {
-                    const res = self.handleControlReq(req, owner_fd);
-                    try writeControlRes(self.allocator, owner_fd, res);
-                    if (std.mem.eql(u8, req.op, "detach") and res.ok) {
-                        _ = c.close(owner_fd);
-                        return;
-                    }
-                },
-                .owner_control_res => |owner_res| {
-                    try self.resolveOwnerControlRes(owner_res);
-                },
-                .owner_ready => {
-                    try self.resolveOwnerReady();
-                },
-                .owner_resize => |resize| {
-                    self.session_host.resize(resize.cols, resize.rows) catch |e| switch (e) {
-                        host.Error.InvalidArgs, host.Error.InvalidState, host.Error.NotStarted, host.Error.Closed => {},
-                        else => return Error.ProtocolError,
-                    };
-                    self.session_host.signalWinch() catch |e| switch (e) {
-                        host.Error.InvalidArgs, host.Error.InvalidState, host.Error.NotStarted, host.Error.Closed => {},
-                        else => return Error.ProtocolError,
-                    };
-                },
-                else => return Error.ProtocolError,
+            if ((pfd.revents & c.POLLIN) != 0) {
+                progressed = true;
+
+                const frame = protocol.readFrame(self.allocator, owner_fd, 256 * 1024) catch |e| switch (e) {
+                    error.UnexpectedEof => {
+                        self.dropOwner(null);
+                        return true;
+                    },
+                    else => return Error.ProtocolError,
+                };
+                defer self.allocator.free(frame);
+
+                var msg = protocol.parseMessage(self.allocator, frame) catch return Error.ProtocolError;
+                defer msg.deinit(self.allocator);
+
+                switch (msg) {
+                    .data => |data_msg| {
+                        const decoded_len = std.base64.standard.Decoder.calcSizeForSlice(data_msg.bytes_b64) catch return Error.ProtocolError;
+                        const decoded = self.allocator.alloc(u8, decoded_len) catch return Error.OutOfMemory;
+                        defer self.allocator.free(decoded);
+                        std.base64.standard.Decoder.decode(decoded, data_msg.bytes_b64) catch return Error.ProtocolError;
+                        try self.session_host.pty.write(decoded);
+                    },
+                    .control_req => |req| {
+                        const res = self.handleControlReq(req, owner_fd);
+                        try writeControlRes(self.allocator, owner_fd, res);
+                        if (std.mem.eql(u8, req.op, "detach") and res.ok) {
+                            _ = c.close(owner_fd);
+                            return true;
+                        }
+                    },
+                    .owner_control_res => |owner_res| {
+                        try self.resolveOwnerControlRes(owner_res);
+                    },
+                    .owner_ready => {
+                        try self.resolveOwnerReady();
+                    },
+                    .owner_resize => |resize| {
+                        self.session_host.resize(resize.cols, resize.rows) catch |e| switch (e) {
+                            host.Error.InvalidArgs, host.Error.InvalidState, host.Error.NotStarted, host.Error.Closed => {},
+                            else => return Error.ProtocolError,
+                        };
+                        self.session_host.signalWinch() catch |e| switch (e) {
+                            host.Error.InvalidArgs, host.Error.InvalidState, host.Error.NotStarted, host.Error.Closed => {},
+                            else => return Error.ProtocolError,
+                        };
+                    },
+                    else => return Error.ProtocolError,
+                }
             }
-        }
 
-        if ((pfd.revents & (c.POLLHUP | c.POLLERR | c.POLLNVAL)) != 0) {
-            if (self.ownerPending() != null and (pfd.revents & c.POLLIN) != 0) {
-                // allow readable owner response path to win first
-            } else {
+            if ((pfd.revents & (c.POLLHUP | c.POLLERR | c.POLLNVAL)) != 0) {
+                if (self.ownerPending() != null and (pfd.revents & c.POLLIN) != 0) {
+                    continue;
+                }
                 self.dropOwner("owner_disconnected");
-                return;
+                return true;
             }
         }
+
+        return progressed;
     }
+
 
     pub fn step(self: *SessionServer) Error!bool {
         if (self.state != .listening) return Error.InvalidState;
+
+        var progressed = false;
+
         if (try self.acceptConnection()) |conn| {
             try self.handleAcceptedConnection(conn);
-            return true;
+            progressed = true;
         }
-        try self.pumpOwnerIo();
-        try self.pumpPtyOutput();
-        return true;
+
+        if (try self.pumpOwnerIo()) progressed = true;
+        if (try self.pumpPtyOutput()) progressed = true;
+
+        return progressed;
     }
 
     pub fn serveControlOnce(self: *SessionServer, timeout_ms: i32) Error!bool {

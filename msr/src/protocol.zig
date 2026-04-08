@@ -412,7 +412,11 @@ fn writeAll(fd: c_int, bytes: []const u8) !void {
     var off: usize = 0;
     while (off < bytes.len) {
         const n = c.write(fd, bytes.ptr + off, bytes.len - off);
-        if (n < 0) return error.WriteFailed;
+        if (n < 0) {
+            const e = std.c.errno(-1);
+            if (e == .INTR or e == .AGAIN) continue;
+            return error.WriteFailed;
+        }
         if (n == 0) return error.WriteFailed;
         off += @intCast(n);
     }
@@ -422,7 +426,11 @@ fn readExact(fd: c_int, dst: []u8) !void {
     var off: usize = 0;
     while (off < dst.len) {
         const n = c.read(fd, dst.ptr + off, dst.len - off);
-        if (n < 0) return error.ReadFailed;
+        if (n < 0) {
+            const e = std.c.errno(-1);
+            if (e == .INTR or e == .AGAIN) continue;
+            return error.ReadFailed;
+        }
         if (n == 0) return error.UnexpectedEof;
         off += @intCast(n);
     }

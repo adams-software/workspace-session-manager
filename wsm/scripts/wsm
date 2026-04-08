@@ -19,6 +19,7 @@ BIN_DIR="${MSR_BIN_DIR:-$REPO_ROOT/zig-out/bin}"
 DSM_BIN="$REPO_ROOT/dsm/scripts/dsm"
 MSR_BIN="$BIN_DIR/msr"
 VPTY_BIN="$BIN_DIR/vpty"
+ALT_BIN="$BIN_DIR/alt"
 WSM_MENU_BIN="$REPO_ROOT/wsm/scripts/wsm_menu"
 
 err() { printf '%s\n' "$*" >&2; }
@@ -109,13 +110,30 @@ EOF2
 }
 
 ROOT_OVERRIDE=""
-if [[ $# -ge 1 && "$1" == --root=* ]]; then
-  ROOT_OVERRIDE="${1#--root=}"
-  shift
-elif [[ $# -ge 2 && "$1" == "--root" ]]; then
-  ROOT_OVERRIDE="$2"
-  shift 2
-fi
+MENU_KEY_OVERRIDE=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --root=*)
+      ROOT_OVERRIDE="${1#--root=}"
+      shift
+      ;;
+    --root)
+      ROOT_OVERRIDE="$2"
+      shift 2
+      ;;
+    --menu-key=*)
+      MENU_KEY_OVERRIDE="${1#--menu-key=}"
+      shift
+      ;;
+    --menu-key)
+      MENU_KEY_OVERRIDE="$2"
+      shift 2
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
 
 expand_path() {
   local p="${1:-}"
@@ -271,15 +289,22 @@ terminate_canonical() {
 create_canonical() {
   local id="$1"
   local sock dir
+  local -a alt_prefix
   sock="$(sock_for_canonical "$id")"
   dir="$(dirname -- "$sock")"
   mkdir -p "$dir"
 
+  alt_prefix=("$ALT_BIN")
+  if [[ -n "$MENU_KEY_OVERRIDE" ]]; then
+    alt_prefix+=(--key "$MENU_KEY_OVERRIDE")
+  fi
+  alt_prefix+=(--run "$WSM_MENU_BIN" --)
+
   if [[ $# -gt 1 ]]; then
     shift
-    env WSM_ROOT="$WSM_ROOT_RESOLVED" "$MSR_BIN" create -a "$sock" -- "$VPTY_BIN" -- "$@"
+    env WSM_ROOT="$WSM_ROOT_RESOLVED" "$MSR_BIN" create -a "$sock" -- "$VPTY_BIN" -- "${alt_prefix[@]}" "$@"
   else
-    env WSM_ROOT="$WSM_ROOT_RESOLVED" "$MSR_BIN" create -a "$sock" -- "$VPTY_BIN" -- "$SHELL" -i
+    env WSM_ROOT="$WSM_ROOT_RESOLVED" "$MSR_BIN" create -a "$sock" -- "$VPTY_BIN" -- "${alt_prefix[@]}" "$SHELL" -i
   fi
 }
 
@@ -345,7 +370,7 @@ case "$cmd" in
     ;;
 
   d|detach)
-    "$MSR_BIN" detach
+    local_nav_delegate detach
     ;;
 
   current)
