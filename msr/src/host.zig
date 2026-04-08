@@ -403,7 +403,7 @@ pub const SessionHost = struct {
                 const n = c.read(fd, buf.ptr, capped_max);
                 if (n < 0) {
                     const e = std.c.errno(-1);
-                    if (e == .INTR) break :blk null;
+                    if (e == .INTR or e == .AGAIN) break :blk null;
                     if (e == .IO) break :blk null;
                     return Error.IoError;
                 }

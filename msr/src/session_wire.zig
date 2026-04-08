@@ -1,5 +1,5 @@
 const std = @import("std");
-const core = @import("session_core2");
+const core = @import("session_core");
 const c = @cImport({
     @cInclude("unistd.h");
 });

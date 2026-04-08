@@ -1,9 +1,9 @@
 const std = @import("std");
 const host = @import("host");
-const server2 = @import("session_server2");
-const client2 = @import("client2");
-const attach_bridge2 = @import("attach_bridge2");
-const wire = @import("session_wire2");
+const server2 = @import("server");
+const client2 = @import("client");
+const attach_bridge2 = @import("attach_bridge");
+const wire = @import("session_wire");
 const c = @cImport({
     @cInclude("unistd.h");
     @cInclude("poll.h");

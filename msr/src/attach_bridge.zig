@@ -1,7 +1,7 @@
 const std = @import("std");
-const client2 = @import("client2");
-const core = @import("session_core2");
-const wire = @import("session_wire2");
+const client2 = @import("client");
+const core = @import("session_core");
+const wire = @import("session_wire");
 
 const ByteQueue = @import("byte_queue").ByteQueue;
 const fd_stream = @import("fd_stream");

@@ -1,7 +1,7 @@
 const std = @import("std");
 const ByteQueue = @import("byte_queue").ByteQueue;
-const wire = @import("session_wire2");
-const core = @import("session_core2");
+const wire = @import("session_wire");
+const core = @import("session_core");
 
 pub const Error = wire.Error;
 

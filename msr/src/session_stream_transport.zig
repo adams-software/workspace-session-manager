@@ -2,7 +2,7 @@ const std = @import("std");
 const ByteQueue = @import("byte_queue").ByteQueue;
 const fd_stream = @import("fd_stream");
 const codec = @import("session_stream_codec");
-const wire = @import("session_wire2");
+const wire = @import("session_wire");
 
 const c = @cImport({
     @cInclude("poll.h");
