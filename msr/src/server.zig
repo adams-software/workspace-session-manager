@@ -148,17 +148,25 @@ pub const SessionServer = struct {
 
         try self.ensurePtyNonBlocking();
 
-        var progressed = false;
+        var any_progress = false;
+        var spins: usize = 0;
 
-        if (try self.acceptConnection()) |conn| {
-            try self.handleAcceptedConnection(conn);
-            progressed = true;
+        while (spins < 16) : (spins += 1) {
+            var progressed = false;
+
+            if (try self.acceptConnection()) |conn| {
+                try self.handleAcceptedConnection(conn);
+                progressed = true;
+            }
+
+            if (try self.pumpOwnerIo()) progressed = true;
+            if (try self.pumpPtyIo()) progressed = true;
+
+            any_progress = any_progress or progressed;
+            if (!progressed) break;
         }
 
-        if (try self.pumpOwnerIo()) progressed = true;
-        if (try self.pumpPtyIo()) progressed = true;
-
-        return progressed;
+        return any_progress;
     }
 
     fn validateSocketPath(path: []const u8) Error!void {
@@ -247,7 +255,7 @@ pub const SessionServer = struct {
         return .{ .fd = fd };
     }
 
-    fn mapHostState(st: @TypeOf(@as(*host.PtyChildHost, undefined).hostState())) wire.SessionStatus {
+    fn mapHostState(st: @TypeOf(@as(*host.PtyChildHost, undefined).currentState())) wire.SessionStatus {
         return switch (st) {
             .starting => .starting,
             .running => .running,
@@ -268,7 +276,7 @@ pub const SessionServer = struct {
     fn ensurePtyNonBlocking(self: *SessionServer) Error!void {
         if (self.pty_nonblocking_configured) return;
 
-        const fd = self.session_host.ptyFd() orelse return;
+        const fd = self.session_host.masterFd() orelse return;
         try fd_stream.setNonBlocking(fd);
         self.pty_nonblocking_configured = true;
     }
@@ -411,9 +419,9 @@ pub const SessionServer = struct {
         _ = client_fd;
 
         return switch (req) {
-            .status => .{ .status = mapHostState(self.session_host.hostState()) },
+            .status => .{ .status = mapHostState(self.session_host.currentState()) },
             .wait => blk: {
-                switch (self.session_host.hostState()) {
+                switch (self.session_host.currentState()) {
                     .exited => {
                         const st = self.session_host.wait() catch {
                             break :blk .{ .err = .invalid_args };
@@ -650,7 +658,7 @@ pub const SessionServer = struct {
     }
 
     fn pumpPtyIo(self: *SessionServer) Error!bool {
-        const master_fd = self.session_host.ptyFd() orelse {
+        const master_fd = self.session_host.masterFd() orelse {
             if (self.core_state.hasOwner()) self.dropOwner(true);
             return false;
         };

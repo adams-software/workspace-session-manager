@@ -322,7 +322,7 @@ pub const PtyChildHost = struct {
         }
     }
 
-    pub fn hostState(self: *const PtyChildHost) HostState {
+    pub fn currentState(self: *const PtyChildHost) HostState {
         return self.state;
     }
 
@@ -330,7 +330,7 @@ pub const PtyChildHost = struct {
         return self.exit_status;
     }
 
-    pub fn ptyFd(self: *const PtyChildHost) ?c_int {
+    pub fn masterFd(self: *const PtyChildHost) ?c_int {
         return self.master_fd;
     }
 };

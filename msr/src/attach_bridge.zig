@@ -259,6 +259,10 @@ pub fn runAttachBridge(
     try queueOwnerReady(&att_transport);
     try queueResizeIfAvailable(&att_transport, in_fd);
 
+    if (att_transport.wantsWrite()) {
+        _ = try att_transport.pumpWrite(64 * 1024);
+    }
+
     while (true) {
         if (try applyPendingTransition(
             allocator,

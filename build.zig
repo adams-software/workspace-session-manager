@@ -4,6 +4,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // Shared modules
     const vterm_screen_types_mod = b.addModule("vterm_screen_types", .{
         .root_source_file = b.path("vpty/src/vterm_screen_types.zig"),
         .target = target,
@@ -101,8 +102,6 @@ pub fn build(b: *std.Build) void {
     legacy_host_mod.addImport("terminal_state_vterm", terminal_state_vterm_mod);
     legacy_host_mod.addImport("vterm_screen_types", vterm_screen_types_mod);
     host_mod.linkSystemLibrary("util", .{});
-    host_mod.addImport("terminal_state_vterm", terminal_state_vterm_mod);
-    host_mod.addImport("vterm_screen_types", vterm_screen_types_mod);
 
     const server_mod = b.addModule("server", .{
         .root_source_file = b.path("msr/src/server.zig"),
@@ -154,6 +153,7 @@ pub fn build(b: *std.Build) void {
     cli_parse_mod.addImport("argv_parse", argv_parse_mod);
     cli_parse_mod.addImport("command_spec", command_spec_mod);
 
+    // msr
     const exe_root = b.createModule(.{
         .root_source_file = b.path("msr/src/main.zig"),
         .target = target,
@@ -250,6 +250,7 @@ pub fn build(b: *std.Build) void {
     const server_tests = b.addTest(.{ .root_module = server_test_root });
 
 
+    // vpty
     const vpty_terminal_mod = b.addModule("vpty_terminal", .{
         .root_source_file = b.path("vpty/src/vpty_terminal.zig"),
         .target = target,
@@ -289,6 +290,14 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(vpty_exe);
 
+    // alt
+    const ptyio_tty_size_mod = b.addModule("ptyio_tty_size", .{
+        .root_source_file = b.path("ptyio/src/tty/tty_size.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+
     const alt_root = b.createModule(.{
         .root_source_file = b.path("alt/src/main.zig"),
         .target = target,
@@ -296,6 +305,10 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     alt_root.linkSystemLibrary("util", .{});
+    alt_root.addImport("host", host_mod);
+    alt_root.addImport("byte_queue", byte_queue_mod);
+    alt_root.addImport("fd_stream", fd_stream_mod);
+    alt_root.addImport("ptyio_tty_size", ptyio_tty_size_mod);
 
     const alt_exe = b.addExecutable(.{
         .name = "alt",
@@ -317,6 +330,7 @@ pub fn build(b: *std.Build) void {
         .root_module = terminal_state_vterm_test_root,
     });
 
+    // Test runners and aliases
     const run_terminal_state_vterm_tests = b.addRunArtifact(terminal_state_vterm_tests);
     const run_byte_queue_tests = b.addRunArtifact(byte_queue_tests);
     const run_fd_stream_tests = b.addRunArtifact(fd_stream_tests);
@@ -344,8 +358,8 @@ pub fn build(b: *std.Build) void {
     const test_terminal_state_vterm_step = b.step("test-vterm", "Run libvterm adapter tests");
     test_terminal_state_vterm_step.dependOn(&run_terminal_state_vterm_tests.step);
 
-    const test_host2_step = b.step("test-host", "Run host module tests");
-    test_host2_step.dependOn(&run_host_tests.step);
+    const test_host_step = b.step("test-host", "Run host module tests");
+    test_host_step.dependOn(&run_host_tests.step);
 
     const test_byte_queue_step = b.step("test-byte-queue", "Run byte_queue tests");
     test_byte_queue_step.dependOn(&run_byte_queue_tests.step);
@@ -359,20 +373,20 @@ pub fn build(b: *std.Build) void {
     const test_session_stream_transport_step = b.step("test-session-stream-transport", "Run session_stream_transport tests");
     test_session_stream_transport_step.dependOn(&run_session_stream_transport_tests.step);
 
-    const test_session_core2_step = b.step("test-session-core", "Run session_core tests");
-    test_session_core2_step.dependOn(&run_session_core_tests.step);
+    const test_session_core_step = b.step("test-session-core", "Run session_core tests");
+    test_session_core_step.dependOn(&run_session_core_tests.step);
 
-    const test_session_wire2_step = b.step("test-session-wire", "Run session_wire tests");
-    test_session_wire2_step.dependOn(&run_session_wire_tests.step);
+    const test_session_wire_step = b.step("test-session-wire", "Run session_wire tests");
+    test_session_wire_step.dependOn(&run_session_wire_tests.step);
 
-    const test_client2_step = b.step("test-client", "Run client tests");
-    test_client2_step.dependOn(&run_client_tests.step);
+    const test_client_step = b.step("test-client", "Run client tests");
+    test_client_step.dependOn(&run_client_tests.step);
 
-    const test_attach_bridge2_step = b.step("test-attach-bridge", "Run attach_bridge tests");
-    test_attach_bridge2_step.dependOn(&run_attach_bridge_tests.step);
+    const test_attach_bridge_step = b.step("test-attach-bridge", "Run attach_bridge tests");
+    test_attach_bridge_step.dependOn(&run_attach_bridge_tests.step);
 
-    const test_session_server2_step = b.step("test-server", "Run session_server tests");
-    test_session_server2_step.dependOn(&run_server_tests.step);
+    const test_session_server_step = b.step("test-server", "Run session_server tests");
+    test_session_server_step.dependOn(&run_server_tests.step);
 
     const argv_parse_test_root = b.createModule(.{
         .root_source_file = b.path("msr1/src/argv_parse.zig"),

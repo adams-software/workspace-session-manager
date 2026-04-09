@@ -328,7 +328,7 @@ fn runHost(path: []const u8, child_argv: []const []const u8) !u8 {
 
         _ = session_host.refresh() catch {};
 
-        switch (session_host.hostState()) {
+        switch (session_host.currentState()) {
             .running, .starting => {
                 if (!progressed) _ = c.usleep(1_000);
                 continue;

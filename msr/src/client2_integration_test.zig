@@ -1,8 +1,8 @@
 const std = @import("std");
 const host = @import("host");
-const server2 = @import("server");
-const client2 = @import("client");
-const attach_bridge2 = @import("attach_bridge");
+const server = @import("server");
+const client = @import("client");
+const attach_bridge = @import("attach_bridge");
 const wire = @import("session_wire");
 const c = @cImport({
     @cInclude("unistd.h");
@@ -35,9 +35,9 @@ fn readUntilContainsFromFd(
 
     return error.Timeout;
 }
-fn spawnBoundedServerThread(srv: *server2.SessionServer, loops: usize, sleep_us: u32) !std.Thread {
+fn spawnBoundedServerThread(srv: *server.SessionServer, loops: usize, sleep_us: u32) !std.Thread {
     const Args = struct {
-        srv: *server2.SessionServer,
+        srv: *server.SessionServer,
         loops: usize,
         sleep_us: u32,
     };
@@ -58,12 +58,12 @@ fn spawnBoundedServerThread(srv: *server2.SessionServer, loops: usize, sleep_us:
 }
 
 fn spawnUntilDoneServerThread(
-    srv: *server2.SessionServer,
+    srv: *server.SessionServer,
     done: *std.atomic.Value(bool),
     sleep_us: u32,
 ) !std.Thread {
     const Args = struct {
-        srv: *server2.SessionServer,
+        srv: *server.SessionServer,
         done: *std.atomic.Value(bool),
         sleep_us: u32,
     };
@@ -122,7 +122,7 @@ fn waitReadable(fd: c_int, timeout_ms: i32) !void {
 }
 
 fn readStdoutWithTimeout(
-    att: *client2.SessionAttachment,
+    att: *client.SessionAttachment,
     timeout_ms: i32,
 ) ![]u8 {
     try waitReadable(att.fd, timeout_ms);
@@ -147,22 +147,22 @@ fn readBytesWithTimeout(
     return allocator.realloc(buf, @intCast(n));
 }
 
-test "client2 status roundtrip" {
-    var h = try host.SessionHost.init(std.testing.allocator, .{
+test "client status roundtrip" {
+    var h = try host.PtyChildHost.init(std.testing.allocator, .{
         .argv = &.{ "/bin/sh", "-c", "sleep 1" },
     });
     defer h.deinit();
     try h.start();
 
-    var s = server2.SessionServer.init(std.testing.allocator, &h);
+    var s = server.SessionServer.init(std.testing.allocator, &h);
     defer s.deinit();
 
-    const path = "/tmp/msr-client2-status-test.sock";
-    server2.SessionServer.unlinkBestEffort(path);
-    defer server2.SessionServer.unlinkBestEffort(path);
+    const path = "/tmp/msr-client-status-test.sock";
+    server.SessionServer.unlinkBestEffort(path);
+    defer server.SessionServer.unlinkBestEffort(path);
     try s.listen(path);
 
-    var cli = try client2.SessionClient.init(std.testing.allocator, path);
+    var cli = try client.SessionClient.init(std.testing.allocator, path);
     defer cli.deinit();
 
     const th = try spawnBoundedServerThread(&s, 4, 20_000);
@@ -176,22 +176,22 @@ test "client2 status roundtrip" {
     try h.close();
 }
 
-test "client2 attach write read detach roundtrip" {
-    var h = try host.SessionHost.init(std.testing.allocator, .{
+test "client attach write read detach roundtrip" {
+    var h = try host.PtyChildHost.init(std.testing.allocator, .{
         .argv = &.{ "/bin/sh", "-c", "read line; printf 'got:%s' \"$line\"; sleep 1" },
     });
     defer h.deinit();
     try h.start();
 
-    var s = server2.SessionServer.init(std.testing.allocator, &h);
+    var s = server.SessionServer.init(std.testing.allocator, &h);
     defer s.deinit();
 
-    const path = "/tmp/msr-client2-attach-test.sock";
-    server2.SessionServer.unlinkBestEffort(path);
-    defer server2.SessionServer.unlinkBestEffort(path);
+    const path = "/tmp/msr-client-attach-test.sock";
+    server.SessionServer.unlinkBestEffort(path);
+    defer server.SessionServer.unlinkBestEffort(path);
     try s.listen(path);
 
-    var cli = try client2.SessionClient.init(std.testing.allocator, path);
+    var cli = try client.SessionClient.init(std.testing.allocator, path);
     defer cli.deinit();
 
     const th = try spawnBoundedServerThread(&s, 16, 20_000);
@@ -199,12 +199,12 @@ test "client2 attach write read detach roundtrip" {
     var att = try cli.attach(.exclusive);
     defer att.close();
 
-    try att.write("hello from client2\n");
+    try att.write("hello from client\n");
 
     var collected = std.ArrayList(u8){};
     defer collected.deinit(std.testing.allocator);
 
-    const needle = "got:hello from client2";
+    const needle = "got:hello from client";
     const deadline_iters: usize = 20;
 
     var i: usize = 0;
@@ -230,24 +230,24 @@ test "client2 attach write read detach roundtrip" {
     try h.close();
 }
 
-test "client2 routed owner detach returns success" {
-    var h = try host.SessionHost.init(std.testing.allocator, .{
+test "client routed owner detach returns success" {
+    var h = try host.PtyChildHost.init(std.testing.allocator, .{
         .argv = &.{ "/bin/sh", "-c", "sleep 2" },
     });
     defer h.deinit();
     try h.start();
 
-    var s = server2.SessionServer.init(std.testing.allocator, &h);
+    var s = server.SessionServer.init(std.testing.allocator, &h);
     defer s.deinit();
 
-    const path = "/tmp/msr-client2-routed-detach-test.sock";
-    server2.SessionServer.unlinkBestEffort(path);
-    defer server2.SessionServer.unlinkBestEffort(path);
+    const path = "/tmp/msr-client-routed-detach-test.sock";
+    server.SessionServer.unlinkBestEffort(path);
+    defer server.SessionServer.unlinkBestEffort(path);
     try s.listen(path);
 
     const owner_attach_thread = try spawnBoundedServerThread(&s, 4, 10_000);
 
-    var owner_cli = try client2.SessionClient.init(std.testing.allocator, path);
+    var owner_cli = try client.SessionClient.init(std.testing.allocator, path);
     defer owner_cli.deinit();
 
     var owner_att = try owner_cli.attach(.exclusive);
@@ -272,13 +272,13 @@ test "client2 routed owner detach returns success" {
     var owner_runtime_done = std.atomic.Value(bool).init(false);
     const owner_runtime_thread = try std.Thread.spawn(.{}, struct {
         fn run(
-            att: *client2.SessionAttachment,
+            att: *client.SessionAttachment,
             done: *std.atomic.Value(bool),
             in_fd: c_int,
             out_fd: c_int,
         ) void {
             defer done.store(true, .seq_cst);
-            _ = attach_bridge2.runAttachBridge(std.testing.allocator, att, in_fd, out_fd) catch {};
+            _ = attach_bridge.runAttachBridge(std.testing.allocator, att, in_fd, out_fd) catch {};
         }
     }.run, .{ &owner_att, &owner_runtime_done, runtime_in[0], runtime_out[1] });
 
@@ -290,7 +290,7 @@ test "client2 routed owner detach returns success" {
     var server_done = std.atomic.Value(bool).init(false);
     const src_server_thread = try spawnUntilDoneServerThread(&s, &server_done, 10_000);
 
-    var requester_cli = try client2.SessionClient.init(std.testing.allocator, path);
+    var requester_cli = try client.SessionClient.init(std.testing.allocator, path);
     defer requester_cli.deinit();
 
     try requester_cli.requestOwnerDetach();
@@ -305,38 +305,38 @@ test "client2 routed owner detach returns success" {
     try h.close();
 }
 
-test "client2 routed owner attach switches bridge attachment" {
-    var h1 = try host.SessionHost.init(std.testing.allocator, .{
+test "client routed owner attach switches bridge attachment" {
+    var h1 = try host.PtyChildHost.init(std.testing.allocator, .{
         .argv = &.{ "/bin/sh", "-c", "sleep 2" },
     });
     defer h1.deinit();
     try h1.start();
 
-    var s1 = server2.SessionServer.init(std.testing.allocator, &h1);
+    var s1 = server.SessionServer.init(std.testing.allocator, &h1);
     defer s1.deinit();
 
-    const path1 = "/tmp/msr-client2-routed-attach-src.sock";
-    server2.SessionServer.unlinkBestEffort(path1);
-    defer server2.SessionServer.unlinkBestEffort(path1);
+    const path1 = "/tmp/msr-client-routed-attach-src.sock";
+    server.SessionServer.unlinkBestEffort(path1);
+    defer server.SessionServer.unlinkBestEffort(path1);
     try s1.listen(path1);
 
-    var h2 = try host.SessionHost.init(std.testing.allocator, .{
+    var h2 = try host.PtyChildHost.init(std.testing.allocator, .{
         .argv = &.{ "/bin/sh", "-c", "sleep 1; printf target-ready; sleep 3" },
     });
     defer h2.deinit();
     try h2.start();
 
-    var s2 = server2.SessionServer.init(std.testing.allocator, &h2);
+    var s2 = server.SessionServer.init(std.testing.allocator, &h2);
     defer s2.deinit();
 
-    const path2 = "/tmp/msr-client2-routed-attach-dst.sock";
-    server2.SessionServer.unlinkBestEffort(path2);
-    defer server2.SessionServer.unlinkBestEffort(path2);
+    const path2 = "/tmp/msr-client-routed-attach-dst.sock";
+    server.SessionServer.unlinkBestEffort(path2);
+    defer server.SessionServer.unlinkBestEffort(path2);
     try s2.listen(path2);
 
     const src_attach_thread = try spawnBoundedServerThread(&s1, 4, 10_000);
 
-    var owner_cli = try client2.SessionClient.init(std.testing.allocator, path1);
+    var owner_cli = try client.SessionClient.init(std.testing.allocator, path1);
     defer owner_cli.deinit();
 
     var owner_att = try owner_cli.attach(.exclusive);
@@ -361,13 +361,13 @@ test "client2 routed owner attach switches bridge attachment" {
     var owner_runtime_done = std.atomic.Value(bool).init(false);
     const owner_runtime_thread = try std.Thread.spawn(.{}, struct {
         fn run(
-            att: *client2.SessionAttachment,
+            att: *client.SessionAttachment,
             done: *std.atomic.Value(bool),
             in_fd: c_int,
             out_fd: c_int,
         ) void {
             defer done.store(true, .seq_cst);
-            _ = attach_bridge2.runAttachBridge(std.testing.allocator, att, in_fd, out_fd) catch {};
+            _ = attach_bridge.runAttachBridge(std.testing.allocator, att, in_fd, out_fd) catch {};
         }
     }.run, .{ &owner_att, &owner_runtime_done, runtime_in[0], runtime_out[1] });
 
@@ -382,7 +382,7 @@ test "client2 routed owner attach switches bridge attachment" {
     const src_server_thread = try spawnUntilDoneServerThread(&s1, &src_server_done, 10_000);
     const dst_server_thread = try spawnUntilDoneServerThread(&s2, &dst_server_done, 10_000);
 
-    var requester_cli = try client2.SessionClient.init(std.testing.allocator, path1);
+    var requester_cli = try client.SessionClient.init(std.testing.allocator, path1);
     defer requester_cli.deinit();
 
     try requester_cli.requestOwnerAttach(path2);
@@ -413,7 +413,7 @@ test "client2 routed owner attach switches bridge attachment" {
     try h1.close();
 }
 
-test "client2 attachment readMessage sees owner request frame" {
+test "client attachment readMessage sees owner request frame" {
     var fds: [2]c_int = undefined;
     try std.testing.expectEqual(@as(c_int, 0), c.pipe(&fds));
     defer {
@@ -428,7 +428,7 @@ test "client2 attachment readMessage sees owner request frame" {
         },
     });
 
-    var att = client2.SessionAttachment{
+    var att = client.SessionAttachment{
         .allocator = std.testing.allocator,
         .fd = fds[0],
     };
@@ -446,10 +446,10 @@ test "client2 attachment readMessage sees owner request frame" {
     }
 }
 
-// test "client2 large paste with concurrent redraw output does not deadlock" {
+// test "client large paste with concurrent redraw output does not deadlock" {
 //     const paste_size: usize = 2 * 128 * 1024;
 //
-//     var h = try host.SessionHost.init(std.testing.allocator, .{
+//     var h = try host.PtyChildHost.init(std.testing.allocator, .{
 //         .argv = &.{
 //             "/bin/sh",
 //             "-c",
@@ -471,17 +471,17 @@ test "client2 attachment readMessage sees owner request frame" {
 //     defer h.deinit();
 //     try h.start();
 //
-//     var s = server2.SessionServer.init(std.testing.allocator, &h);
+//     var s = server.SessionServer.init(std.testing.allocator, &h);
 //     defer s.deinit();
 //
-//     const path = "/tmp/msr-client2-large-paste-test.sock";
-//     server2.SessionServer.unlinkBestEffort(path);
-//     defer server2.SessionServer.unlinkBestEffort(path);
+//     const path = "/tmp/msr-client-large-paste-test.sock";
+//     server.SessionServer.unlinkBestEffort(path);
+//     defer server.SessionServer.unlinkBestEffort(path);
 //     try s.listen(path);
 //
 //     const attach_thread = try spawnBoundedServerThread(&s, 8, 10_000);
 //
-//     var cli = try client2.SessionClient.init(std.testing.allocator, path);
+//     var cli = try client.SessionClient.init(std.testing.allocator, path);
 //     defer cli.deinit();
 //
 //     var att = try cli.attach(.exclusive);
@@ -506,13 +506,13 @@ test "client2 attachment readMessage sees owner request frame" {
 //     var owner_runtime_done = std.atomic.Value(bool).init(false);
 //     const owner_runtime_thread = try std.Thread.spawn(.{}, struct {
 //         fn run(
-//             att_inner: *client2.SessionAttachment,
+//             att_inner: *client.SessionAttachment,
 //             done: *std.atomic.Value(bool),
 //             in_fd: c_int,
 //             out_fd: c_int,
 //         ) void {
 //             defer done.store(true, .seq_cst);
-//             _ = attach_bridge2.runAttachBridge(std.testing.allocator, att_inner, in_fd, out_fd) catch {};
+//             _ = attach_bridge.runAttachBridge(std.testing.allocator, att_inner, in_fd, out_fd) catch {};
 //         }
 //     }.run, .{ &att, &owner_runtime_done, runtime_in[0], runtime_out[1] });
 //

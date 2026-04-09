@@ -1,3 +1,7 @@
+const PtyChildHost = @import("host").PtyChildHost;
+const ByteQueue = @import("byte_queue").ByteQueue;
+const fd_stream = @import("fd_stream");
+const getTtySize = @import("ptyio_tty_size").getTtySize;
 const std = @import("std");
 const builtin = @import("builtin");
 
@@ -61,11 +65,10 @@ fn installSigwinchHandler() void {
     _ = c.signal(c.SIGWINCH, handleSigwinch);
 }
 
-fn syncWindowSize(tty_fd: c_int, pty_fd: c_int, child_pid: c.pid_t) !void {
-    var win: c.struct_winsize = undefined;
-    if (c.ioctl(tty_fd, c.TIOCGWINSZ, &win) != 0) return Error.IoctlFailed;
-    if (c.ioctl(pty_fd, c.TIOCSWINSZ, &win) != 0) return Error.IoctlFailed;
-    _ = c.kill(-child_pid, c.SIGWINCH);
+fn syncWindowSize(tty_fd: c_int, session: *PtyChildHost) !void {
+    const size = getTtySize(tty_fd) catch return Error.IoctlFailed;
+    try session.resize(size.cols, size.rows);
+    try session.signalWinch();
 }
 
 const Config = struct {
@@ -217,63 +220,7 @@ const TerminalState = struct {
     }
 };
 
-const ChildSession = struct {
-    master_fd: c_int,
-    pid: c.pid_t,
-
-    fn spawn(allocator: Allocator, argv: []const []const u8, tty_fd: c_int) !ChildSession {
-        var win: c.struct_winsize = undefined;
-        if (c.ioctl(tty_fd, c.TIOCGWINSZ, &win) != 0) return Error.IoctlFailed;
-
-        var master_fd: c_int = -1;
-        var slave_fd: c_int = -1;
-        if (c.openpty(&master_fd, &slave_fd, null, null, &win) != 0) {
-            return Error.OpenPtyFailed;
-        }
-        errdefer {
-            if (master_fd >= 0) _ = c.close(master_fd);
-            if (slave_fd >= 0) _ = c.close(slave_fd);
-        }
-
-        const pid = c.fork();
-        if (pid < 0) return Error.ForkFailed;
-
-        if (pid == 0) {
-            _ = c.close(master_fd);
-
-            _ = c.setsid();
-            _ = c.ioctl(slave_fd, c.TIOCSCTTY, @as(c_ulong, 0));
-
-            _ = c.dup2(slave_fd, c.STDIN_FILENO);
-            _ = c.dup2(slave_fd, c.STDOUT_FILENO);
-            _ = c.dup2(slave_fd, c.STDERR_FILENO);
-            if (slave_fd > c.STDERR_FILENO) _ = c.close(slave_fd);
-
-            const c_argv = allocator.alloc(?[*:0]const u8, argv.len + 1) catch c._exit(127);
-            defer {
-                for (argv, 0..) |_, idx| {
-                    if (c_argv[idx]) |ptr| allocator.free(std.mem.span(ptr));
-                }
-                allocator.free(c_argv);
-            }
-            for (argv, 0..) |arg, idx| {
-                c_argv[idx] = allocator.dupeZ(u8, arg) catch c._exit(127);
-            }
-            c_argv[argv.len] = null;
-
-            _ = c.execvp(c_argv[0], @ptrCast(c_argv.ptr));
-            c._exit(127);
-        }
-
-        _ = c.close(slave_fd);
-        try setNonBlocking(master_fd);
-        return .{ .master_fd = master_fd, .pid = pid };
-    }
-
-    fn deinit(self: *ChildSession) void {
-        _ = c.close(self.master_fd);
-    }
-};
+const ChildSession = PtyChildHost;
 
 fn setNonBlocking(fd: c_int) !void {
     const flags = c.fcntl(fd, c.F_GETFL, @as(c_int, 0));
@@ -312,19 +259,20 @@ fn writeAll(fd: c_int, bytes: []const u8) !void {
     }
 }
 
-fn pumpPtyToTty(pty_fd: c_int, tty_fd: c_int) !void {
-    var buf: [8192]u8 = undefined;
+fn pumpPtyToQueue(allocator: Allocator, pty_fd: c_int, queue: *ByteQueue) !void {
     while (true) {
-        const rc = c.read(pty_fd, &buf, buf.len);
-        if (rc == 0) return Error.ChildExited;
-        if (rc < 0) {
-            const err = std.c.errno(rc);
-            if (err == .INTR) continue;
-            if (err == .AGAIN) return;
-            if (err == .IO) return Error.ChildExited;
-            return std.posix.unexpectedErrno(err);
+        const status = fd_stream.readIntoQueue(allocator, pty_fd, queue, 8192) catch |e| switch (e) {
+            fd_stream.Error.IoError => return Error.ChildExited,
+            else => return e,
+        };
+        switch (status) {
+            .progress => |n| {
+                if (n == 0) return;
+                if (n < 8192) return;
+            },
+            .would_block => return,
+            .eof => return Error.ChildExited,
         }
-        try writeAll(tty_fd, buf[0..@intCast(rc)]);
     }
 }
 
@@ -404,7 +352,7 @@ fn keySpecEq(a: KeySpec, b: KeySpec) bool {
     return a.kind == b.kind and a.ch == b.ch and a.mods.ctrl == b.mods.ctrl and a.mods.alt == b.mods.alt and a.mods.shift == b.mods.shift;
 }
 
-fn forwardInput(tty_fd: c_int, pty_fd: c_int, hotkey: KeyBinding, debug_keys: bool) !bool {
+fn queueInput(allocator: Allocator, tty_fd: c_int, queue: *ByteQueue, hotkey: KeyBinding, debug_keys: bool) !bool {
     var buf: [256]u8 = undefined;
     const rc = c.read(tty_fd, &buf, buf.len);
     if (rc == 0) return false;
@@ -424,12 +372,12 @@ fn forwardInput(tty_fd: c_int, pty_fd: c_int, hotkey: KeyBinding, debug_keys: bo
         if (debug_keys) debugKeySpec("alt debug: decoded=", event.spec);
         if (keySpecEq(event.spec, hotkey.spec)) {
             if (debug_keys) std.debug.print("alt debug: hotkey matched\n", .{});
-            if (event.bytes_len < n) try writeAll(pty_fd, buf[event.bytes_len..n]);
+            if (event.bytes_len < n) try queue.append(allocator, buf[event.bytes_len..n]);
             return true;
         }
     }
 
-    try writeAll(pty_fd, buf[0..n]);
+    try queue.append(allocator, buf[0..n]);
     return false;
 }
 
@@ -515,23 +463,34 @@ fn runHook(allocator: Allocator, tty_fd: c_int, hook_path: []const u8) !void {
     showHookError(tty_fd, hook_path, result);
 }
 
-fn childStillRunning(pid: c.pid_t) bool {
-    var status: c_int = 0;
-    const rc = c.waitpid(pid, &status, c.WNOHANG);
-    return rc == 0;
-}
-
 fn passthroughLoop(allocator: Allocator, term: *TerminalState, session: *ChildSession, key: KeyBinding, hook_path: []const u8, debug_keys: bool) !void {
     try setNonBlocking(term.tty_fd);
     installSigwinchHandler();
 
+    var input_tx = ByteQueue.init();
+    defer input_tx.deinit(allocator);
+
+    var output_tx = ByteQueue.init();
+    defer output_tx.deinit(allocator);
+
     var pollfds = [_]c.struct_pollfd{
-        .{ .fd = term.tty_fd, .events = c.POLLIN, .revents = 0 },
-        .{ .fd = session.master_fd, .events = c.POLLIN, .revents = 0 },
+        .{ .fd = term.tty_fd, .events = 0, .revents = 0 },
+        .{ .fd = session.masterFd() orelse return Error.ChildExited, .events = 0, .revents = 0 },
     };
 
     while (true) {
-        if (!childStillRunning(session.pid)) return Error.ChildExited;
+        session.refresh() catch return Error.ChildExited;
+        if (session.currentState() == .exited or session.currentState() == .closed) return Error.ChildExited;
+
+        pollfds[0].fd = term.tty_fd;
+        pollfds[0].events = c.POLLIN;
+        if (!output_tx.isEmpty()) pollfds[0].events |= c.POLLOUT;
+        pollfds[0].revents = 0;
+
+        pollfds[1].fd = session.masterFd() orelse return Error.ChildExited;
+        pollfds[1].events = c.POLLIN;
+        if (!input_tx.isEmpty()) pollfds[1].events |= c.POLLOUT;
+        pollfds[1].revents = 0;
 
         const rc = c.poll(&pollfds, pollfds.len, 250);
         if (rc < 0) {
@@ -541,25 +500,25 @@ fn passthroughLoop(allocator: Allocator, term: *TerminalState, session: *ChildSe
         if (rc == 0) {
             if (ResizeState.pending) {
                 ResizeState.pending = false;
-                try syncWindowSize(term.tty_fd, session.master_fd, session.pid);
+                try syncWindowSize(term.tty_fd, session);
             }
             continue;
         }
 
         if (ResizeState.pending) {
             ResizeState.pending = false;
-            try syncWindowSize(term.tty_fd, session.master_fd, session.pid);
+            try syncWindowSize(term.tty_fd, session);
         }
 
         if ((pollfds[1].revents & c.POLLIN) != 0) {
-            try pumpPtyToTty(session.master_fd, term.tty_fd);
+            try pumpPtyToQueue(allocator, session.masterFd() orelse return Error.ChildExited, &output_tx);
         }
         if ((pollfds[1].revents & (c.POLLHUP | c.POLLERR | c.POLLNVAL)) != 0) {
             return Error.ChildExited;
         }
 
         if ((pollfds[0].revents & c.POLLIN) != 0) {
-            const intercepted = try forwardInput(term.tty_fd, session.master_fd, key, debug_keys);
+            const intercepted = try queueInput(allocator, term.tty_fd, &input_tx, key, debug_keys);
             if (intercepted) {
                 try term.restore();
                 defer term.enableRaw() catch {};
@@ -568,8 +527,22 @@ fn passthroughLoop(allocator: Allocator, term: *TerminalState, session: *ChildSe
                 defer leaveAltScreen(term.tty_fd) catch {};
 
                 try runHook(allocator, term.tty_fd, hook_path);
-                try syncWindowSize(term.tty_fd, session.master_fd, session.pid);
+                try syncWindowSize(term.tty_fd, session);
             }
+        }
+
+        if (!input_tx.isEmpty() and ((pollfds[1].revents & c.POLLOUT) != 0 or (pollfds[0].revents & c.POLLIN) != 0)) {
+            _ = fd_stream.writeFromQueue(session.masterFd() orelse return Error.ChildExited, &input_tx, 64 * 1024) catch |e| switch (e) {
+                fd_stream.Error.IoError => return Error.ChildExited,
+                else => return e,
+            };
+        }
+
+        if (!output_tx.isEmpty() and ((pollfds[0].revents & c.POLLOUT) != 0 or (pollfds[1].revents & c.POLLIN) != 0)) {
+            _ = fd_stream.writeFromQueue(term.tty_fd, &output_tx, 64 * 1024) catch |e| switch (e) {
+                fd_stream.Error.IoError => return Error.ChildExited,
+                else => return e,
+            };
         }
     }
 }
@@ -606,8 +579,14 @@ pub fn main(init: std.process.Init) !void {
     defer term.deinit();
     try term.enableRaw();
 
-    var session = try ChildSession.spawn(gpa, cfg.child_argv, term.tty_fd);
+    const size = getTtySize(term.tty_fd) catch return Error.IoctlFailed;
+    var session = try ChildSession.init(gpa, .{
+        .argv = cfg.child_argv,
+        .cols = size.cols,
+        .rows = size.rows,
+    });
     defer session.deinit();
+    try session.start();
 
     passthroughLoop(gpa, &term, &session, key, cfg.hook_path, cfg.debug_keys) catch |err| switch (err) {
         Error.ChildExited => {},
