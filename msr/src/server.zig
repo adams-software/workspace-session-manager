@@ -2,7 +2,7 @@ const std = @import("std");
 const host = @import("host");
 const core = @import("session_core");
 const wire = @import("session_wire");
-const client2 = @import("client");
+const client = @import("client");
 
 const ByteQueue = @import("byte_queue").ByteQueue;
 const fd_stream = @import("fd_stream");
@@ -151,6 +151,9 @@ pub const SessionServer = struct {
         var any_progress = false;
         var spins: usize = 0;
 
+        // Drain a bounded amount of ready work per outer host tick. A single pass was
+        // noticeably sluggish for large streamed bursts, but an unbounded loop would
+        // risk busy-spinning under pathological readiness patterns.
         while (spins < 16) : (spins += 1) {
             var progressed = false;
 
@@ -383,7 +386,7 @@ pub const SessionServer = struct {
                 self.owner_transport = streaming.FramedTransport.init(
                     self.allocator,
                     fd,
-                    client2.DEFAULT_STREAM_FRAME_MAX,
+                    client.DEFAULT_STREAM_FRAME_MAX,
                 ) catch return Error.IoError;
             },
             .clear_owner => {
@@ -446,7 +449,7 @@ pub const SessionServer = struct {
     }
 
     fn handleAcceptedConnection(self: *SessionServer, conn: Connection) Error!void {
-        var msg = wire.readMessage(self.allocator, conn.fd, client2.DEFAULT_CONTROL_FRAME_MAX) catch {
+        var msg = wire.readMessage(self.allocator, conn.fd, client.DEFAULT_CONTROL_FRAME_MAX) catch {
             _ = c.close(conn.fd);
             return Error.Unsupported;
         };
@@ -705,7 +708,7 @@ pub const SessionServer = struct {
     }
 };
 
-test "server2 starts created" {
+test "server starts created" {
     var h = try host.PtyChildHost.init(std.testing.allocator, .{ .argv = &.{"/bin/sh"} });
     defer h.deinit();
 
@@ -715,14 +718,14 @@ test "server2 starts created" {
     try std.testing.expectEqual(ServerState.created, s.getState());
 }
 
-test "server2 listen enters listening" {
+test "server listens" {
     var h = try host.PtyChildHost.init(std.testing.allocator, .{ .argv = &.{"/bin/sh"} });
     defer h.deinit();
 
     var s = SessionServer.init(std.testing.allocator, &h);
     defer s.deinit();
 
-    const path = "/tmp/msr-server2-listen-test.sock";
+    const path = "/tmp/msr-server-listen-test.sock";
     SessionServer.unlinkBestEffort(path);
     defer SessionServer.unlinkBestEffort(path);
 
@@ -730,7 +733,7 @@ test "server2 listen enters listening" {
     try std.testing.expectEqual(ServerState.listening, s.getState());
 }
 
-test "server2 step handles status request" {
+test "server step handles status request" {
     var h = try host.PtyChildHost.init(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "sleep 1" } });
     defer h.deinit();
     try h.start();
@@ -738,19 +741,19 @@ test "server2 step handles status request" {
     var s = SessionServer.init(std.testing.allocator, &h);
     defer s.deinit();
 
-    const path = "/tmp/msr-server2-status-test.sock";
+    const path = "/tmp/msr-server-status-test.sock";
     SessionServer.unlinkBestEffort(path);
     defer SessionServer.unlinkBestEffort(path);
     try s.listen(path);
 
-    const fd = try client2.connectUnix(path);
+    const fd = try client.connectUnix(path);
     defer _ = c.close(fd);
 
     try wire.writeMessage(std.testing.allocator, fd, .{ .control_req = .status });
 
     _ = try s.step();
 
-    var msg = try wire.readMessage(std.testing.allocator, fd, client2.DEFAULT_CONTROL_FRAME_MAX);
+    var msg = try wire.readMessage(std.testing.allocator, fd, client.DEFAULT_CONTROL_FRAME_MAX);
     defer msg.deinit(std.testing.allocator);
 
     switch (msg) {
@@ -766,7 +769,7 @@ test "server2 step handles status request" {
     try h.close();
 }
 
-test "server2 attach installs owner" {
+test "server attach installs owner" {
     var h = try host.PtyChildHost.init(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "sleep 1" } });
     defer h.deinit();
     try h.start();
@@ -774,19 +777,19 @@ test "server2 attach installs owner" {
     var s = SessionServer.init(std.testing.allocator, &h);
     defer s.deinit();
 
-    const path = "/tmp/msr-server2-attach-test.sock";
+    const path = "/tmp/msr-server-attach-test.sock";
     SessionServer.unlinkBestEffort(path);
     defer SessionServer.unlinkBestEffort(path);
     try s.listen(path);
 
-    const fd = try client2.connectUnix(path);
+    const fd = try client.connectUnix(path);
     defer _ = c.close(fd);
 
     try wire.writeMessage(std.testing.allocator, fd, .{ .control_req = .{ .attach = .exclusive } });
 
     _ = try s.step();
 
-    var msg = try wire.readMessage(std.testing.allocator, fd, client2.DEFAULT_CONTROL_FRAME_MAX);
+    var msg = try wire.readMessage(std.testing.allocator, fd, client.DEFAULT_CONTROL_FRAME_MAX);
     defer msg.deinit(std.testing.allocator);
 
     switch (msg) {
@@ -803,7 +806,7 @@ test "server2 attach installs owner" {
     try h.close();
 }
 
-test "server2 owner_forward with no owner returns no_owner" {
+test "server owner_forward with no owner returns no_owner" {
     var h = try host.PtyChildHost.init(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "sleep 1" } });
     defer h.deinit();
     try h.start();
@@ -811,12 +814,12 @@ test "server2 owner_forward with no owner returns no_owner" {
     var s = SessionServer.init(std.testing.allocator, &h);
     defer s.deinit();
 
-    const path = "/tmp/msr-server2-no-owner-forward-test.sock";
+    const path = "/tmp/msr-server-no-owner-forward-test.sock";
     SessionServer.unlinkBestEffort(path);
     defer SessionServer.unlinkBestEffort(path);
     try s.listen(path);
 
-    const fd = try client2.connectUnix(path);
+    const fd = try client.connectUnix(path);
     defer _ = c.close(fd);
 
     try wire.writeMessage(std.testing.allocator, fd, .{
@@ -830,7 +833,7 @@ test "server2 owner_forward with no owner returns no_owner" {
 
     _ = try s.step();
 
-    var msg = try wire.readMessage(std.testing.allocator, fd, client2.DEFAULT_CONTROL_FRAME_MAX);
+    var msg = try wire.readMessage(std.testing.allocator, fd, client.DEFAULT_CONTROL_FRAME_MAX);
     defer msg.deinit(std.testing.allocator);
 
     switch (msg) {
@@ -847,7 +850,7 @@ test "server2 owner_forward with no owner returns no_owner" {
 }
 
 
-test "server2 malformed client message does not kill session" {
+test "server malformed client message does not kill session" {
     var h = try host.PtyChildHost.init(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "sleep 1" } });
     defer h.deinit();
     try h.start();
@@ -855,24 +858,24 @@ test "server2 malformed client message does not kill session" {
     var s = SessionServer.init(std.testing.allocator, &h);
     defer s.deinit();
 
-    const path = "/tmp/msr-server2-malformed-client-test.sock";
+    const path = "/tmp/msr-server-malformed-client-test.sock";
     SessionServer.unlinkBestEffort(path);
     defer SessionServer.unlinkBestEffort(path);
     try s.listen(path);
 
-    const bad_fd = try client2.connectUnix(path);
+    const bad_fd = try client.connectUnix(path);
     defer _ = c.close(bad_fd);
     try wire.writeFrameParts(bad_fd, .stdout_bytes, &.{"junk"});
 
     try std.testing.expectError(Error.Unsupported, s.step());
     try std.testing.expectEqual(ServerState.listening, s.getState());
 
-    const good_fd = try client2.connectUnix(path);
+    const good_fd = try client.connectUnix(path);
     defer _ = c.close(good_fd);
     try wire.writeMessage(std.testing.allocator, good_fd, .{ .control_req = .status });
     _ = try s.step();
 
-    var msg = try wire.readMessage(std.testing.allocator, good_fd, client2.DEFAULT_CONTROL_FRAME_MAX);
+    var msg = try wire.readMessage(std.testing.allocator, good_fd, client.DEFAULT_CONTROL_FRAME_MAX);
     defer msg.deinit(std.testing.allocator);
     switch (msg) {
         .control_res => |res| switch (res) {
@@ -887,7 +890,7 @@ test "server2 malformed client message does not kill session" {
     try h.close();
 }
 
-test "server2 detach-after-flush preserves queued pty output" {
+test "server detach-after-flush preserves queued pty output" {
     if (false) {
     var h = try host.PtyChildHost.init(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "printf hello; sleep 1" } });
     defer h.deinit();
@@ -896,17 +899,17 @@ test "server2 detach-after-flush preserves queued pty output" {
     var s = SessionServer.init(std.testing.allocator, &h);
     defer s.deinit();
 
-    const path = "/tmp/msr-server2-detach-flush-test.sock";
+    const path = "/tmp/msr-server-detach-flush-test.sock";
     SessionServer.unlinkBestEffort(path);
     defer SessionServer.unlinkBestEffort(path);
     try s.listen(path);
 
-    const fd = try client2.connectUnix(path);
+    const fd = try client.connectUnix(path);
     defer _ = c.close(fd);
 
     try wire.writeMessage(std.testing.allocator, fd, .{ .control_req = .{ .attach = .exclusive } });
     _ = try s.step();
-    var attach_msg = try wire.readMessage(std.testing.allocator, fd, client2.DEFAULT_CONTROL_FRAME_MAX);
+    var attach_msg = try wire.readMessage(std.testing.allocator, fd, client.DEFAULT_CONTROL_FRAME_MAX);
     defer attach_msg.deinit(std.testing.allocator);
 
     try wire.writeMessage(std.testing.allocator, fd, .owner_ready);
@@ -919,7 +922,7 @@ test "server2 detach-after-flush preserves queued pty output" {
     var loops: usize = 0;
     while (loops < 50 and (!saw_ok or !saw_stdout)) : (loops += 1) {
         _ = try s.step();
-        var msg = wire.readMessage(std.testing.allocator, fd, client2.DEFAULT_CONTROL_FRAME_MAX) catch |e| switch (e) {
+        var msg = wire.readMessage(std.testing.allocator, fd, client.DEFAULT_CONTROL_FRAME_MAX) catch |e| switch (e) {
             wire.Error.ReadFailed, wire.Error.UnexpectedEof => break,
             else => return e,
         };

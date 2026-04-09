@@ -407,7 +407,7 @@ pub const SessionAttachment = struct {
     }
 };
 
-test "client2 attachment write emits stdin_bytes frame" {
+test "client attachment write emits stdin_bytes frame" {
     var fds: [2]c_int = undefined;
     try std.testing.expectEqual(@as(c_int, 0), c.pipe(&fds));
     defer {
@@ -431,7 +431,7 @@ test "client2 attachment write emits stdin_bytes frame" {
     }
 }
 
-test "client2 attachment readStdout reads raw stdout bytes" {
+test "client attachment readStdout reads raw stdout bytes" {
     var fds: [2]c_int = undefined;
     try std.testing.expectEqual(@as(c_int, 0), c.pipe(&fds));
     defer {
@@ -452,7 +452,7 @@ test "client2 attachment readStdout reads raw stdout bytes" {
     try std.testing.expectEqualStrings("world", out);
 }
 
-test "client2 replyOwnerRequest emits owner_res" {
+test "client replyOwnerRequest emits owner_res" {
     var fds: [2]c_int = undefined;
     try std.testing.expectEqual(@as(c_int, 0), c.pipe(&fds));
     defer {
@@ -480,7 +480,7 @@ test "client2 replyOwnerRequest emits owner_res" {
     }
 }
 
-test "client2 statusText returns stable strings" {
+test "client statusText returns stable strings" {
     try std.testing.expectEqualStrings("running", statusText(.running));
     try std.testing.expectEqualStrings("closed", statusText(.closed));
 }

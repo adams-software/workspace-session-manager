@@ -16,7 +16,7 @@ It exists to make interactive session processes render and behave correctly when
 
 It is where terminal-specific complexity lives, including:
 
-- PTY process wiring
+- PTY process wiring built on the shared `ptyio` host
 - terminal state capture
 - libvterm integration
 - screen snapshotting and rendering

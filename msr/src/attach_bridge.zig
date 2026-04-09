@@ -1,5 +1,5 @@
 const std = @import("std");
-const client2 = @import("client");
+const client = @import("client");
 const core = @import("session_core");
 const wire = @import("session_wire");
 
@@ -15,7 +15,7 @@ const c = @cImport({
     @cInclude("sys/ioctl.h");
 });
 
-pub const Error = client2.Error || streaming.Error || fd_stream.Error || error{
+pub const Error = client.Error || streaming.Error || fd_stream.Error || error{
     IoError,
     UnsupportedMessage,
     StdoutUnavailable,
@@ -30,7 +30,7 @@ pub const BridgeExit = enum {
 
 const PendingTransition = union(enum) {
     exit,
-    replace_attachment: client2.SessionAttachment,
+    replace_attachment: client.SessionAttachment,
 };
 
 var winch_changed: bool = false;
@@ -41,17 +41,17 @@ fn handleSigwinch(_: c_int) callconv(.c) void {
 
 fn mapAttachRequestError(err: anyerror) core.ErrorCode {
     return switch (err) {
-        client2.Error.AttachConflict,
-        client2.Error.AttachRejected,
+        client.Error.AttachConflict,
+        client.Error.AttachRejected,
         => .attach_conflict,
 
-        client2.Error.InvalidArgs,
-        client2.Error.ConnectFailed,
-        client2.Error.PathTooLong,
-        client2.Error.ProtocolError,
-        client2.Error.IoError,
-        client2.Error.Timeout,
-        client2.Error.UnexpectedEof,
+        client.Error.InvalidArgs,
+        client.Error.ConnectFailed,
+        client.Error.PathTooLong,
+        client.Error.ProtocolError,
+        client.Error.IoError,
+        client.Error.Timeout,
+        client.Error.UnexpectedEof,
         => .invalid_args,
 
         else => .invalid_args,
@@ -103,7 +103,7 @@ fn executeForwardRequest(
             return .exit;
         },
         .attach => |path| {
-            var next_cli = client2.SessionClient.init(allocator, path) catch {
+            var next_cli = client.SessionClient.init(allocator, path) catch {
                 try queueOwnerResponse(att_transport, req.request_id, false, .invalid_args);
                 return null;
             };
@@ -171,7 +171,7 @@ fn pumpAttachmentMessages(
 
 fn applyPendingTransition(
     allocator: std.mem.Allocator,
-    attachment: *client2.SessionAttachment,
+    attachment: *client.SessionAttachment,
     att_transport: *streaming.FramedTransport,
     pending_transition: *?PendingTransition,
     in_fd: c_int,
@@ -194,7 +194,7 @@ fn applyPendingTransition(
             att_transport.* = try streaming.FramedTransport.init(
                 allocator,
                 attachment.fd,
-                client2.DEFAULT_STREAM_FRAME_MAX,
+                client.DEFAULT_STREAM_FRAME_MAX,
             );
 
             try queueOwnerReady(att_transport);
@@ -206,7 +206,7 @@ fn applyPendingTransition(
 
 pub fn runAttachBridge(
     allocator: std.mem.Allocator,
-    attachment: *client2.SessionAttachment,
+    attachment: *client.SessionAttachment,
     in_fd: c_int,
     out_fd: c_int,
 ) !BridgeExit {
@@ -220,7 +220,7 @@ pub fn runAttachBridge(
     var att_transport = try streaming.FramedTransport.init(
         allocator,
         attachment.fd,
-        client2.DEFAULT_STREAM_FRAME_MAX,
+        client.DEFAULT_STREAM_FRAME_MAX,
     );
     defer att_transport.deinit();
 

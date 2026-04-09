@@ -484,6 +484,10 @@ fn passthroughLoop(allocator: Allocator, term: *TerminalState, session: *ChildSe
 
         pollfds[0].fd = term.tty_fd;
         pollfds[0].events = c.POLLIN;
+        // When alt is used as a relay inside another PTY/stream layer, queued output
+        // can otherwise stall waiting for an unrelated readable event. Keep writable
+        // interest active whenever output is buffered, while still preserving the
+        // opportunistic same-iteration flushes below for standalone responsiveness.
         if (!output_tx.isEmpty()) pollfds[0].events |= c.POLLOUT;
         pollfds[0].revents = 0;
 

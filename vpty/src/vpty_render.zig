@@ -1,5 +1,5 @@
 const std = @import("std");
-const host = @import("host");
+const host = @import("session_host_vpty");
 const c = @cImport({
     @cInclude("unistd.h");
 });

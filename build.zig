@@ -92,15 +92,6 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
 
-    const legacy_host_mod = b.addModule("legacy_host", .{
-        .root_source_file = b.path("shared/src/host.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    legacy_host_mod.linkSystemLibrary("util", .{});
-    legacy_host_mod.addImport("terminal_state_vterm", terminal_state_vterm_mod);
-    legacy_host_mod.addImport("vterm_screen_types", vterm_screen_types_mod);
     host_mod.linkSystemLibrary("util", .{});
 
     const server_mod = b.addModule("server", .{
@@ -258,13 +249,23 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
 
+    const session_host_vpty_mod = b.addModule("session_host_vpty", .{
+        .root_source_file = b.path("vpty/src/session_host_vpty.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    session_host_vpty_mod.addImport("host", host_mod);
+    session_host_vpty_mod.addImport("terminal_state_vterm", terminal_state_vterm_mod);
+    session_host_vpty_mod.addImport("vterm_screen_types", vterm_screen_types_mod);
+
     const vpty_render_mod = b.addModule("vpty_render", .{
         .root_source_file = b.path("vpty/src/vpty_render.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
-    vpty_render_mod.addImport("host", legacy_host_mod);
+    vpty_render_mod.addImport("session_host_vpty", session_host_vpty_mod);
 
     const vpty_root = b.createModule(.{
         .root_source_file = b.path("vpty/src/vpty_main.zig"),
@@ -279,7 +280,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     vpty_root.linkSystemLibrary("util", .{});
-    vpty_root.addImport("host", legacy_host_mod);
+    vpty_root.addImport("session_host_vpty", session_host_vpty_mod);
     vpty_root.addImport("vpty_terminal", vpty_terminal_mod);
     vpty_root.addImport("vpty_render", vpty_render_mod);
     vpty_root.addImport("side_effects", side_effects);

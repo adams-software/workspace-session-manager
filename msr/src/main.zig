@@ -1,8 +1,8 @@
 const std = @import("std");
 const host = @import("host");
-const session_server2 = @import("server");
-const client2 = @import("client");
-const attach_bridge2 = @import("attach_bridge");
+const session_server = @import("server");
+const client = @import("client");
+const attach_bridge = @import("attach_bridge");
 const cli_parse = @import("cli_parse");
 const command_spec = @import("command_spec");
 const c = @cImport({
@@ -125,7 +125,7 @@ fn defaultShellArgv() [2][]const u8 {
     return .{ shell, "-i" };
 }
 
-fn signalFromCli(sig: cli_parse.SignalSpec) client2.Signal {
+fn signalFromCli(sig: cli_parse.SignalSpec) client.Signal {
     return switch (sig) {
         .term => .term,
         .int => .int,
@@ -171,7 +171,7 @@ fn waitForReady(path: []const u8, timeout_ms: u32) bool {
     const loops = timeout_ms / 10;
     var i: u32 = 0;
     while (i < loops) : (i += 1) {
-        var cli = client2.SessionClient.init(std.heap.page_allocator, path) catch {
+        var cli = client.SessionClient.init(std.heap.page_allocator, path) catch {
             _ = c.usleep(step_us);
             continue;
         };
@@ -186,15 +186,15 @@ fn waitForReady(path: []const u8, timeout_ms: u32) bool {
     return false;
 }
 
-fn openAttachmentForOwnerScopedOp(path: []const u8, takeover: bool) !struct { cli: client2.SessionClient, att: client2.SessionAttachment } {
-    var cli = try client2.SessionClient.init(std.heap.page_allocator, path);
+fn openAttachmentForOwnerScopedOp(path: []const u8, takeover: bool) !struct { cli: client.SessionClient, att: client.SessionAttachment } {
+    var cli = try client.SessionClient.init(std.heap.page_allocator, path);
     errdefer cli.deinit();
     const att = try cli.attach(if (takeover) .takeover else .exclusive);
     return .{ .cli = cli, .att = att };
 }
 
-fn runAttachDirect(path: []const u8, mode: client2.AttachMode) u8 {
-    var cli = client2.SessionClient.init(std.heap.page_allocator, path) catch {
+fn runAttachDirect(path: []const u8, mode: client.AttachMode) u8 {
+    var cli = client.SessionClient.init(std.heap.page_allocator, path) catch {
         err("msr: failed to create client\n", .{});
         return 1;
     };
@@ -206,7 +206,7 @@ fn runAttachDirect(path: []const u8, mode: client2.AttachMode) u8 {
     };
     defer att.close();
 
-    const bridge_exit = attach_bridge2.runAttachBridge(std.heap.page_allocator, &att, c.STDIN_FILENO, c.STDOUT_FILENO) catch |e| {
+    const bridge_exit = attach_bridge.runAttachBridge(std.heap.page_allocator, &att, c.STDIN_FILENO, c.STDOUT_FILENO) catch |e| {
         err("msr: attach bridge failed: {s}\n", .{@errorName(e)});
         return 1;
     };
@@ -235,14 +235,14 @@ fn runAttachDirect(path: []const u8, mode: client2.AttachMode) u8 {
     return 0;
 }
 
-fn ownerForwardWithRetry(current_session: []const u8, action: client2.ForwardAction) !void {
-    var cli = try client2.SessionClient.init(std.heap.page_allocator, current_session);
+fn ownerForwardWithRetry(current_session: []const u8, action: client.ForwardAction) !void {
+    var cli = try client.SessionClient.init(std.heap.page_allocator, current_session);
     defer cli.deinit();
 
     var attempts: usize = 0;
     while (true) : (attempts += 1) {
         cli.ownerForward(action) catch |e| switch (e) {
-            client2.Error.OwnerNotReady => {
+            client.Error.OwnerNotReady => {
                 if (attempts >= 39) return e;
                 _ = c.usleep(50_000);
                 continue;
@@ -294,14 +294,14 @@ fn runHost(path: []const u8, child_argv: []const []const u8) !u8 {
 
     try session_host.start();
 
-    var session_server = session_server2.SessionServer.init(std.heap.page_allocator, &session_host);
-    defer session_server.deinit();
+    var server_state = session_server.SessionServer.init(std.heap.page_allocator, &session_host);
+    defer server_state.deinit();
 
-    session_server.listen(path) catch |e| {
+    server_state.listen(path) catch |e| {
         switch (e) {
-            session_server2.Error.AlreadyExists => err("msr: session already exists at {s}\n", .{path}),
-            session_server2.Error.PermissionDenied => err("msr: permission denied creating session socket at {s}\n", .{path}),
-            session_server2.Error.PathTooLong => err("msr: session socket path is too long: {s}\n", .{path}),
+            session_server.Error.AlreadyExists => err("msr: session already exists at {s}\n", .{path}),
+            session_server.Error.PermissionDenied => err("msr: permission denied creating session socket at {s}\n", .{path}),
+            session_server.Error.PathTooLong => err("msr: session socket path is too long: {s}\n", .{path}),
             else => err("msr: failed to create session at {s}\n", .{path}),
         }
         return 1;
@@ -309,15 +309,15 @@ fn runHost(path: []const u8, child_argv: []const []const u8) !u8 {
 
     while (true) {
         const progressed = blk: {
-            const value = session_server.step() catch |e| {
+            const value = server_state.step() catch |e| {
                 switch (e) {
-                    session_server2.Error.Unsupported => {
+                    session_server.Error.Unsupported => {
                         err("msr: ignoring client protocol error\n", .{});
                         break :blk false;
                     },
                     else => {
                         err("msr: internal server step failed: {s}\n", .{@errorName(e)});
-                        _ = session_server.stop() catch {};
+                        _ = server_state.stop() catch {};
                         _ = session_host.close() catch {};
                         return 1;
                     },
@@ -334,7 +334,7 @@ fn runHost(path: []const u8, child_argv: []const []const u8) !u8 {
                 continue;
             },
             .exited => {
-                _ = session_server.stop() catch {};
+                _ = server_state.stop() catch {};
                 _ = session_host.close() catch {};
                 break;
             },
@@ -473,7 +473,7 @@ pub fn main(init: std.process.Init) !u8 {
                     return 1;
                 },
                 .status => |args| {
-                    var cli = client2.SessionClient.init(std.heap.page_allocator, args.path) catch {
+                    var cli = client.SessionClient.init(std.heap.page_allocator, args.path) catch {
                         err("msr: failed to create client\n", .{});
                         return 1;
                     };
@@ -484,14 +484,14 @@ pub fn main(init: std.process.Init) !u8 {
                         return 1;
                     };
 
-                    out("{s}\n", .{client2.statusText(st)});
+                    out("{s}\n", .{client.statusText(st)});
                     return switch (st) {
                         .running, .starting, .exited => 0,
                         else => 1,
                     };
                 },
                 .wait => |args| {
-                    var cli = client2.SessionClient.init(std.heap.page_allocator, args.path) catch {
+                    var cli = client.SessionClient.init(std.heap.page_allocator, args.path) catch {
                         err("msr: failed to create client\n", .{});
                         return 1;
                     };
@@ -543,7 +543,7 @@ pub fn main(init: std.process.Init) !u8 {
                     return 0;
                 },
                 .exists => |args| {
-                    var cli = client2.SessionClient.init(std.heap.page_allocator, args.path) catch {
+                    var cli = client.SessionClient.init(std.heap.page_allocator, args.path) catch {
                         out("false\n", .{});
                         return 1;
                     };
@@ -558,7 +558,7 @@ pub fn main(init: std.process.Init) !u8 {
                     return 0;
                 },
                 .terminate => |args| {
-                    var cli = client2.SessionClient.init(std.heap.page_allocator, args.path) catch {
+                    var cli = client.SessionClient.init(std.heap.page_allocator, args.path) catch {
                         err("msr: failed to create client\n", .{});
                         return 1;
                     };
@@ -575,7 +575,7 @@ pub fn main(init: std.process.Init) !u8 {
                     const shell_argv = defaultShellArgv();
                     const child_argv = args.child_argv orelse shell_argv[0..];
 
-                    var existing_cli = client2.SessionClient.init(std.heap.page_allocator, path) catch null;
+                    var existing_cli = client.SessionClient.init(std.heap.page_allocator, path) catch null;
                     if (existing_cli) |*cli| {
                         defer cli.deinit();
                         const status_res = cli.status();
@@ -583,7 +583,7 @@ pub fn main(init: std.process.Init) !u8 {
                             err("msr: session already exists at {s}\n", .{path});
                             return 1;
                         } else |e| switch (e) {
-                            client2.Error.ConnectFailed => {},
+                            client.Error.ConnectFailed => {},
                             else => {
                                 err("msr: session already exists at {s} (status probe failed: {s})\n", .{ path, @errorName(e) });
                                 return 1;

@@ -6,7 +6,7 @@ const c = @cImport({
     @cInclude("signal.h");
     @cInclude("string.h");
 });
-const host = @import("host");
+const host = @import("session_host_vpty");
 const vpty_terminal = @import("vpty_terminal");
 const vpty_render = @import("vpty_render");
 const side_effects = @import("side_effects");
