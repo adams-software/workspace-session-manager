@@ -259,6 +259,13 @@ pub fn build(b: *std.Build) void {
     session_host_vpty_mod.addImport("terminal_state_vterm", terminal_state_vterm_mod);
     session_host_vpty_mod.addImport("vterm_screen_types", vterm_screen_types_mod);
 
+    const output_sink_mod = b.addModule("output_sink", .{
+        .root_source_file = b.path("vpty/src/output_sink.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+
     const vpty_render_mod = b.addModule("vpty_render", .{
         .root_source_file = b.path("vpty/src/vpty_render.zig"),
         .target = target,
@@ -266,6 +273,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     vpty_render_mod.addImport("session_host_vpty", session_host_vpty_mod);
+    vpty_render_mod.addImport("output_sink", output_sink_mod);
 
     const vpty_root = b.createModule(.{
         .root_source_file = b.path("vpty/src/vpty_main.zig"),
@@ -279,11 +287,15 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+    side_effects.addImport("output_sink", output_sink_mod);
     vpty_root.linkSystemLibrary("util", .{});
     vpty_root.addImport("session_host_vpty", session_host_vpty_mod);
+    vpty_root.addImport("byte_queue", byte_queue_mod);
+    vpty_root.addImport("fd_stream", fd_stream_mod);
     vpty_root.addImport("vpty_terminal", vpty_terminal_mod);
     vpty_root.addImport("vpty_render", vpty_render_mod);
     vpty_root.addImport("side_effects", side_effects);
+    vpty_root.addImport("output_sink", output_sink_mod);
 
     const vpty_exe = b.addExecutable(.{
         .name = "vpty",

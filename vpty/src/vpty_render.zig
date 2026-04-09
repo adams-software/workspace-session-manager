@@ -1,8 +1,6 @@
 const std = @import("std");
 const host = @import("session_host_vpty");
-const c = @cImport({
-    @cInclude("unistd.h");
-});
+const OutputSink = @import("output_sink").OutputSink;
 
 pub const OutputState = struct {
     alt_screen: bool = false,
@@ -14,16 +12,14 @@ pub const OutputState = struct {
 
 var global_output_state: OutputState = .{};
 var global_session_host: ?*host.SessionHost = null;
+var global_output_sink: ?*OutputSink = null;
 var needs_render: bool = true;
 var last_frame: ?host.HostScreenSnapshot = null;
 
+var render_buf: std.ArrayList(u8) = .{};
+
 fn writeBytes(bytes: []const u8) void {
-    var off: usize = 0;
-    while (off < bytes.len) {
-        const n = c.write(c.STDOUT_FILENO, bytes.ptr + off, bytes.len - off);
-        if (n <= 0) return;
-        off += @intCast(n);
-    }
+    render_buf.appendSlice(std.heap.page_allocator, bytes) catch return;
 }
 
 fn out(comptime fmt: []const u8, args: anytype) void {
@@ -276,6 +272,8 @@ pub fn doRender() void {
     if (!needs_render) return;
     needs_render = false;
 
+    render_buf.clearRetainingCapacity();
+
     const session = global_session_host orelse return;
     const ts = session.terminal_state orelse return;
 
@@ -318,14 +316,24 @@ pub fn doRender() void {
     freeLastFrame();
     last_frame = snapshot;
 
+    const sink = global_output_sink orelse return;
+    sink.replaceRender(render_buf.items) catch return;
 }
 
 pub fn setGlobalSessionHost(h: *host.SessionHost) void {
     global_session_host = h;
 }
 
+pub fn setOutputSink(sink: *OutputSink) void {
+    global_output_sink = sink;
+    if (render_buf.capacity == 0) {
+        render_buf.ensureTotalCapacity(std.heap.page_allocator, 4096) catch {};
+    }
+}
+
 pub fn reset() void {
     freeLastFrame();
+    render_buf.clearRetainingCapacity();
     global_output_state = .{};
     needs_render = true;
 }
@@ -337,12 +345,13 @@ pub fn shutdown() void {
     writeBytes("\x1b[?25h");
     resetStyle();
     writeBytes("\x1b(B");
+
+    if (global_output_sink) |sink| {
+        sink.replaceRender(render_buf.items) catch {};
+    }
+
     freeLastFrame();
+    render_buf.clearRetainingCapacity();
     global_output_state = .{};
     needs_render = false;
-}
-
-fn restoreTerminalStateForFutureOutput() void {
-    resetStyle();
-    writeBytes("\x1b(B");
 }
