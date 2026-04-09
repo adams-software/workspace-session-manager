@@ -1,4 +1,5 @@
 const std = @import("std");
+const actor_mailboxes = @import("actor_mailboxes");
 const VTermAdapter = @import("terminal_state_vterm").VTermAdapter;
 const screen_types = @import("vterm_screen_types");
 
@@ -8,6 +9,10 @@ pub const ModelUpdate = struct {
     version: u64,
     dirty: bool,
     full_redraw_needed: bool,
+
+    pub fn asModelChanged(self: ModelUpdate) actor_mailboxes.ModelChanged {
+        return .{ .version = self.version };
+    }
 };
 
 pub const TerminalModel = struct {

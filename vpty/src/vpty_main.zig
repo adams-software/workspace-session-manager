@@ -13,8 +13,8 @@ const vpty_terminal = @import("vpty_terminal");
 const vpty_render = @import("vpty_render");
 const RenderActor = vpty_render.RenderActor;
 const side_effects = @import("side_effects");
-const stdout_actor_mod = @import("stdout_actor");
-const StdoutActor = stdout_actor_mod.StdoutActor;
+const stdout_thread_mod = @import("stdout_thread");
+const StdoutThread = stdout_thread_mod.StdoutThread;
 const terminal_model_mod = @import("terminal_model");
 const TerminalModel = terminal_model_mod.TerminalModel;
 
@@ -100,7 +100,7 @@ const TransportState = struct {
         }
     }
 
-    fn processOutput(self: *TransportState, model: *TerminalModel, render_actor: *RenderActor, forwarder: *side_effects.SideEffectForwarder, stdout_actor: *StdoutActor) !bool {
+    fn processOutput(self: *TransportState, model: *TerminalModel, render_actor: *RenderActor, forwarder: *side_effects.SideEffectForwarder, stdout_actor: *StdoutThread) !bool {
         var emitted_osc52 = false;
         var spins: usize = 0;
         while (!self.output_rx.isEmpty() and spins < IO_SPIN_LIMIT) : (spins += 1) {
@@ -127,7 +127,7 @@ const RenderPolicy = struct {
         self.force_render = true;
     }
 
-    fn shouldRenderNow(self: *RenderPolicy, transport: *const TransportState, model: *const TerminalModel, stdout_actor: *const StdoutActor) bool {
+    fn shouldRenderNow(self: *RenderPolicy, transport: *const TransportState, model: *const TerminalModel, stdout_actor: *const StdoutThread) bool {
         if (model.currentVersion() <= stdout_actor.committedRenderVersion()) return false;
         if (stdout_actor.pendingBytes() >= STDOUT_BACKLOG_THRESHOLD) return false;
         if (self.force_render) return true;
@@ -263,13 +263,11 @@ fn stepWake(pfds: []const c.struct_pollfd) void {
     }
 }
 
-fn stepStdoutEarly(stdout_actor: *StdoutActor, model: *TerminalModel, render_actor: *RenderActor, pfds: []const c.struct_pollfd) !void {
-    if (stdout_actor.hasPending() and (pfds[3].revents & c.POLLOUT) != 0) {
-        try flushOutput(stdout_actor);
-    }
-    if (stdout_actor.takeNewlyCommittedRenderVersion()) |version| {
-        model.markCommittedThrough(version);
-        render_actor.noteCommittedThrough(version);
+fn stepStdoutEarly(stdout_actor: *StdoutThread, model: *TerminalModel, render_actor: *RenderActor, pfds: []const c.struct_pollfd) !void {
+    _ = pfds;
+    if (stdout_actor.takeNewlyCommittedRenderVersion()) |notice| {
+        model.markCommittedThrough(notice.version);
+        render_actor.noteCommitted(notice);
     }
 }
 
@@ -289,7 +287,7 @@ fn stepPtyOutput(
     model: *TerminalModel,
     render_actor: *RenderActor,
     forwarder: *side_effects.SideEffectForwarder,
-    stdout_actor: *StdoutActor,
+    stdout_actor: *StdoutThread,
     pfds: []const c.struct_pollfd,
 ) !bool {
     if ((pfds[1].revents & c.POLLIN) != 0) {
@@ -303,21 +301,19 @@ fn stepPtyOutput(
     return emitted_osc52;
 }
 
-fn stepRender(render_actor: *RenderActor, render_policy: *RenderPolicy, transport: *const TransportState, model: *const TerminalModel, stdout_actor: *const StdoutActor, emitted_osc52: bool) void {
+fn stepRender(render_actor: *RenderActor, render_policy: *RenderPolicy, transport: *const TransportState, model: *const TerminalModel, stdout_actor: *const StdoutThread, emitted_osc52: bool) void {
     maybeRender(render_actor, render_policy, transport, model, stdout_actor, emitted_osc52);
 }
 
-fn stepStdoutLate(stdout_actor: *StdoutActor, model: *TerminalModel, render_actor: *RenderActor, pfds: []const c.struct_pollfd) !void {
-    if ((pfds[3].revents & c.POLLOUT) != 0 or !stdout_actor.hasPending()) {
-        try flushOutput(stdout_actor);
-    }
-    if (stdout_actor.takeNewlyCommittedRenderVersion()) |version| {
-        model.markCommittedThrough(version);
-        render_actor.noteCommittedThrough(version);
+fn stepStdoutLate(stdout_actor: *StdoutThread, model: *TerminalModel, render_actor: *RenderActor, pfds: []const c.struct_pollfd) !void {
+    _ = pfds;
+    if (stdout_actor.takeNewlyCommittedRenderVersion()) |notice| {
+        model.markCommittedThrough(notice.version);
+        render_actor.noteCommitted(notice);
     }
 }
 
-fn maybeRender(render_actor: *RenderActor, render_policy: *RenderPolicy, transport: *const TransportState, model: *const TerminalModel, stdout_actor: *const StdoutActor, emitted_osc52: bool) void {
+fn maybeRender(render_actor: *RenderActor, render_policy: *RenderPolicy, transport: *const TransportState, model: *const TerminalModel, stdout_actor: *const StdoutThread, emitted_osc52: bool) void {
     if (emitted_osc52) {
         render_policy.noteForced();
         return;
@@ -325,18 +321,6 @@ fn maybeRender(render_actor: *RenderActor, render_policy: *RenderPolicy, transpo
     if (!render_policy.shouldRenderNow(transport, model, stdout_actor)) return;
     render_actor.doRender();
     render_policy.noteRendered();
-}
-
-fn flushOutput(stdout_actor: *StdoutActor) !void {
-    var spins: usize = 0;
-    while (spins < IO_SPIN_LIMIT and stdout_actor.hasPending()) : (spins += 1) {
-        const status = try stdout_actor.flushSome(64 * 1024);
-        switch (status) {
-            .progress => {},
-            .would_block => return,
-            .done => return,
-        }
-    }
 }
 
 fn refreshAndMaybeExit(session_host: *host.SessionHost) !?host.ExitStatus {
@@ -352,7 +336,7 @@ fn refreshAndMaybeExit(session_host: *host.SessionHost) !?host.ExitStatus {
     return null;
 }
 
-fn pumpUntilExit(session_host: *host.SessionHost, model: *TerminalModel, render_actor: *RenderActor, terminal: *vpty_terminal.TerminalMode, forwarder: *side_effects.SideEffectForwarder, stdout_actor: *StdoutActor) !host.ExitStatus {
+fn pumpUntilExit(session_host: *host.SessionHost, model: *TerminalModel, render_actor: *RenderActor, terminal: *vpty_terminal.TerminalMode, forwarder: *side_effects.SideEffectForwarder, stdout_actor: *StdoutThread) !host.ExitStatus {
     var transport = TransportState{};
     defer transport.deinit(std.heap.page_allocator);
 
@@ -367,7 +351,7 @@ fn pumpUntilExit(session_host: *host.SessionHost, model: *TerminalModel, render_
             .{ .fd = if (transport.stdin_open) terminal.stdin_fd else -1, .events = if (transport.stdin_open) c.POLLIN else 0, .revents = 0 },
             .{ .fd = session_host.getMasterFd() orelse -1, .events = transport.ptyPollEvents(), .revents = 0 },
             .{ .fd = wake_pipe[0], .events = c.POLLIN, .revents = 0 },
-            .{ .fd = terminal.stdout_fd, .events = if (stdout_actor.hasPending()) c.POLLOUT else 0, .revents = 0 },
+            .{ .fd = -1, .events = 0, .revents = 0 },
         };
 
         const pr = c.poll(&pfds, 4, 10);
@@ -432,7 +416,7 @@ pub fn main(init: std.process.Init) !u8 {
     var forwarder = side_effects.SideEffectForwarder.init(allocator);
     defer forwarder.deinit();
 
-    var stdout_actor = StdoutActor.init(allocator);
+    var stdout_actor = StdoutThread.init(allocator);
     defer stdout_actor.deinit();
 
     var render_actor = RenderActor{};
@@ -454,6 +438,7 @@ pub fn main(init: std.process.Init) !u8 {
 
     try session_host.start();
     try terminal.enterRaw();
+    try stdout_actor.start();
 
     render_actor.setTerminalModel(&model);
     render_actor.setStdoutActor(&stdout_actor);
@@ -480,6 +465,7 @@ pub fn main(init: std.process.Init) !u8 {
 
     const status = try pumpUntilExit(&session_host, &model, &render_actor, &terminal, &forwarder, &stdout_actor);
     render_actor.shutdown();
+    stdout_actor.stop();
     terminal.restore();
     _ = session_host.close() catch {};
     return childExitCode(status);

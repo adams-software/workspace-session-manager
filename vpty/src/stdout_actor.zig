@@ -1,4 +1,5 @@
 const std = @import("std");
+const actor_mailboxes = @import("actor_mailboxes");
 const c = @cImport({
     @cInclude("unistd.h");
 });
@@ -8,6 +9,8 @@ pub const Error = error{
     UnexpectedEof,
 };
 
+pub const CommitNotice = actor_mailboxes.CommitNotice;
+
 pub const FlushStatus = union(enum) {
     progress: usize,
     would_block,
@@ -15,8 +18,8 @@ pub const FlushStatus = union(enum) {
 };
 
 pub const RenderCandidate = struct {
-    version: u64,
-    bytes: std.ArrayList(u8),
+    publish: actor_mailboxes.RenderPublish,
+    storage: std.ArrayList(u8),
     offset: usize = 0,
 };
 
@@ -38,24 +41,24 @@ pub const StdoutActor = struct {
     pub fn deinit(self: *StdoutActor) void {
         self.control_queue.deinit(self.allocator);
         if (self.pending_render) |*candidate| {
-            candidate.bytes.deinit(self.allocator);
+            candidate.storage.deinit(self.allocator);
         }
     }
 
-    pub fn enqueueControl(self: *StdoutActor, bytes: []const u8) !void {
-        try self.control_queue.appendSlice(self.allocator, bytes);
+    pub fn enqueueControl(self: *StdoutActor, chunk: actor_mailboxes.ControlChunk) !void {
+        try self.control_queue.appendSlice(self.allocator, chunk.bytes);
     }
 
-    pub fn publishRenderCandidate(self: *StdoutActor, version: u64, bytes: []const u8) !void {
+    pub fn publishRenderCandidate(self: *StdoutActor, publish: actor_mailboxes.RenderPublish) !void {
         if (self.pending_render) |*candidate| {
-            candidate.bytes.deinit(self.allocator);
+            candidate.storage.deinit(self.allocator);
         }
 
         var buf = std.ArrayList(u8){};
-        try buf.appendSlice(self.allocator, bytes);
+        try buf.appendSlice(self.allocator, publish.bytes);
         self.pending_render = .{
-            .version = version,
-            .bytes = buf,
+            .publish = .{ .version = publish.version, .bytes = buf.items },
+            .storage = buf,
             .offset = 0,
         };
     }
@@ -64,10 +67,10 @@ pub const StdoutActor = struct {
         return self.committed_render_version;
     }
 
-    pub fn takeNewlyCommittedRenderVersion(self: *StdoutActor) ?u64 {
+    pub fn takeNewlyCommittedRenderVersion(self: *StdoutActor) ?CommitNotice {
         const version = self.newly_committed_render_version;
         self.newly_committed_render_version = null;
-        return version;
+        return if (version) |v| CommitNotice{ .version = v } else null;
     }
 
     pub fn hasPending(self: *const StdoutActor) bool {
@@ -80,7 +83,7 @@ pub const StdoutActor = struct {
         else
             0;
         const render_pending = if (self.pending_render) |candidate|
-            candidate.bytes.items.len - candidate.offset
+            candidate.storage.items.len - candidate.offset
         else
             0;
         return control_pending + render_pending;
@@ -109,7 +112,7 @@ pub const StdoutActor = struct {
             }
 
             if (self.pending_render) |*candidate| {
-                const remaining = candidate.bytes.items[candidate.offset..];
+                const remaining = candidate.storage.items[candidate.offset..];
                 const chunk = remaining[0..@min(remaining.len, max_bytes - total_written)];
                 const n = try writeSome(chunk);
                 switch (n) {
@@ -117,10 +120,10 @@ pub const StdoutActor = struct {
                     .written => |written| {
                         total_written += written;
                         candidate.offset += written;
-                        if (candidate.offset == candidate.bytes.items.len) {
-                            self.committed_render_version = candidate.version;
-                            self.newly_committed_render_version = candidate.version;
-                            candidate.bytes.deinit(self.allocator);
+                        if (candidate.offset == candidate.storage.items.len) {
+                            self.committed_render_version = candidate.publish.version;
+                            self.newly_committed_render_version = candidate.publish.version;
+                            candidate.storage.deinit(self.allocator);
                             self.pending_render = null;
                         }
                     },

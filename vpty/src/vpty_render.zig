@@ -1,7 +1,8 @@
 const std = @import("std");
+const actor_mailboxes = @import("actor_mailboxes");
 const host = @import("session_host_vpty");
 const TerminalModel = @import("terminal_model").TerminalModel;
-const StdoutActor = @import("stdout_actor").StdoutActor;
+const StdoutThread = @import("stdout_thread").StdoutThread;
 
 pub const OutputState = struct {
     alt_screen: bool = false,
@@ -14,7 +15,9 @@ pub const OutputState = struct {
 pub const RenderActor = struct {
     output_state: OutputState = .{},
     terminal_model: ?*TerminalModel = null,
-    stdout_actor: ?*StdoutActor = null,
+    stdout_actor: ?*StdoutThread = null,
+    latest_model_changed: ?actor_mailboxes.ModelChanged = null,
+    latest_commit_notice: ?actor_mailboxes.CommitNotice = null,
     needs_render: bool = true,
     last_generated_frame: ?host.HostScreenSnapshot = null,
     last_generated_version: u64 = 0,
@@ -32,55 +35,78 @@ pub const RenderActor = struct {
         self.terminal_model = model;
     }
 
-    pub fn setStdoutActor(self: *RenderActor, stdout_actor: *StdoutActor) void {
+    pub fn setStdoutActor(self: *RenderActor, stdout_actor: *StdoutThread) void {
         self.stdout_actor = stdout_actor;
         if (self.render_buf.capacity == 0) {
             self.render_buf.ensureTotalCapacity(std.heap.page_allocator, 4096) catch {};
         }
     }
 
+    pub fn publishModelChanged(self: *RenderActor, changed: actor_mailboxes.ModelChanged) void {
+        self.latest_model_changed = changed;
+        self.needs_render = true;
+    }
+
     pub fn renderDamaged(self: *RenderActor) void {
         self.needs_render = true;
     }
 
-    pub fn doRender(self: *RenderActor) void {
-        if (!self.needs_render) return;
+    pub fn takeSnapshot(self: *RenderActor) ?struct { version: u64, snapshot: host.HostScreenSnapshot } {
+        if (!self.needs_render) return null;
+
+        const model = self.terminal_model orelse return null;
+        const snapshot = model.snapshot(std.heap.page_allocator) catch return null;
+        return .{ .version = model.currentVersion(), .snapshot = snapshot };
+    }
+
+    pub fn renderSnapshot(self: *RenderActor, version: u64, snapshot: host.HostScreenSnapshot) void {
+        if (!self.needs_render) {
+            var discarded = snapshot;
+            host.freeScreenSnapshot(std.heap.page_allocator, &discarded);
+            return;
+        }
         self.needs_render = false;
 
         self.render_buf.clearRetainingCapacity();
 
-        const model = self.terminal_model orelse return;
+        var owned_snapshot = snapshot;
+        errdefer host.freeScreenSnapshot(std.heap.page_allocator, &owned_snapshot);
 
-        var snapshot = model.snapshot(std.heap.page_allocator) catch return;
-        errdefer host.freeScreenSnapshot(std.heap.page_allocator, &snapshot);
-
-        if (snapshot.alt_screen != self.output_state.alt_screen or !self.output_state.has_drawn) {
-            self.writeBytes(if (snapshot.alt_screen) "\x1b[?1049h" else "\x1b[?1049l");
-            self.output_state.alt_screen = snapshot.alt_screen;
+        if (owned_snapshot.alt_screen != self.output_state.alt_screen or !self.output_state.has_drawn) {
+            self.writeBytes(if (owned_snapshot.alt_screen) "\x1b[?1049h" else "\x1b[?1049l");
+            self.output_state.alt_screen = owned_snapshot.alt_screen;
         }
 
         self.writeBytes("\x1b[?25l");
-        self.renderFullFrame(&snapshot);
+        self.renderFullFrame(&owned_snapshot);
 
-        self.moveCursor(snapshot.cursor_row, snapshot.cursor_col);
+        self.moveCursor(owned_snapshot.cursor_row, owned_snapshot.cursor_col);
 
-        if (snapshot.cursor_visible != self.output_state.cursor_visible) {
-            self.writeBytes(if (snapshot.cursor_visible) "\x1b[?25h" else "\x1b[?25l");
-            self.output_state.cursor_visible = snapshot.cursor_visible;
-        } else if (snapshot.cursor_visible) {
+        if (owned_snapshot.cursor_visible != self.output_state.cursor_visible) {
+            self.writeBytes(if (owned_snapshot.cursor_visible) "\x1b[?25h" else "\x1b[?25l");
+            self.output_state.cursor_visible = owned_snapshot.cursor_visible;
+        } else if (owned_snapshot.cursor_visible) {
             self.writeBytes("\x1b[?25h");
         }
 
-        self.output_state.cursor_row = snapshot.cursor_row;
-        self.output_state.cursor_col = snapshot.cursor_col;
+        self.output_state.cursor_row = owned_snapshot.cursor_row;
+        self.output_state.cursor_col = owned_snapshot.cursor_col;
         self.output_state.has_drawn = true;
 
         self.freeLastGeneratedFrame();
-        self.last_generated_frame = snapshot;
-        self.last_generated_version = model.currentVersion();
+        self.last_generated_frame = owned_snapshot;
+        self.last_generated_version = version;
 
         const stdout_actor = self.stdout_actor orelse return;
-        stdout_actor.publishRenderCandidate(self.last_generated_version, self.render_buf.items) catch return;
+        stdout_actor.publishRenderCandidate(actor_mailboxes.RenderPublish{
+            .version = self.last_generated_version,
+            .bytes = self.render_buf.items,
+        }) catch return;
+    }
+
+    pub fn doRender(self: *RenderActor) void {
+        const captured = self.takeSnapshot() orelse return;
+        self.renderSnapshot(captured.version, captured.snapshot);
     }
 
     pub fn reset(self: *RenderActor) void {
@@ -88,19 +114,26 @@ pub const RenderActor = struct {
         self.freeCommittedFrame();
         self.render_buf.clearRetainingCapacity();
         self.output_state = .{};
+        self.latest_model_changed = null;
+        self.latest_commit_notice = null;
         self.last_generated_version = 0;
         self.committed_version = 0;
         self.needs_render = true;
     }
 
-    pub fn noteCommittedThrough(self: *RenderActor, version: u64) void {
+    pub fn noteCommitted(self: *RenderActor, notice: actor_mailboxes.CommitNotice) void {
+        self.latest_commit_notice = notice;
         if (self.last_generated_frame == null) return;
-        if (self.last_generated_version == 0 or self.last_generated_version > version) return;
+        if (self.last_generated_version == 0 or self.last_generated_version > notice.version) return;
 
         self.freeCommittedFrame();
         self.committed_frame = self.last_generated_frame;
         self.committed_version = self.last_generated_version;
         self.last_generated_frame = null;
+    }
+
+    pub fn noteCommittedThrough(self: *RenderActor, version: u64) void {
+        self.noteCommitted(.{ .version = version });
     }
 
     pub fn shutdown(self: *RenderActor) void {
@@ -115,13 +148,18 @@ pub const RenderActor = struct {
 
         if (self.stdout_actor) |stdout_actor| {
             const version = if (self.terminal_model) |model| model.currentVersion() else 0;
-            stdout_actor.publishRenderCandidate(version, self.render_buf.items) catch {};
+            stdout_actor.publishRenderCandidate(actor_mailboxes.RenderPublish{
+                .version = version,
+                .bytes = self.render_buf.items,
+            }) catch {};
         }
 
         self.freeLastGeneratedFrame();
         self.freeCommittedFrame();
         self.render_buf.clearRetainingCapacity();
         self.output_state = .{};
+        self.latest_model_changed = null;
+        self.latest_commit_notice = null;
         self.last_generated_version = 0;
         self.committed_version = 0;
         self.needs_render = false;

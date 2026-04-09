@@ -1,5 +1,5 @@
 const std = @import("std");
-const StdoutActor = @import("stdout_actor").StdoutActor;
+const actor_mailboxes = @import("actor_mailboxes");
 
 const State = enum {
     idle,
@@ -52,8 +52,8 @@ pub const SideEffectForwarder = struct {
         try self.screen_buf.append(self.allocator, b);
     }
 
-    fn flushOsc52(self: *SideEffectForwarder, stdout_actor: *StdoutActor) !void {
-        try stdout_actor.enqueueControl(self.osc_buf.items);
+    fn flushOsc52(self: *SideEffectForwarder, stdout_actor: anytype) !void {
+        try stdout_actor.enqueueControl(actor_mailboxes.ControlChunk{ .bytes = self.osc_buf.items });
     }
 
     fn resetOsc(self: *SideEffectForwarder) void {
@@ -61,7 +61,7 @@ pub const SideEffectForwarder = struct {
         self.state = .idle;
     }
 
-    pub fn feed(self: *SideEffectForwarder, stdout_actor: *StdoutActor, bytes: []const u8) !FeedResult {
+    pub fn feed(self: *SideEffectForwarder, stdout_actor: anytype, bytes: []const u8) !FeedResult {
         self.screen_buf.clearRetainingCapacity();
         var result = FeedResult{
             .emitted_osc52 = false,

@@ -274,6 +274,24 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
 
+    const actor_mailboxes_mod = b.addModule("actor_mailboxes", .{
+        .root_source_file = b.path("vpty/src/actor_mailboxes.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    terminal_model_mod.addImport("actor_mailboxes", actor_mailboxes_mod);
+    stdout_actor_mod.addImport("actor_mailboxes", actor_mailboxes_mod);
+
+    const stdout_thread_mod = b.addModule("stdout_thread", .{
+        .root_source_file = b.path("vpty/src/stdout_thread.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    stdout_thread_mod.addImport("stdout_actor", stdout_actor_mod);
+    stdout_thread_mod.addImport("actor_mailboxes", actor_mailboxes_mod);
+
     const vpty_render_mod = b.addModule("vpty_render", .{
         .root_source_file = b.path("vpty/src/vpty_render.zig"),
         .target = target,
@@ -281,8 +299,20 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     vpty_render_mod.addImport("session_host_vpty", session_host_vpty_mod);
-    vpty_render_mod.addImport("stdout_actor", stdout_actor_mod);
+    vpty_render_mod.addImport("stdout_thread", stdout_thread_mod);
     vpty_render_mod.addImport("terminal_model", terminal_model_mod);
+    vpty_render_mod.addImport("actor_mailboxes", actor_mailboxes_mod);
+
+    const render_thread_mod = b.addModule("render_thread", .{
+        .root_source_file = b.path("vpty/src/render_thread.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    render_thread_mod.addImport("vpty_render", vpty_render_mod);
+    render_thread_mod.addImport("terminal_model", terminal_model_mod);
+    render_thread_mod.addImport("stdout_thread", stdout_thread_mod);
+    render_thread_mod.addImport("actor_mailboxes", actor_mailboxes_mod);
 
     const vpty_root = b.createModule(.{
         .root_source_file = b.path("vpty/src/vpty_main.zig"),
@@ -297,15 +327,19 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     side_effects.addImport("stdout_actor", stdout_actor_mod);
+    side_effects.addImport("actor_mailboxes", actor_mailboxes_mod);
     vpty_root.linkSystemLibrary("util", .{});
     vpty_root.addImport("session_host_vpty", session_host_vpty_mod);
     vpty_root.addImport("byte_queue", byte_queue_mod);
     vpty_root.addImport("fd_stream", fd_stream_mod);
     vpty_root.addImport("vpty_terminal", vpty_terminal_mod);
     vpty_root.addImport("vpty_render", vpty_render_mod);
+    vpty_root.addImport("render_thread", render_thread_mod);
     vpty_root.addImport("side_effects", side_effects);
     vpty_root.addImport("terminal_model", terminal_model_mod);
     vpty_root.addImport("stdout_actor", stdout_actor_mod);
+    vpty_root.addImport("stdout_thread", stdout_thread_mod);
+    vpty_root.addImport("actor_mailboxes", actor_mailboxes_mod);
 
     const vpty_exe = b.addExecutable(.{
         .name = "vpty",
