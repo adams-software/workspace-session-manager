@@ -1,5 +1,5 @@
 const std = @import("std");
-const OutputSink = @import("output_sink").OutputSink;
+const StdoutActor = @import("stdout_actor").StdoutActor;
 
 const State = enum {
     idle,
@@ -52,8 +52,8 @@ pub const SideEffectForwarder = struct {
         try self.screen_buf.append(self.allocator, b);
     }
 
-    fn flushOsc52(self: *SideEffectForwarder, sink: *OutputSink) !void {
-        try sink.appendControl(self.osc_buf.items);
+    fn flushOsc52(self: *SideEffectForwarder, stdout_actor: *StdoutActor) !void {
+        try stdout_actor.enqueueControl(self.osc_buf.items);
     }
 
     fn resetOsc(self: *SideEffectForwarder) void {
@@ -61,7 +61,7 @@ pub const SideEffectForwarder = struct {
         self.state = .idle;
     }
 
-    pub fn feed(self: *SideEffectForwarder, sink: *OutputSink, bytes: []const u8) !FeedResult {
+    pub fn feed(self: *SideEffectForwarder, stdout_actor: *StdoutActor, bytes: []const u8) !FeedResult {
         self.screen_buf.clearRetainingCapacity();
         var result = FeedResult{
             .emitted_osc52 = false,
@@ -119,7 +119,7 @@ pub const SideEffectForwarder = struct {
                     try self.appendOsc(b);
 
                     if (b == 0x07) {
-                        try self.flushOsc52(sink);
+                        try self.flushOsc52(stdout_actor);
                         result.emitted_osc52 = true;
                         self.resetOsc();
                     } else if (b == 0x1b) {
@@ -141,7 +141,7 @@ pub const SideEffectForwarder = struct {
                     try self.appendOsc(b);
 
                     if (b == '\\') {
-                        try self.flushOsc52(sink);
+                        try self.flushOsc52(stdout_actor);
                         result.emitted_osc52 = true;
                         self.resetOsc();
                     } else {

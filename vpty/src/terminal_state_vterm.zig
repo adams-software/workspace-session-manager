@@ -19,13 +19,11 @@ fn convertColor(raw: c.msr_vterm_color, is_fg: bool) screen_types.HostColor {
 
 pub const VTermAdapter = struct {
     handle: ?*c.msr_vterm_handle,
-    render_callback: ?*const fn () void = null,
 
     pub fn init(rows: u16, cols: u16) !VTermAdapter {
         const handle = c.msr_vterm_new(@intCast(rows), @intCast(cols)) orelse return error.OutOfMemory;
         return .{
             .handle = handle,
-            .render_callback = null,
         };
     }
 
@@ -36,15 +34,10 @@ pub const VTermAdapter = struct {
         }
     }
 
-    pub fn setRenderCallback(self: *VTermAdapter, callback: *const fn () void) void {
-        self.render_callback = callback;
-    }
-
     pub fn feed(self: *VTermAdapter, bytes: []const u8) void {
         if (self.handle) |handle| {
             c.msr_vterm_feed(handle, bytes.ptr, bytes.len);
             c.msr_vterm_flush_damage(handle);
-            if (self.render_callback) |cb| cb();
         }
     }
 

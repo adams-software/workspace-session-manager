@@ -1,6 +1,7 @@
 const std = @import("std");
 const host = @import("session_host_vpty");
-const OutputSink = @import("output_sink").OutputSink;
+const TerminalModel = @import("terminal_model").TerminalModel;
+const StdoutActor = @import("stdout_actor").StdoutActor;
 
 pub const OutputState = struct {
     alt_screen: bool = false,
@@ -10,39 +11,220 @@ pub const OutputState = struct {
     has_drawn: bool = false,
 };
 
-var global_output_state: OutputState = .{};
-var global_session_host: ?*host.SessionHost = null;
-var global_output_sink: ?*OutputSink = null;
-var needs_render: bool = true;
-var last_frame: ?host.HostScreenSnapshot = null;
+pub const RenderActor = struct {
+    output_state: OutputState = .{},
+    terminal_model: ?*TerminalModel = null,
+    stdout_actor: ?*StdoutActor = null,
+    needs_render: bool = true,
+    last_generated_frame: ?host.HostScreenSnapshot = null,
+    last_generated_version: u64 = 0,
+    committed_frame: ?host.HostScreenSnapshot = null,
+    committed_version: u64 = 0,
+    render_buf: std.ArrayList(u8) = .{},
 
-var render_buf: std.ArrayList(u8) = .{};
+    pub fn deinit(self: *RenderActor) void {
+        self.freeLastGeneratedFrame();
+        self.freeCommittedFrame();
+        self.render_buf.deinit(std.heap.page_allocator);
+    }
 
-fn writeBytes(bytes: []const u8) void {
-    render_buf.appendSlice(std.heap.page_allocator, bytes) catch return;
-}
+    pub fn setTerminalModel(self: *RenderActor, model: *TerminalModel) void {
+        self.terminal_model = model;
+    }
 
-fn out(comptime fmt: []const u8, args: anytype) void {
-    var buf: [256]u8 = undefined;
-    const rendered = std.fmt.bufPrint(&buf, fmt, args) catch return;
-    writeBytes(rendered);
-}
+    pub fn setStdoutActor(self: *RenderActor, stdout_actor: *StdoutActor) void {
+        self.stdout_actor = stdout_actor;
+        if (self.render_buf.capacity == 0) {
+            self.render_buf.ensureTotalCapacity(std.heap.page_allocator, 4096) catch {};
+        }
+    }
 
-fn resetStyle() void {
-    writeBytes("\x1b[0m");
-}
+    pub fn renderDamaged(self: *RenderActor) void {
+        self.needs_render = true;
+    }
 
-fn moveCursor(row: u16, col: u16) void {
-    out("\x1b[{d};{d}H", .{ row + 1, col + 1 });
-}
+    pub fn doRender(self: *RenderActor) void {
+        if (!self.needs_render) return;
+        self.needs_render = false;
 
-fn clearScreen() void {
-    writeBytes("\x1b[2J\x1b[H");
-}
+        self.render_buf.clearRetainingCapacity();
 
-fn eraseToEndOfLine() void {
-    writeBytes("\x1b[K");
-}
+        const model = self.terminal_model orelse return;
+
+        var snapshot = model.snapshot(std.heap.page_allocator) catch return;
+        errdefer host.freeScreenSnapshot(std.heap.page_allocator, &snapshot);
+
+        if (snapshot.alt_screen != self.output_state.alt_screen or !self.output_state.has_drawn) {
+            self.writeBytes(if (snapshot.alt_screen) "\x1b[?1049h" else "\x1b[?1049l");
+            self.output_state.alt_screen = snapshot.alt_screen;
+        }
+
+        self.writeBytes("\x1b[?25l");
+        self.renderFullFrame(&snapshot);
+
+        self.moveCursor(snapshot.cursor_row, snapshot.cursor_col);
+
+        if (snapshot.cursor_visible != self.output_state.cursor_visible) {
+            self.writeBytes(if (snapshot.cursor_visible) "\x1b[?25h" else "\x1b[?25l");
+            self.output_state.cursor_visible = snapshot.cursor_visible;
+        } else if (snapshot.cursor_visible) {
+            self.writeBytes("\x1b[?25h");
+        }
+
+        self.output_state.cursor_row = snapshot.cursor_row;
+        self.output_state.cursor_col = snapshot.cursor_col;
+        self.output_state.has_drawn = true;
+
+        self.freeLastGeneratedFrame();
+        self.last_generated_frame = snapshot;
+        self.last_generated_version = model.currentVersion();
+
+        const stdout_actor = self.stdout_actor orelse return;
+        stdout_actor.publishRenderCandidate(self.last_generated_version, self.render_buf.items) catch return;
+    }
+
+    pub fn reset(self: *RenderActor) void {
+        self.freeLastGeneratedFrame();
+        self.freeCommittedFrame();
+        self.render_buf.clearRetainingCapacity();
+        self.output_state = .{};
+        self.last_generated_version = 0;
+        self.committed_version = 0;
+        self.needs_render = true;
+    }
+
+    pub fn noteCommittedThrough(self: *RenderActor, version: u64) void {
+        if (self.last_generated_frame == null) return;
+        if (self.last_generated_version == 0 or self.last_generated_version > version) return;
+
+        self.freeCommittedFrame();
+        self.committed_frame = self.last_generated_frame;
+        self.committed_version = self.last_generated_version;
+        self.last_generated_frame = null;
+    }
+
+    pub fn shutdown(self: *RenderActor) void {
+        self.render_buf.clearRetainingCapacity();
+
+        if (self.output_state.alt_screen) {
+            self.writeBytes("\x1b[?1049l");
+        }
+        self.writeBytes("\x1b[?25h");
+        self.resetStyle();
+        self.writeBytes("\x1b(B");
+
+        if (self.stdout_actor) |stdout_actor| {
+            const version = if (self.terminal_model) |model| model.currentVersion() else 0;
+            stdout_actor.publishRenderCandidate(version, self.render_buf.items) catch {};
+        }
+
+        self.freeLastGeneratedFrame();
+        self.freeCommittedFrame();
+        self.render_buf.clearRetainingCapacity();
+        self.output_state = .{};
+        self.last_generated_version = 0;
+        self.committed_version = 0;
+        self.needs_render = false;
+    }
+
+    fn writeBytes(self: *RenderActor, bytes: []const u8) void {
+        self.render_buf.appendSlice(std.heap.page_allocator, bytes) catch return;
+    }
+
+    fn out(self: *RenderActor, comptime fmt: []const u8, args: anytype) void {
+        var buf: [256]u8 = undefined;
+        const rendered = std.fmt.bufPrint(&buf, fmt, args) catch return;
+        self.writeBytes(rendered);
+    }
+
+    fn resetStyle(self: *RenderActor) void {
+        self.writeBytes("\x1b[0m");
+    }
+
+    fn moveCursor(self: *RenderActor, row: u16, col: u16) void {
+        self.out("\x1b[{d};{d}H", .{ row + 1, col + 1 });
+    }
+
+    fn clearScreen(self: *RenderActor) void {
+        self.writeBytes("\x1b[2J\x1b[H");
+    }
+
+    fn eraseToEndOfLine(self: *RenderActor) void {
+        self.writeBytes("\x1b[K");
+    }
+
+    fn renderFullFrame(self: *RenderActor, snapshot: *const host.HostScreenSnapshot) void {
+        self.clearScreen();
+
+        var style_state = StyleState{};
+        style_state.reset(self);
+
+        for (snapshot.lines, 0..) |line, row_idx| {
+            self.moveCursor(@intCast(row_idx), 0);
+
+            var col: usize = 0;
+            while (col < line.cells.len) : (col += 1) {
+                emitCell(self, line.cells[col], &style_state);
+            }
+
+            if (line.eol) {
+                self.eraseToEndOfLine();
+            }
+        }
+    }
+
+    fn renderDiff(self: *RenderActor, prev: *const host.HostScreenSnapshot, next: *const host.HostScreenSnapshot) void {
+        if (prev.rows != next.rows or prev.cols != next.cols) {
+            self.renderFullFrame(next);
+            return;
+        }
+
+        var style_state = StyleState{};
+        style_state.reset(self);
+
+        for (next.lines, 0..) |next_line, row_idx| {
+            const prev_line = prev.lines[row_idx];
+
+            if (lineEqual(prev_line, next_line)) continue;
+
+            var col: usize = 0;
+            while (col < next_line.cells.len) {
+                if (cellEqual(prev_line.cells[col], next_line.cells[col])) {
+                    col += 1;
+                    continue;
+                }
+
+                const run_start = col;
+                col += 1;
+
+                while (col < next_line.cells.len and !cellEqual(prev_line.cells[col], next_line.cells[col])) : (col += 1) {}
+
+                renderChangedRun(self, row_idx, run_start, col, next_line, &style_state);
+            }
+
+            const prev_end = lineVisibleEnd(prev_line);
+            const next_end = lineVisibleEnd(next_line);
+            if (prev_end > next_end or next_line.eol != prev_line.eol) {
+                self.moveCursor(@intCast(row_idx), @intCast(next_end));
+                self.eraseToEndOfLine();
+            }
+        }
+    }
+
+    fn freeLastGeneratedFrame(self: *RenderActor) void {
+        if (self.last_generated_frame) |*snap| {
+            host.freeScreenSnapshot(std.heap.page_allocator, snap);
+            self.last_generated_frame = null;
+        }
+    }
+
+    fn freeCommittedFrame(self: *RenderActor) void {
+        if (self.committed_frame) |*snap| {
+            host.freeScreenSnapshot(std.heap.page_allocator, snap);
+            self.committed_frame = null;
+        }
+    }
+};
 
 fn isValidUnicodeScalar(cp: u32) bool {
     if (cp > 0x10FFFF) return false;
@@ -84,49 +266,49 @@ const StyleState = struct {
     bg: host.HostColor = .{},
     attrs: host.HostCellAttrs = .{},
 
-    fn reset(self: *StyleState) void {
-        resetStyle();
+    fn reset(self: *StyleState, actor: *RenderActor) void {
+        actor.resetStyle();
         self.* = .{};
     }
 
-    fn emitBool(on_code: []const u8, off_code: []const u8, current: *bool, target: bool) void {
+    fn emitBool(actor: *RenderActor, on_code: []const u8, off_code: []const u8, current: *bool, target: bool) void {
         if (current.* == target) return;
-        writeBytes(if (target) on_code else off_code);
+        actor.writeBytes(if (target) on_code else off_code);
         current.* = target;
     }
 
-    fn diffAndEmit(self: *StyleState, cell: host.HostScreenCell) void {
-        emitBool("\x1b[1m", "\x1b[22m", &self.attrs.bold, cell.attrs.bold);
-        emitBool("\x1b[3m", "\x1b[23m", &self.attrs.italic, cell.attrs.italic);
-        emitBool("\x1b[4m", "\x1b[24m", &self.attrs.underline, cell.attrs.underline);
-        emitBool("\x1b[5m", "\x1b[25m", &self.attrs.blink, cell.attrs.blink);
-        emitBool("\x1b[7m", "\x1b[27m", &self.attrs.reverse, cell.attrs.reverse);
-        emitBool("\x1b[8m", "\x1b[28m", &self.attrs.conceal, cell.attrs.conceal);
-        emitBool("\x1b[9m", "\x1b[29m", &self.attrs.strike, cell.attrs.strike);
+    fn diffAndEmit(self: *StyleState, actor: *RenderActor, cell: host.HostScreenCell) void {
+        emitBool(actor, "\x1b[1m", "\x1b[22m", &self.attrs.bold, cell.attrs.bold);
+        emitBool(actor, "\x1b[3m", "\x1b[23m", &self.attrs.italic, cell.attrs.italic);
+        emitBool(actor, "\x1b[4m", "\x1b[24m", &self.attrs.underline, cell.attrs.underline);
+        emitBool(actor, "\x1b[5m", "\x1b[25m", &self.attrs.blink, cell.attrs.blink);
+        emitBool(actor, "\x1b[7m", "\x1b[27m", &self.attrs.reverse, cell.attrs.reverse);
+        emitBool(actor, "\x1b[8m", "\x1b[28m", &self.attrs.conceal, cell.attrs.conceal);
+        emitBool(actor, "\x1b[9m", "\x1b[29m", &self.attrs.strike, cell.attrs.strike);
 
         if (self.attrs.font != cell.attrs.font) {
             if (cell.attrs.font == 0) {
-                writeBytes("\x1b[10m");
+                actor.writeBytes("\x1b[10m");
             } else {
-                out("\x1b[{d}m", .{10 + cell.attrs.font});
+                actor.out("\x1b[{d}m", .{10 + cell.attrs.font});
             }
             self.attrs.font = cell.attrs.font;
         }
 
         if (!std.meta.eql(self.fg, cell.fg)) {
             switch (cell.fg.kind) {
-                .default => writeBytes("\x1b[39m"),
-                .indexed => out("\x1b[38;5;{d}m", .{cell.fg.palette_index}),
-                .rgb => out("\x1b[38;2;{d};{d};{d}m", .{ cell.fg.red, cell.fg.green, cell.fg.blue }),
+                .default => actor.writeBytes("\x1b[39m"),
+                .indexed => actor.out("\x1b[38;5;{d}m", .{cell.fg.palette_index}),
+                .rgb => actor.out("\x1b[38;2;{d};{d};{d}m", .{ cell.fg.red, cell.fg.green, cell.fg.blue }),
             }
             self.fg = cell.fg;
         }
 
         if (!std.meta.eql(self.bg, cell.bg)) {
             switch (cell.bg.kind) {
-                .default => writeBytes("\x1b[49m"),
-                .indexed => out("\x1b[48;5;{d}m", .{cell.bg.palette_index}),
-                .rgb => out("\x1b[48;2;{d};{d};{d}m", .{ cell.bg.red, cell.bg.green, cell.bg.blue }),
+                .default => actor.writeBytes("\x1b[49m"),
+                .indexed => actor.out("\x1b[48;5;{d}m", .{cell.bg.palette_index}),
+                .rgb => actor.out("\x1b[48;2;{d};{d};{d}m", .{ cell.bg.red, cell.bg.green, cell.bg.blue }),
             }
             self.bg = cell.bg;
         }
@@ -164,22 +346,23 @@ fn lineVisibleEnd(line: host.HostScreenLine) usize {
     return 0;
 }
 
-fn emitCell(cell: host.HostScreenCell, style_state: *StyleState) void {
+fn emitCell(actor: *RenderActor, cell: host.HostScreenCell, style_state: *StyleState) void {
     if (cell.width == 0) return;
 
-    style_state.diffAndEmit(cell);
+    style_state.diffAndEmit(actor, cell);
 
     if (cell.chars_len == 0) {
-        writeBytes(" ");
+        actor.writeBytes(" ");
         return;
     }
 
     var buf: [32]u8 = undefined;
     const text = encodeCodepoints(&buf, cell);
-    writeBytes(text);
+    actor.writeBytes(text);
 }
 
 fn renderChangedRun(
+    actor: *RenderActor,
     row_idx: usize,
     start_col: usize,
     end_col: usize,
@@ -191,167 +374,10 @@ fn renderChangedRun(
         draw_start -= 1;
     }
 
-    moveCursor(@intCast(row_idx), @intCast(draw_start));
+    actor.moveCursor(@intCast(row_idx), @intCast(draw_start));
 
     var col = draw_start;
     while (col < end_col and col < line.cells.len) : (col += 1) {
-        emitCell(line.cells[col], style_state);
+        emitCell(actor, line.cells[col], style_state);
     }
-}
-
-fn renderFullFrame(snapshot: *const host.HostScreenSnapshot) void {
-    clearScreen();
-
-    var style_state = StyleState{};
-    style_state.reset();
-
-    for (snapshot.lines, 0..) |line, row_idx| {
-        moveCursor(@intCast(row_idx), 0);
-
-        var col: usize = 0;
-        while (col < line.cells.len) : (col += 1) {
-            emitCell(line.cells[col], &style_state);
-        }
-
-        if (line.eol) {
-            eraseToEndOfLine();
-        }
-    }
-}
-
-fn renderDiff(prev: *const host.HostScreenSnapshot, next: *const host.HostScreenSnapshot) void {
-    if (prev.rows != next.rows or prev.cols != next.cols) {
-        renderFullFrame(next);
-        return;
-    }
-
-    var style_state = StyleState{};
-    style_state.reset();
-
-    for (next.lines, 0..) |next_line, row_idx| {
-        const prev_line = prev.lines[row_idx];
-
-        if (lineEqual(prev_line, next_line)) continue;
-
-        var col: usize = 0;
-        while (col < next_line.cells.len) {
-            if (cellEqual(prev_line.cells[col], next_line.cells[col])) {
-                col += 1;
-                continue;
-            }
-
-            const run_start = col;
-            col += 1;
-
-            while (col < next_line.cells.len and !cellEqual(prev_line.cells[col], next_line.cells[col])) : (col += 1) {}
-
-            renderChangedRun(row_idx, run_start, col, next_line, &style_state);
-        }
-
-        const prev_end = lineVisibleEnd(prev_line);
-        const next_end = lineVisibleEnd(next_line);
-        if (prev_end > next_end or next_line.eol != prev_line.eol) {
-            moveCursor(@intCast(row_idx), @intCast(next_end));
-            eraseToEndOfLine();
-        }
-    }
-}
-
-fn freeLastFrame() void {
-    if (last_frame) |*snap| {
-        host.freeScreenSnapshot(std.heap.page_allocator, snap);
-        last_frame = null;
-    }
-}
-
-pub fn renderDamaged() void {
-    needs_render = true;
-}
-
-pub fn doRender() void {
-    if (!needs_render) return;
-    needs_render = false;
-
-    render_buf.clearRetainingCapacity();
-
-    const session = global_session_host orelse return;
-    const ts = session.terminal_state orelse return;
-
-    var snapshot = ts.snapshot(std.heap.page_allocator) catch return;
-    errdefer host.freeScreenSnapshot(std.heap.page_allocator, &snapshot);
-
-    if (!global_output_state.has_drawn or last_frame == null) {
-        if (snapshot.alt_screen != global_output_state.alt_screen or !global_output_state.has_drawn) {
-            writeBytes(if (snapshot.alt_screen) "\x1b[?1049h" else "\x1b[?1049l");
-            global_output_state.alt_screen = snapshot.alt_screen;
-        }
-
-        writeBytes("\x1b[?25l");
-        renderFullFrame(&snapshot);
-    } else {
-        if (snapshot.alt_screen != global_output_state.alt_screen) {
-            writeBytes(if (snapshot.alt_screen) "\x1b[?1049h" else "\x1b[?1049l");
-            global_output_state.alt_screen = snapshot.alt_screen;
-            writeBytes("\x1b[?25l");
-            renderFullFrame(&snapshot);
-        } else {
-            writeBytes("\x1b[?25l");
-            renderDiff(&(last_frame.?), &snapshot);
-        }
-    }
-
-    moveCursor(snapshot.cursor_row, snapshot.cursor_col);
-
-    if (snapshot.cursor_visible != global_output_state.cursor_visible) {
-        writeBytes(if (snapshot.cursor_visible) "\x1b[?25h" else "\x1b[?25l");
-        global_output_state.cursor_visible = snapshot.cursor_visible;
-    } else if (snapshot.cursor_visible) {
-        writeBytes("\x1b[?25h");
-    }
-
-    global_output_state.cursor_row = snapshot.cursor_row;
-    global_output_state.cursor_col = snapshot.cursor_col;
-    global_output_state.has_drawn = true;
-
-    freeLastFrame();
-    last_frame = snapshot;
-
-    const sink = global_output_sink orelse return;
-    sink.replaceRender(render_buf.items) catch return;
-}
-
-pub fn setGlobalSessionHost(h: *host.SessionHost) void {
-    global_session_host = h;
-}
-
-pub fn setOutputSink(sink: *OutputSink) void {
-    global_output_sink = sink;
-    if (render_buf.capacity == 0) {
-        render_buf.ensureTotalCapacity(std.heap.page_allocator, 4096) catch {};
-    }
-}
-
-pub fn reset() void {
-    freeLastFrame();
-    render_buf.clearRetainingCapacity();
-    global_output_state = .{};
-    needs_render = true;
-}
-
-pub fn shutdown() void {
-    if (global_output_state.alt_screen) {
-        writeBytes("\x1b[?1049l");
-    }
-    writeBytes("\x1b[?25h");
-    resetStyle();
-    writeBytes("\x1b(B");
-
-    if (global_output_sink) |sink| {
-        sink.replaceRender(render_buf.items) catch {};
-    }
-
-    freeLastFrame();
-    render_buf.clearRetainingCapacity();
-    global_output_state = .{};
-    needs_render = false;
 }

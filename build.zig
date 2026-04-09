@@ -256,11 +256,19 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     session_host_vpty_mod.addImport("host", host_mod);
-    session_host_vpty_mod.addImport("terminal_state_vterm", terminal_state_vterm_mod);
     session_host_vpty_mod.addImport("vterm_screen_types", vterm_screen_types_mod);
 
-    const output_sink_mod = b.addModule("output_sink", .{
-        .root_source_file = b.path("vpty/src/output_sink.zig"),
+    const terminal_model_mod = b.addModule("terminal_model", .{
+        .root_source_file = b.path("vpty/src/terminal_model.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    terminal_model_mod.addImport("terminal_state_vterm", terminal_state_vterm_mod);
+    terminal_model_mod.addImport("vterm_screen_types", vterm_screen_types_mod);
+
+    const stdout_actor_mod = b.addModule("stdout_actor", .{
+        .root_source_file = b.path("vpty/src/stdout_actor.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -273,7 +281,8 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     vpty_render_mod.addImport("session_host_vpty", session_host_vpty_mod);
-    vpty_render_mod.addImport("output_sink", output_sink_mod);
+    vpty_render_mod.addImport("stdout_actor", stdout_actor_mod);
+    vpty_render_mod.addImport("terminal_model", terminal_model_mod);
 
     const vpty_root = b.createModule(.{
         .root_source_file = b.path("vpty/src/vpty_main.zig"),
@@ -287,7 +296,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
-    side_effects.addImport("output_sink", output_sink_mod);
+    side_effects.addImport("stdout_actor", stdout_actor_mod);
     vpty_root.linkSystemLibrary("util", .{});
     vpty_root.addImport("session_host_vpty", session_host_vpty_mod);
     vpty_root.addImport("byte_queue", byte_queue_mod);
@@ -295,7 +304,8 @@ pub fn build(b: *std.Build) void {
     vpty_root.addImport("vpty_terminal", vpty_terminal_mod);
     vpty_root.addImport("vpty_render", vpty_render_mod);
     vpty_root.addImport("side_effects", side_effects);
-    vpty_root.addImport("output_sink", output_sink_mod);
+    vpty_root.addImport("terminal_model", terminal_model_mod);
+    vpty_root.addImport("stdout_actor", stdout_actor_mod);
 
     const vpty_exe = b.addExecutable(.{
         .name = "vpty",

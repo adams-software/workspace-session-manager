@@ -11,9 +11,12 @@ const ByteQueue = @import("byte_queue").ByteQueue;
 const fd_stream = @import("fd_stream");
 const vpty_terminal = @import("vpty_terminal");
 const vpty_render = @import("vpty_render");
+const RenderActor = vpty_render.RenderActor;
 const side_effects = @import("side_effects");
-const output_sink_mod = @import("output_sink");
-const OutputSink = output_sink_mod.OutputSink;
+const stdout_actor_mod = @import("stdout_actor");
+const StdoutActor = stdout_actor_mod.StdoutActor;
+const terminal_model_mod = @import("terminal_model");
+const TerminalModel = terminal_model_mod.TerminalModel;
 
 const INPUT_READ_CHUNK = 4096;
 const OUTPUT_READ_CHUNK = 4096;
@@ -97,7 +100,7 @@ const TransportState = struct {
         }
     }
 
-    fn processOutput(self: *TransportState, session_host: *host.SessionHost, forwarder: *side_effects.SideEffectForwarder, sink: *OutputSink) !bool {
+    fn processOutput(self: *TransportState, model: *TerminalModel, render_actor: *RenderActor, forwarder: *side_effects.SideEffectForwarder, stdout_actor: *StdoutActor) !bool {
         var emitted_osc52 = false;
         var spins: usize = 0;
         while (!self.output_rx.isEmpty() and spins < IO_SPIN_LIMIT) : (spins += 1) {
@@ -105,11 +108,10 @@ const TransportState = struct {
             const chunk_len = @min(readable.len, OUTPUT_READ_CHUNK);
             const chunk = readable[0..chunk_len];
 
-            const result = try forwarder.feed(sink, chunk);
+            const result = try forwarder.feed(stdout_actor, chunk);
             emitted_osc52 = emitted_osc52 or result.emitted_osc52;
-            if (session_host.terminal_state) |*ts| {
-                ts.feed(result.screen_bytes);
-            }
+            const update = model.feedScreenBytes(result.screen_bytes);
+            if (update.dirty) render_actor.renderDamaged();
 
             self.output_rx.discard(chunk_len);
         }
@@ -125,8 +127,9 @@ const RenderPolicy = struct {
         self.force_render = true;
     }
 
-    fn shouldRenderNow(self: *RenderPolicy, transport: *const TransportState, sink: *const OutputSink) bool {
-        if (sink.pendingBytes() >= STDOUT_BACKLOG_THRESHOLD) return false;
+    fn shouldRenderNow(self: *RenderPolicy, transport: *const TransportState, model: *const TerminalModel, stdout_actor: *const StdoutActor) bool {
+        if (model.currentVersion() <= stdout_actor.committedRenderVersion()) return false;
+        if (stdout_actor.pendingBytes() >= STDOUT_BACKLOG_THRESHOLD) return false;
         if (self.force_render) return true;
         if (!transport.hasHeavyBacklog()) return true;
         if (self.deferred_iterations >= MAX_RENDER_DEFERRALS) return true;
@@ -186,18 +189,18 @@ fn handleTerminationSignal(sig: c_int) callconv(.c) void {
 
 fn applyViewerSize(
     session_host: *host.SessionHost,
+    model: *TerminalModel,
+    render_actor: *RenderActor,
     render_policy: *RenderPolicy,
     rows: u16,
     cols: u16,
 ) void {
     session_host.applySessionSize(.{ .cols = cols, .rows = rows }) catch return;
+    _ = model.resize(rows, cols);
 
-    if (session_host.terminal_state) |*ts| {
-        ts.forceFullDamage();
-    }
-
+    render_actor.renderDamaged();
     render_policy.noteForced();
-    vpty_render.reset();
+    render_actor.reset();
 }
 
 fn handleSigwinch(_: c_int) callconv(.c) void {
@@ -208,11 +211,11 @@ fn handleSigwinch(_: c_int) callconv(.c) void {
     }
 }
 
-fn handleResizeIfNeeded(session_host: *host.SessionHost, render_policy: *RenderPolicy, terminal: *vpty_terminal.TerminalMode) void {
+fn handleResizeIfNeeded(session_host: *host.SessionHost, model: *TerminalModel, render_actor: *RenderActor, render_policy: *RenderPolicy, terminal: *vpty_terminal.TerminalMode) void {
     if (!winch_changed) return;
     winch_changed = false;
     const size = terminal.currentSize() catch vpty_terminal.Size{ .rows = 24, .cols = 80 };
-    applyViewerSize(session_host, render_policy, size.rows, size.cols);
+    applyViewerSize(session_host, model, render_actor, render_policy, size.rows, size.cols);
 }
 
 fn handleTerminationIfNeeded(session_host: *host.SessionHost) !?host.ExitStatus {
@@ -243,20 +246,91 @@ fn drainWakePipe() void {
     }
 }
 
-fn maybeRender(render_policy: *RenderPolicy, transport: *const TransportState, sink: *const OutputSink, emitted_osc52: bool) void {
+fn stepLifecycle(
+    session_host: *host.SessionHost,
+    model: *TerminalModel,
+    render_actor: *RenderActor,
+    render_policy: *RenderPolicy,
+    terminal: *vpty_terminal.TerminalMode,
+) !?host.ExitStatus {
+    handleResizeIfNeeded(session_host, model, render_actor, render_policy, terminal);
+    return try handleTerminationIfNeeded(session_host);
+}
+
+fn stepWake(pfds: []const c.struct_pollfd) void {
+    if ((pfds[2].revents & c.POLLIN) != 0) {
+        drainWakePipe();
+    }
+}
+
+fn stepStdoutEarly(stdout_actor: *StdoutActor, model: *TerminalModel, render_actor: *RenderActor, pfds: []const c.struct_pollfd) !void {
+    if (stdout_actor.hasPending() and (pfds[3].revents & c.POLLOUT) != 0) {
+        try flushOutput(stdout_actor);
+    }
+    if (stdout_actor.takeNewlyCommittedRenderVersion()) |version| {
+        model.markCommittedThrough(version);
+        render_actor.noteCommittedThrough(version);
+    }
+}
+
+fn stepInput(transport: *TransportState, session_host: *host.SessionHost, terminal: *vpty_terminal.TerminalMode, pfds: []const c.struct_pollfd) !void {
+    if (transport.stdin_open and (pfds[0].revents & c.POLLIN) != 0) {
+        try transport.ingestStdin(terminal.stdin_fd);
+    }
+
+    if (!transport.input_tx.isEmpty() and (((pfds[1].revents & c.POLLOUT) != 0) or ((pfds[0].revents & c.POLLIN) != 0))) {
+        try transport.flushInput(session_host);
+    }
+}
+
+fn stepPtyOutput(
+    transport: *TransportState,
+    session_host: *host.SessionHost,
+    model: *TerminalModel,
+    render_actor: *RenderActor,
+    forwarder: *side_effects.SideEffectForwarder,
+    stdout_actor: *StdoutActor,
+    pfds: []const c.struct_pollfd,
+) !bool {
+    if ((pfds[1].revents & c.POLLIN) != 0) {
+        try transport.ingestPtyOutput(session_host);
+    }
+
+    var emitted_osc52 = false;
+    if (!transport.output_rx.isEmpty()) {
+        emitted_osc52 = try transport.processOutput(model, render_actor, forwarder, stdout_actor);
+    }
+    return emitted_osc52;
+}
+
+fn stepRender(render_actor: *RenderActor, render_policy: *RenderPolicy, transport: *const TransportState, model: *const TerminalModel, stdout_actor: *const StdoutActor, emitted_osc52: bool) void {
+    maybeRender(render_actor, render_policy, transport, model, stdout_actor, emitted_osc52);
+}
+
+fn stepStdoutLate(stdout_actor: *StdoutActor, model: *TerminalModel, render_actor: *RenderActor, pfds: []const c.struct_pollfd) !void {
+    if ((pfds[3].revents & c.POLLOUT) != 0 or !stdout_actor.hasPending()) {
+        try flushOutput(stdout_actor);
+    }
+    if (stdout_actor.takeNewlyCommittedRenderVersion()) |version| {
+        model.markCommittedThrough(version);
+        render_actor.noteCommittedThrough(version);
+    }
+}
+
+fn maybeRender(render_actor: *RenderActor, render_policy: *RenderPolicy, transport: *const TransportState, model: *const TerminalModel, stdout_actor: *const StdoutActor, emitted_osc52: bool) void {
     if (emitted_osc52) {
         render_policy.noteForced();
         return;
     }
-    if (!render_policy.shouldRenderNow(transport, sink)) return;
-    vpty_render.doRender();
+    if (!render_policy.shouldRenderNow(transport, model, stdout_actor)) return;
+    render_actor.doRender();
     render_policy.noteRendered();
 }
 
-fn flushOutput(sink: *OutputSink) !void {
+fn flushOutput(stdout_actor: *StdoutActor) !void {
     var spins: usize = 0;
-    while (spins < IO_SPIN_LIMIT and sink.hasPending()) : (spins += 1) {
-        const status = try sink.flushSome(64 * 1024);
+    while (spins < IO_SPIN_LIMIT and stdout_actor.hasPending()) : (spins += 1) {
+        const status = try stdout_actor.flushSome(64 * 1024);
         switch (status) {
             .progress => {},
             .would_block => return,
@@ -278,7 +352,7 @@ fn refreshAndMaybeExit(session_host: *host.SessionHost) !?host.ExitStatus {
     return null;
 }
 
-fn pumpUntilExit(session_host: *host.SessionHost, terminal: *vpty_terminal.TerminalMode, forwarder: *side_effects.SideEffectForwarder, sink: *OutputSink) !host.ExitStatus {
+fn pumpUntilExit(session_host: *host.SessionHost, model: *TerminalModel, render_actor: *RenderActor, terminal: *vpty_terminal.TerminalMode, forwarder: *side_effects.SideEffectForwarder, stdout_actor: *StdoutActor) !host.ExitStatus {
     var transport = TransportState{};
     defer transport.deinit(std.heap.page_allocator);
 
@@ -287,14 +361,13 @@ fn pumpUntilExit(session_host: *host.SessionHost, terminal: *vpty_terminal.Termi
     try transport.configureNonBlocking(session_host, terminal.stdin_fd, terminal.stdout_fd);
 
     while (true) {
-        handleResizeIfNeeded(session_host, &render_policy, terminal);
-        if (try handleTerminationIfNeeded(session_host)) |status| return status;
+        if (try stepLifecycle(session_host, model, render_actor, &render_policy, terminal)) |status| return status;
 
         var pfds = [4]c.struct_pollfd{
             .{ .fd = if (transport.stdin_open) terminal.stdin_fd else -1, .events = if (transport.stdin_open) c.POLLIN else 0, .revents = 0 },
             .{ .fd = session_host.getMasterFd() orelse -1, .events = transport.ptyPollEvents(), .revents = 0 },
             .{ .fd = wake_pipe[0], .events = c.POLLIN, .revents = 0 },
-            .{ .fd = terminal.stdout_fd, .events = if (sink.hasPending()) c.POLLOUT else 0, .revents = 0 },
+            .{ .fd = terminal.stdout_fd, .events = if (stdout_actor.hasPending()) c.POLLOUT else 0, .revents = 0 },
         };
 
         const pr = c.poll(&pfds, 4, 10);
@@ -304,35 +377,12 @@ fn pumpUntilExit(session_host: *host.SessionHost, terminal: *vpty_terminal.Termi
             return error.IoError;
         }
 
-        if ((pfds[2].revents & c.POLLIN) != 0) {
-            drainWakePipe();
-        }
-
-        if (sink.hasPending() and (pfds[3].revents & c.POLLOUT) != 0) {
-            try flushOutput(sink);
-        }
-
-        if (transport.stdin_open and (pfds[0].revents & c.POLLIN) != 0) {
-            try transport.ingestStdin(terminal.stdin_fd);
-        }
-
-        if (!transport.input_tx.isEmpty() and (((pfds[1].revents & c.POLLOUT) != 0) or ((pfds[0].revents & c.POLLIN) != 0))) {
-            try transport.flushInput(session_host);
-        }
-
-        if ((pfds[1].revents & c.POLLIN) != 0) {
-            try transport.ingestPtyOutput(session_host);
-        }
-
-        var emitted_osc52 = false;
-        if (!transport.output_rx.isEmpty()) {
-            emitted_osc52 = try transport.processOutput(session_host, forwarder, sink);
-        }
-
-        maybeRender(&render_policy, &transport, sink, emitted_osc52);
-        if ((pfds[3].revents & c.POLLOUT) != 0 or !sink.hasPending()) {
-            try flushOutput(sink);
-        }
+        stepWake(&pfds);
+        try stepStdoutEarly(stdout_actor, model, render_actor, &pfds);
+        try stepInput(&transport, session_host, terminal, &pfds);
+        const emitted_osc52 = try stepPtyOutput(&transport, session_host, model, render_actor, forwarder, stdout_actor, &pfds);
+        stepRender(render_actor, &render_policy, &transport, model, stdout_actor, emitted_osc52);
+        try stepStdoutLate(stdout_actor, model, render_actor, &pfds);
 
         if (try refreshAndMaybeExit(session_host)) |status| return status;
     }
@@ -382,31 +432,35 @@ pub fn main(init: std.process.Init) !u8 {
     var forwarder = side_effects.SideEffectForwarder.init(allocator);
     defer forwarder.deinit();
 
-    var sink = OutputSink.init(allocator);
-    defer sink.deinit();
+    var stdout_actor = StdoutActor.init(allocator);
+    defer stdout_actor.deinit();
+
+    var render_actor = RenderActor{};
+    defer render_actor.deinit();
 
     const size = terminal.currentSize() catch vpty_terminal.Size{ .rows = 24, .cols = 80 };
 
     var session_host = try host.SessionHost.init(allocator, .{
         .argv = child_argv,
-        .enable_terminal_state = true,
+        .enable_terminal_state = false,
         .rows = size.rows,
         .cols = size.cols,
         .replay_capacity = 0,
     });
     defer session_host.deinit();
 
+    var model = try TerminalModel.init(size.rows, size.cols);
+    defer model.deinit();
+
     try session_host.start();
     try terminal.enterRaw();
 
-    if (session_host.terminal_state) |*ts| {
-        vpty_render.setGlobalSessionHost(&session_host);
-        vpty_render.setOutputSink(&sink);
-        ts.setRenderCallback(vpty_render.renderDamaged);
-        ts.forceFullDamage();
-    }
-    vpty_render.reset();
-    vpty_render.doRender();
+    render_actor.setTerminalModel(&model);
+    render_actor.setStdoutActor(&stdout_actor);
+    model.forceFullDamage();
+    render_actor.renderDamaged();
+    render_actor.reset();
+    render_actor.doRender();
 
     if (c.pipe(&wake_pipe) != 0) return error.IoError;
     defer {
@@ -424,8 +478,8 @@ pub fn main(init: std.process.Init) !u8 {
     }
     winch_changed = true;
 
-    const status = try pumpUntilExit(&session_host, &terminal, &forwarder, &sink);
-    vpty_render.shutdown();
+    const status = try pumpUntilExit(&session_host, &model, &render_actor, &terminal, &forwarder, &stdout_actor);
+    render_actor.shutdown();
     terminal.restore();
     _ = session_host.close() catch {};
     return childExitCode(status);

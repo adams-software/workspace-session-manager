@@ -1,6 +1,5 @@
 const std = @import("std");
 const pty_host = @import("host");
-const terminal_state_vterm = @import("terminal_state_vterm");
 const screen_types = @import("vterm_screen_types");
 
 pub const HostColor = screen_types.HostColor;
@@ -27,10 +26,9 @@ pub const SpawnOptions = struct {
 
 pub const SessionHost = struct {
     inner: pty_host.PtyChildHost,
-    terminal_state: ?terminal_state_vterm.VTermAdapter,
 
     pub fn init(allocator: std.mem.Allocator, opts: SpawnOptions) Error!SessionHost {
-        var self = SessionHost{
+        const self = SessionHost{
             .inner = try pty_host.PtyChildHost.init(allocator, .{
                 .argv = opts.argv,
                 .cwd = opts.cwd,
@@ -38,21 +36,14 @@ pub const SessionHost = struct {
                 .cols = opts.cols,
                 .rows = opts.rows,
             }),
-            .terminal_state = null,
         };
 
-        if (opts.enable_terminal_state) {
-            self.terminal_state = try terminal_state_vterm.VTermAdapter.init(opts.rows orelse 24, opts.cols orelse 80);
-        }
-
-        // Kept for temporary compatibility with existing vpty call sites. This
-        // local adapter does not implement replay buffering.
+        _ = opts.enable_terminal_state;
         _ = opts.replay_capacity;
         return self;
     }
 
     pub fn deinit(self: *SessionHost) void {
-        if (self.terminal_state) |*ts| ts.deinit();
         self.inner.deinit();
     }
 
@@ -86,10 +77,6 @@ pub const SessionHost = struct {
 
     pub fn applySessionSize(self: *SessionHost, size: Size) Error!void {
         try self.inner.applySize(size);
-        if (self.terminal_state) |*ts| {
-            ts.resize(size.rows, size.cols);
-            ts.forceFullDamage();
-        }
     }
 
     pub fn getState(self: *const SessionHost) HostState {
