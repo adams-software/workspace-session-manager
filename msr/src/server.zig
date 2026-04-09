@@ -39,7 +39,7 @@ pub const Connection = struct {
 
 pub const SessionServer = struct {
     allocator: std.mem.Allocator,
-    session_host: *host.SessionHost,
+    session_host: *host.PtyChildHost,
     state: ServerState = .created,
     listener_fd: ?c_int = null,
     socket_path: ?[]u8 = null,
@@ -50,7 +50,7 @@ pub const SessionServer = struct {
     pty_nonblocking_configured: bool = false,
     owner_detach_after_flush: bool = false,
 
-    pub fn init(allocator: std.mem.Allocator, session_host: *host.SessionHost) SessionServer {
+    pub fn init(allocator: std.mem.Allocator, session_host: *host.PtyChildHost) SessionServer {
         return .{
             .allocator = allocator,
             .session_host = session_host,
@@ -247,7 +247,7 @@ pub const SessionServer = struct {
         return .{ .fd = fd };
     }
 
-    fn mapHostState(st: @TypeOf(@as(*host.SessionHost, undefined).getState())) wire.SessionStatus {
+    fn mapHostState(st: @TypeOf(@as(*host.PtyChildHost, undefined).hostState())) wire.SessionStatus {
         return switch (st) {
             .starting => .starting,
             .running => .running,
@@ -268,7 +268,7 @@ pub const SessionServer = struct {
     fn ensurePtyNonBlocking(self: *SessionServer) Error!void {
         if (self.pty_nonblocking_configured) return;
 
-        const fd = self.session_host.getMasterFd() orelse return;
+        const fd = self.session_host.ptyFd() orelse return;
         try fd_stream.setNonBlocking(fd);
         self.pty_nonblocking_configured = true;
     }
@@ -411,9 +411,9 @@ pub const SessionServer = struct {
         _ = client_fd;
 
         return switch (req) {
-            .status => .{ .status = mapHostState(self.session_host.getState()) },
+            .status => .{ .status = mapHostState(self.session_host.hostState()) },
             .wait => blk: {
-                switch (self.session_host.getState()) {
+                switch (self.session_host.hostState()) {
                     .exited => {
                         const st = self.session_host.wait() catch {
                             break :blk .{ .err = .invalid_args };
@@ -650,7 +650,7 @@ pub const SessionServer = struct {
     }
 
     fn pumpPtyIo(self: *SessionServer) Error!bool {
-        const master_fd = self.session_host.getMasterFd() orelse {
+        const master_fd = self.session_host.ptyFd() orelse {
             if (self.core_state.hasOwner()) self.dropOwner(true);
             return false;
         };
@@ -670,7 +670,7 @@ pub const SessionServer = struct {
         var output_budget: usize = 64 * 1024;
         while (output_budget > 0) {
             const max_chunk = @min(output_budget, 4096);
-            const maybe_chunk = self.session_host.readObservedPtyChunk(self.allocator, max_chunk) catch |e| switch (e) {
+            const chunk = self.session_host.readOutput(self.allocator, max_chunk, 0) catch |e| switch (e) {
                 host.Error.InvalidState,
                 host.Error.NotStarted,
                 host.Error.Closed,
@@ -681,9 +681,9 @@ pub const SessionServer = struct {
                 },
                 else => return Error.IoError,
             };
-
-            const chunk = maybe_chunk orelse break;
             defer self.allocator.free(chunk);
+
+            if (chunk.len == 0) break;
 
             output_budget -= chunk.len;
             progressed = true;
@@ -698,7 +698,7 @@ pub const SessionServer = struct {
 };
 
 test "server2 starts created" {
-    var h = try host.SessionHost.init(std.testing.allocator, .{ .argv = &.{"/bin/sh"} });
+    var h = try host.PtyChildHost.init(std.testing.allocator, .{ .argv = &.{"/bin/sh"} });
     defer h.deinit();
 
     var s = SessionServer.init(std.testing.allocator, &h);
@@ -708,7 +708,7 @@ test "server2 starts created" {
 }
 
 test "server2 listen enters listening" {
-    var h = try host.SessionHost.init(std.testing.allocator, .{ .argv = &.{"/bin/sh"} });
+    var h = try host.PtyChildHost.init(std.testing.allocator, .{ .argv = &.{"/bin/sh"} });
     defer h.deinit();
 
     var s = SessionServer.init(std.testing.allocator, &h);
@@ -723,7 +723,7 @@ test "server2 listen enters listening" {
 }
 
 test "server2 step handles status request" {
-    var h = try host.SessionHost.init(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "sleep 1" } });
+    var h = try host.PtyChildHost.init(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "sleep 1" } });
     defer h.deinit();
     try h.start();
 
@@ -759,7 +759,7 @@ test "server2 step handles status request" {
 }
 
 test "server2 attach installs owner" {
-    var h = try host.SessionHost.init(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "sleep 1" } });
+    var h = try host.PtyChildHost.init(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "sleep 1" } });
     defer h.deinit();
     try h.start();
 
@@ -796,7 +796,7 @@ test "server2 attach installs owner" {
 }
 
 test "server2 owner_forward with no owner returns no_owner" {
-    var h = try host.SessionHost.init(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "sleep 1" } });
+    var h = try host.PtyChildHost.init(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "sleep 1" } });
     defer h.deinit();
     try h.start();
 
@@ -840,7 +840,7 @@ test "server2 owner_forward with no owner returns no_owner" {
 
 
 test "server2 malformed client message does not kill session" {
-    var h = try host.SessionHost.init(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "sleep 1" } });
+    var h = try host.PtyChildHost.init(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "sleep 1" } });
     defer h.deinit();
     try h.start();
 
@@ -881,7 +881,7 @@ test "server2 malformed client message does not kill session" {
 
 test "server2 detach-after-flush preserves queued pty output" {
     if (false) {
-    var h = try host.SessionHost.init(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "printf hello; sleep 1" } });
+    var h = try host.PtyChildHost.init(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "printf hello; sleep 1" } });
     defer h.deinit();
     try h.start();
 

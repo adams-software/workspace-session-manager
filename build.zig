@@ -24,14 +24,14 @@ pub fn build(b: *std.Build) void {
     terminal_state_vterm_mod.addImport("vterm_screen_types", vterm_screen_types_mod);
 
     const byte_queue_mod = b.addModule("byte_queue", .{
-        .root_source_file = b.path("msr/src/byte_queue.zig"),
+        .root_source_file = b.path("ptyio/src/stream/byte_queue.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
 
     const fd_stream_mod = b.addModule("fd_stream", .{
-        .root_source_file = b.path("msr/src/fd_stream.zig"),
+        .root_source_file = b.path("ptyio/src/stream/fd_stream.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -85,11 +85,21 @@ pub fn build(b: *std.Build) void {
     client_mod.addImport("session_stream_transport", session_stream_transport_mod);
 
     const host_mod = b.addModule("host", .{
-        .root_source_file = b.path("msr/src/host.zig"),
+        .root_source_file = b.path("ptyio/src/pty/child_host.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
+
+    const legacy_host_mod = b.addModule("legacy_host", .{
+        .root_source_file = b.path("shared/src/host.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    legacy_host_mod.linkSystemLibrary("util", .{});
+    legacy_host_mod.addImport("terminal_state_vterm", terminal_state_vterm_mod);
+    legacy_host_mod.addImport("vterm_screen_types", vterm_screen_types_mod);
     host_mod.linkSystemLibrary("util", .{});
     host_mod.addImport("terminal_state_vterm", terminal_state_vterm_mod);
     host_mod.addImport("vterm_screen_types", vterm_screen_types_mod);
@@ -170,10 +180,10 @@ pub fn build(b: *std.Build) void {
     run_step.dependOn(&run_cmd.step);
 
     const byte_queue_tests = b.addTest(.{ .root_module = b.createModule(.{
-        .root_source_file = b.path("msr/src/byte_queue.zig"), .target = target, .optimize = optimize, .link_libc = true,
+        .root_source_file = b.path("ptyio/src/stream/byte_queue.zig"), .target = target, .optimize = optimize, .link_libc = true,
     }) });
     const fd_stream_test_root = b.createModule(.{
-        .root_source_file = b.path("msr/src/fd_stream.zig"), .target = target, .optimize = optimize, .link_libc = true,
+        .root_source_file = b.path("ptyio/src/stream/fd_stream.zig"), .target = target, .optimize = optimize, .link_libc = true,
     });
     fd_stream_test_root.addImport("byte_queue", byte_queue_mod);
     const fd_stream_tests = b.addTest(.{ .root_module = fd_stream_test_root });
@@ -204,10 +214,8 @@ pub fn build(b: *std.Build) void {
     const session_stream_transport_tests = b.addTest(.{ .root_module = session_stream_transport_test_root });
 
     const host_test_root = b.createModule(.{
-        .root_source_file = b.path("msr/src/host.zig"), .target = target, .optimize = optimize, .link_libc = true,
+        .root_source_file = b.path("ptyio/src/pty/child_host.zig"), .target = target, .optimize = optimize, .link_libc = true,
     });
-    host_test_root.addImport("terminal_state_vterm", terminal_state_vterm_mod);
-    host_test_root.addImport("vterm_screen_types", vterm_screen_types_mod);
     const host_tests = b.addTest(.{ .root_module = host_test_root });
 
     const client_test_root = b.createModule(.{
@@ -255,7 +263,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
-    vpty_render_mod.addImport("host", host_mod);
+    vpty_render_mod.addImport("host", legacy_host_mod);
 
     const vpty_root = b.createModule(.{
         .root_source_file = b.path("vpty/src/vpty_main.zig"),
@@ -270,7 +278,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     vpty_root.linkSystemLibrary("util", .{});
-    vpty_root.addImport("host", host_mod);
+    vpty_root.addImport("host", legacy_host_mod);
     vpty_root.addImport("vpty_terminal", vpty_terminal_mod);
     vpty_root.addImport("vpty_render", vpty_render_mod);
     vpty_root.addImport("side_effects", side_effects);

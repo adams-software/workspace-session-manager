@@ -284,7 +284,7 @@ fn runHost(path: []const u8, child_argv: []const []const u8) !u8 {
     defer std.heap.page_allocator.free(env_entry);
     const env = [_][]const u8{env_entry};
 
-    var session_host = try host.SessionHost.init(std.heap.page_allocator, .{
+    var session_host = try host.PtyChildHost.init(std.heap.page_allocator, .{
         .argv = child_argv,
         .env = env[0..],
         .rows = 24,
@@ -328,7 +328,7 @@ fn runHost(path: []const u8, child_argv: []const []const u8) !u8 {
 
         _ = session_host.refresh() catch {};
 
-        switch (session_host.getState()) {
+        switch (session_host.hostState()) {
             .running, .starting => {
                 if (!progressed) _ = c.usleep(1_000);
                 continue;
@@ -578,13 +578,17 @@ pub fn main(init: std.process.Init) !u8 {
                     var existing_cli = client2.SessionClient.init(std.heap.page_allocator, path) catch null;
                     if (existing_cli) |*cli| {
                         defer cli.deinit();
-                        _ = cli.status() catch |e| {
-                            err("msr: session already exists at {s} (status probe failed: {s})\n", .{ path, @errorName(e) });
+                        const status_res = cli.status();
+                        if (status_res) |_| {
+                            err("msr: session already exists at {s}\n", .{path});
                             return 1;
-                        };
-
-                        err("msr: session already exists at {s}\n", .{path});
-                        return 1;
+                        } else |e| switch (e) {
+                            client2.Error.ConnectFailed => {},
+                            else => {
+                                err("msr: session already exists at {s} (status probe failed: {s})\n", .{ path, @errorName(e) });
+                                return 1;
+                            },
+                        }
                     }
 
                     spawnHostDetached(argv[0], path, child_argv) catch {
