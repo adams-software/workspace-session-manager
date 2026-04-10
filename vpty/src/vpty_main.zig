@@ -332,14 +332,126 @@ fn pumpUntilExit(session_host: *host.SessionHost, shared_model: *SharedTerminalM
     }
 }
 
-pub fn main(init: std.process.Init) !u8 {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+const VptyRuntime = struct {
+    allocator: std.mem.Allocator,
+    child_argv: []const []const u8,
+    terminal: vpty_terminal.TerminalMode,
+    forwarder: side_effects.SideEffectForwarder,
+    stdout_actor: StdoutThread,
+    session_host: host.SessionHost,
+    shared_model: SharedTerminalModel,
+    render_thread: RenderThread,
 
+    fn init(allocator: std.mem.Allocator, io: anytype, child_argv: []const []const u8) !VptyRuntime {
+        var terminal = vpty_terminal.TerminalMode.init(c.STDIN_FILENO, c.STDOUT_FILENO);
+        errdefer terminal.restore();
+
+        var forwarder = side_effects.SideEffectForwarder.init(allocator);
+        errdefer forwarder.deinit();
+
+        var stdout_actor = StdoutThread.init(allocator, io);
+        errdefer stdout_actor.deinit();
+
+        const size = terminal.currentSize() catch vpty_terminal.Size{ .rows = 24, .cols = 80 };
+
+        var session_host = try host.SessionHost.init(allocator, .{
+            .argv = child_argv,
+            .rows = size.rows,
+            .cols = size.cols,
+        });
+        errdefer session_host.deinit();
+
+        var shared_model = SharedTerminalModel.init(io, try TerminalModel.init(size.rows, size.cols));
+        errdefer shared_model.model.deinit();
+
+        const render_thread = RenderThread.init(allocator, &shared_model, &stdout_actor);
+
+        return .{
+            .allocator = allocator,
+            .child_argv = child_argv,
+            .terminal = terminal,
+            .forwarder = forwarder,
+            .stdout_actor = stdout_actor,
+            .session_host = session_host,
+            .shared_model = shared_model,
+            .render_thread = render_thread,
+        };
+    }
+
+    fn deinit(self: *VptyRuntime) void {
+        self.render_thread.deinit();
+        self.shared_model.model.deinit();
+        self.session_host.deinit();
+        self.stdout_actor.deinit();
+        self.forwarder.deinit();
+        self.terminal.restore();
+        _ = self.allocator;
+        _ = self.child_argv;
+    }
+
+    fn primeRender(self: *VptyRuntime) void {
+        self.shared_model.lock();
+        self.shared_model.model.forceFullDamage();
+        self.shared_model.unlock();
+        self.render_thread.reset();
+        self.render_thread.forceNextRender();
+        self.render_thread.considerRender(false, false);
+    }
+
+    fn installSignalHandlers() !SignalHandlers {
+        wake_pipe = try WakePipe.init();
+        errdefer wake_pipe.deinit();
+
+        const handlers = SignalHandlers{
+            .old_winch = c.signal(c.SIGWINCH, handleSigwinch),
+            .old_int = c.signal(c.SIGINT, handleTerminationSignal),
+            .old_term = c.signal(c.SIGTERM, handleTerminationSignal),
+        };
+
+        winch_changed = true;
+        terminate_requested = false;
+        terminate_signal = 0;
+        return handlers;
+    }
+
+    fn run(self: *VptyRuntime) !u8 {
+        try self.session_host.start();
+        try self.terminal.enterRaw();
+        try self.stdout_actor.start();
+        try self.render_thread.start();
+
+        self.primeRender();
+
+        const signal_handlers = try installSignalHandlers();
+        defer signal_handlers.restore();
+
+        const status = try pumpUntilExit(&self.session_host, &self.shared_model, &self.render_thread, &self.terminal, &self.forwarder, &self.stdout_actor);
+        self.render_thread.shutdownActor();
+        self.render_thread.stop();
+        self.stdout_actor.stop();
+        self.terminal.restore();
+        _ = self.session_host.close() catch {};
+        return childExitCode(status);
+    }
+};
+
+const SignalHandlers = struct {
+    old_winch: ?*const fn (c_int) callconv(.c) void,
+    old_int: ?*const fn (c_int) callconv(.c) void,
+    old_term: ?*const fn (c_int) callconv(.c) void,
+
+    fn restore(self: SignalHandlers) void {
+        defer wake_pipe.deinit();
+        _ = c.signal(c.SIGWINCH, self.old_winch);
+        _ = c.signal(c.SIGINT, self.old_int);
+        _ = c.signal(c.SIGTERM, self.old_term);
+    }
+};
+
+fn parseChildArgv(allocator: std.mem.Allocator, init: std.process.Init) ![]const []const u8 {
     var args_it = std.process.Args.Iterator.init(init.minimal.args);
     var argv_list = std.ArrayList([]const u8){};
-    defer argv_list.deinit(allocator);
+    errdefer argv_list.deinit(allocator);
     while (args_it.next()) |arg| {
         try argv_list.append(allocator, arg);
     }
@@ -347,7 +459,7 @@ pub fn main(init: std.process.Init) !u8 {
 
     if (argv.len < 3) {
         usage();
-        return 1;
+        return error.InvalidArgs;
     }
 
     var sep_idx: ?usize = null;
@@ -360,70 +472,28 @@ pub fn main(init: std.process.Init) !u8 {
 
     const cmd_start = sep_idx orelse {
         usage();
-        return 1;
+        return error.InvalidArgs;
     };
     if (cmd_start + 1 >= argv.len) {
         err("vpty: missing command after --\n", .{});
         usage();
-        return 1;
+        return error.InvalidArgs;
     }
 
-    const child_argv = argv[(cmd_start + 1)..];
+    return argv[(cmd_start + 1)..];
+}
 
-    var terminal = vpty_terminal.TerminalMode.init(c.STDIN_FILENO, c.STDOUT_FILENO);
-    defer terminal.restore();
+pub fn main(init: std.process.Init) !u8 {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
 
-    var forwarder = side_effects.SideEffectForwarder.init(allocator);
-    defer forwarder.deinit();
+    const child_argv = parseChildArgv(allocator, init) catch |parse_err| switch (parse_err) {
+        error.InvalidArgs => return 1,
+        else => return parse_err,
+    };
 
-    var stdout_actor = StdoutThread.init(allocator, init.io);
-    defer stdout_actor.deinit();
-
-    const size = terminal.currentSize() catch vpty_terminal.Size{ .rows = 24, .cols = 80 };
-
-    var session_host = try host.SessionHost.init(allocator, .{
-        .argv = child_argv,
-        .rows = size.rows,
-        .cols = size.cols,
-    });
-    defer session_host.deinit();
-
-    var shared_model = SharedTerminalModel.init(init.io, try TerminalModel.init(size.rows, size.cols));
-    defer shared_model.model.deinit();
-
-    var render_thread = RenderThread.init(allocator, &shared_model, &stdout_actor);
-    defer render_thread.deinit();
-
-    try session_host.start();
-    try terminal.enterRaw();
-    try stdout_actor.start();
-    try render_thread.start();
-
-    shared_model.lock();
-    shared_model.model.forceFullDamage();
-    shared_model.unlock();
-    render_thread.reset();
-    render_thread.forceNextRender();
-    render_thread.considerRender(false, false);
-
-    wake_pipe = try WakePipe.init();
-    defer wake_pipe.deinit();
-
-    const old_winch = c.signal(c.SIGWINCH, handleSigwinch);
-    const old_int = c.signal(c.SIGINT, handleTerminationSignal);
-    const old_term = c.signal(c.SIGTERM, handleTerminationSignal);
-    defer {
-        _ = c.signal(c.SIGWINCH, old_winch);
-        _ = c.signal(c.SIGINT, old_int);
-        _ = c.signal(c.SIGTERM, old_term);
-    }
-    winch_changed = true;
-
-    const status = try pumpUntilExit(&session_host, &shared_model, &render_thread, &terminal, &forwarder, &stdout_actor);
-    render_thread.shutdownActor();
-    render_thread.stop();
-    stdout_actor.stop();
-    terminal.restore();
-    _ = session_host.close() catch {};
-    return childExitCode(status);
+    var runtime = try VptyRuntime.init(allocator, init.io, child_argv);
+    defer runtime.deinit();
+    return runtime.run();
 }

@@ -9,6 +9,7 @@ pub fn MutexQueue(comptime T: type) type {
         io: Io,
         mutex: Io.Mutex = .init,
         items: std.ArrayList(T),
+        head: usize = 0,
         closed: bool = false,
 
         pub fn init(allocator: std.mem.Allocator, io: Io) Self {
@@ -33,20 +34,39 @@ pub fn MutexQueue(comptime T: type) type {
         pub fn pop(self: *Self) ?T {
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
-            if (self.items.items.len == 0) return null;
-            return self.items.orderedRemove(0);
+            if (self.head >= self.items.items.len) return null;
+
+            const item = self.items.items[self.head];
+            self.head += 1;
+            self.compactIfNeeded();
+            return item;
         }
 
         pub fn len(self: *Self) usize {
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
-            return self.items.items.len;
+            return self.items.items.len - self.head;
         }
 
         pub fn close(self: *Self) void {
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
             self.closed = true;
+        }
+
+        fn compactIfNeeded(self: *Self) void {
+            if (self.head == 0) return;
+            if (self.head == self.items.items.len) {
+                self.items.clearRetainingCapacity();
+                self.head = 0;
+                return;
+            }
+            if (self.head * 2 < self.items.items.len) return;
+
+            const remaining = self.items.items[self.head..];
+            std.mem.copyForwards(T, self.items.items[0..remaining.len], remaining);
+            self.items.items.len = remaining.len;
+            self.head = 0;
         }
     };
 }
