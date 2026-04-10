@@ -14,7 +14,6 @@ pub const OutputState = struct {
 
 pub const RenderActor = struct {
     output_state: OutputState = .{},
-    terminal_model: ?*TerminalModel = null,
     stdout_actor: ?*StdoutThread = null,
     latest_model_changed: ?actor_mailboxes.ModelChanged = null,
     latest_commit_notice: ?actor_mailboxes.CommitNotice = null,
@@ -25,17 +24,19 @@ pub const RenderActor = struct {
     committed_version: u64 = 0,
     render_buf: std.ArrayList(u8) = .{},
 
+    pub fn init(stdout_actor: *StdoutThread) RenderActor {
+        var self = RenderActor{};
+        self.setStdoutActor(stdout_actor);
+        return self;
+    }
+
     pub fn deinit(self: *RenderActor) void {
         self.freeLastGeneratedFrame();
         self.freeCommittedFrame();
         self.render_buf.deinit(std.heap.page_allocator);
     }
 
-    pub fn setTerminalModel(self: *RenderActor, model: *TerminalModel) void {
-        self.terminal_model = model;
-    }
-
-    pub fn setStdoutActor(self: *RenderActor, stdout_actor: *StdoutThread) void {
+    fn setStdoutActor(self: *RenderActor, stdout_actor: *StdoutThread) void {
         self.stdout_actor = stdout_actor;
         if (self.render_buf.capacity == 0) {
             self.render_buf.ensureTotalCapacity(std.heap.page_allocator, 4096) catch {};
@@ -51,10 +52,13 @@ pub const RenderActor = struct {
         self.needs_render = true;
     }
 
-    pub fn takeSnapshot(self: *RenderActor) ?struct { version: u64, snapshot: host.HostScreenSnapshot } {
+    pub fn needsRender(self: *const RenderActor) bool {
+        return self.needs_render;
+    }
+
+    pub fn takeSnapshot(self: *RenderActor, model: *const TerminalModel) ?struct { version: u64, snapshot: host.HostScreenSnapshot } {
         if (!self.needs_render) return null;
 
-        const model = self.terminal_model orelse return null;
         const snapshot = model.snapshot(std.heap.page_allocator) catch return null;
         return .{ .version = model.currentVersion(), .snapshot = snapshot };
     }
@@ -104,11 +108,6 @@ pub const RenderActor = struct {
         }) catch return;
     }
 
-    pub fn doRender(self: *RenderActor) void {
-        const captured = self.takeSnapshot() orelse return;
-        self.renderSnapshot(captured.version, captured.snapshot);
-    }
-
     pub fn reset(self: *RenderActor) void {
         self.freeLastGeneratedFrame();
         self.freeCommittedFrame();
@@ -132,11 +131,11 @@ pub const RenderActor = struct {
         self.last_generated_frame = null;
     }
 
-    pub fn noteCommittedThrough(self: *RenderActor, version: u64) void {
+    fn noteCommittedThrough(self: *RenderActor, version: u64) void {
         self.noteCommitted(.{ .version = version });
     }
 
-    pub fn shutdown(self: *RenderActor) void {
+    pub fn shutdown(self: *RenderActor, version: u64) void {
         self.render_buf.clearRetainingCapacity();
 
         if (self.output_state.alt_screen) {
@@ -147,7 +146,6 @@ pub const RenderActor = struct {
         self.writeBytes("\x1b(B");
 
         if (self.stdout_actor) |stdout_actor| {
-            const version = if (self.terminal_model) |model| model.currentVersion() else 0;
             stdout_actor.publishRenderCandidate(actor_mailboxes.RenderPublish{
                 .version = version,
                 .bytes = self.render_buf.items,

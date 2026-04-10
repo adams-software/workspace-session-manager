@@ -9,6 +9,8 @@ const c = @cImport({
     @cInclude("poll.h");
 });
 
+const MAX_RENDER_DEFERRALS = 8;
+
 pub const SharedTerminalModel = struct {
     io: Io,
     mutex: Io.Mutex = .init,
@@ -32,17 +34,16 @@ pub const RenderThread = struct {
     actor: RenderActor,
     stdout_thread: *StdoutThread,
     shared_model: *SharedTerminalModel,
+    deferred_iterations: usize = 0,
+    force_render: bool = false,
     thread: ?std.Thread = null,
     shutdown_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     wake_pipe: [2]c_int = .{ -1, -1 },
 
     pub fn init(allocator: std.mem.Allocator, shared_model: *SharedTerminalModel, stdout_thread: *StdoutThread) RenderThread {
-        var actor = RenderActor{};
-        actor.setTerminalModel(&shared_model.model);
-        actor.setStdoutActor(stdout_thread);
         return .{
             .allocator = allocator,
-            .actor = actor,
+            .actor = RenderActor.init(stdout_thread),
             .stdout_thread = stdout_thread,
             .shared_model = shared_model,
         };
@@ -74,17 +75,45 @@ pub const RenderThread = struct {
         self.wake();
     }
 
-    pub fn noteCommitted(self: *RenderThread, notice: actor_mailboxes.CommitNotice) void {
-        self.actor.noteCommitted(notice);
-        self.wake();
+    fn syncCommittedVersion(self: *RenderThread) void {
+        self.actor.noteCommitted(.{ .version = self.stdout_thread.committedRenderVersion() });
     }
 
     pub fn reset(self: *RenderThread) void {
         self.actor.reset();
+        self.deferred_iterations = 0;
+        self.force_render = false;
+        self.wake();
+    }
+
+    pub fn forceNextRender(self: *RenderThread) void {
+        self.force_render = true;
+    }
+
+    pub fn considerRender(self: *RenderThread, transport_has_heavy_backlog: bool, stdout_has_heavy_backlog: bool) void {
+        const model_version = self.currentVersion();
+        if (model_version <= self.stdout_thread.committedRenderVersion()) return;
+        if (stdout_has_heavy_backlog) return;
+        if (!self.force_render and transport_has_heavy_backlog and self.deferred_iterations < MAX_RENDER_DEFERRALS) {
+            self.deferred_iterations += 1;
+            return;
+        }
+
+        self.actor.renderDamaged();
+        self.deferred_iterations = 0;
+        self.force_render = false;
+        self.wake();
     }
 
     pub fn shutdownActor(self: *RenderThread) void {
-        self.actor.shutdown();
+        self.actor.shutdown(self.currentVersion());
+        self.wake();
+    }
+
+    pub fn currentVersion(self: *RenderThread) u64 {
+        self.shared_model.lock();
+        defer self.shared_model.unlock();
+        return self.shared_model.model.currentVersion();
     }
 
     fn wake(self: *RenderThread) void {
@@ -104,10 +133,12 @@ pub const RenderThread = struct {
 
     fn run(self: *RenderThread) void {
         while (true) {
-            if (self.actor.needs_render) {
-                self.shared_model.mutex.lock();
-                const captured = self.actor.takeSnapshot();
-                self.shared_model.mutex.unlock();
+            self.syncCommittedVersion();
+
+            if (self.actor.needsRender()) {
+                self.shared_model.lock();
+                const captured = self.actor.takeSnapshot(&self.shared_model.model);
+                self.shared_model.unlock();
                 if (captured) |work| {
                     self.actor.renderSnapshot(work.version, work.snapshot);
                     continue;

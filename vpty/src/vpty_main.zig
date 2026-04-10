@@ -10,20 +10,20 @@ const host = @import("session_host_vpty");
 const ByteQueue = @import("byte_queue").ByteQueue;
 const fd_stream = @import("fd_stream");
 const vpty_terminal = @import("vpty_terminal");
-const vpty_render = @import("vpty_render");
-const RenderActor = vpty_render.RenderActor;
 const side_effects = @import("side_effects");
 const stdout_thread_mod = @import("stdout_thread");
 const StdoutThread = stdout_thread_mod.StdoutThread;
 const terminal_model_mod = @import("terminal_model");
 const TerminalModel = terminal_model_mod.TerminalModel;
+const render_thread_mod = @import("render_thread");
+const RenderThread = render_thread_mod.RenderThread;
+const SharedTerminalModel = render_thread_mod.SharedTerminalModel;
 
 const INPUT_READ_CHUNK = 4096;
 const OUTPUT_READ_CHUNK = 4096;
 const IO_SPIN_LIMIT = 16;
 const RENDER_BACKLOG_THRESHOLD = 16 * 1024;
 const STDOUT_BACKLOG_THRESHOLD = 256 * 1024;
-const MAX_RENDER_DEFERRALS = 8;
 
 var winch_changed: bool = false;
 var terminate_requested: bool = false;
@@ -100,7 +100,7 @@ const TransportState = struct {
         }
     }
 
-    fn processOutput(self: *TransportState, model: *TerminalModel, render_actor: *RenderActor, forwarder: *side_effects.SideEffectForwarder, stdout_actor: *StdoutThread) !bool {
+    fn processOutput(self: *TransportState, shared_model: *SharedTerminalModel, render_thread: *RenderThread, forwarder: *side_effects.SideEffectForwarder, stdout_actor: *StdoutThread) !bool {
         var emitted_osc52 = false;
         var spins: usize = 0;
         while (!self.output_rx.isEmpty() and spins < IO_SPIN_LIMIT) : (spins += 1) {
@@ -110,36 +110,15 @@ const TransportState = struct {
 
             const result = try forwarder.feed(stdout_actor, chunk);
             emitted_osc52 = emitted_osc52 or result.emitted_osc52;
-            const update = model.feedScreenBytes(result.screen_bytes);
-            if (update.dirty) render_actor.renderDamaged();
 
+            shared_model.lock();
+            const update = shared_model.model.feedScreenBytes(result.screen_bytes);
+            shared_model.unlock();
+
+            if (update.dirty) render_thread.publishModelChanged(update.asModelChanged());
             self.output_rx.discard(chunk_len);
         }
         return emitted_osc52;
-    }
-};
-
-const RenderPolicy = struct {
-    deferred_iterations: usize = 0,
-    force_render: bool = false,
-
-    fn noteForced(self: *RenderPolicy) void {
-        self.force_render = true;
-    }
-
-    fn shouldRenderNow(self: *RenderPolicy, transport: *const TransportState, model: *const TerminalModel, stdout_actor: *const StdoutThread) bool {
-        if (model.currentVersion() <= stdout_actor.committedRenderVersion()) return false;
-        if (stdout_actor.pendingBytes() >= STDOUT_BACKLOG_THRESHOLD) return false;
-        if (self.force_render) return true;
-        if (!transport.hasHeavyBacklog()) return true;
-        if (self.deferred_iterations >= MAX_RENDER_DEFERRALS) return true;
-        self.deferred_iterations += 1;
-        return false;
-    }
-
-    fn noteRendered(self: *RenderPolicy) void {
-        self.deferred_iterations = 0;
-        self.force_render = false;
     }
 };
 
@@ -189,18 +168,19 @@ fn handleTerminationSignal(sig: c_int) callconv(.c) void {
 
 fn applyViewerSize(
     session_host: *host.SessionHost,
-    model: *TerminalModel,
-    render_actor: *RenderActor,
-    render_policy: *RenderPolicy,
+    shared_model: *SharedTerminalModel,
+    render_thread: *RenderThread,
     rows: u16,
     cols: u16,
 ) void {
     session_host.applySessionSize(.{ .cols = cols, .rows = rows }) catch return;
-    _ = model.resize(rows, cols);
+    shared_model.lock();
+    const update = shared_model.model.resize(rows, cols);
+    shared_model.unlock();
 
-    render_actor.renderDamaged();
-    render_policy.noteForced();
-    render_actor.reset();
+    render_thread.reset();
+    if (update.dirty) render_thread.publishModelChanged(update.asModelChanged());
+    render_thread.forceNextRender();
 }
 
 fn handleSigwinch(_: c_int) callconv(.c) void {
@@ -211,11 +191,11 @@ fn handleSigwinch(_: c_int) callconv(.c) void {
     }
 }
 
-fn handleResizeIfNeeded(session_host: *host.SessionHost, model: *TerminalModel, render_actor: *RenderActor, render_policy: *RenderPolicy, terminal: *vpty_terminal.TerminalMode) void {
+fn handleResizeIfNeeded(session_host: *host.SessionHost, shared_model: *SharedTerminalModel, render_thread: *RenderThread, terminal: *vpty_terminal.TerminalMode) void {
     if (!winch_changed) return;
     winch_changed = false;
     const size = terminal.currentSize() catch vpty_terminal.Size{ .rows = 24, .cols = 80 };
-    applyViewerSize(session_host, model, render_actor, render_policy, size.rows, size.cols);
+    applyViewerSize(session_host, shared_model, render_thread, size.rows, size.cols);
 }
 
 fn handleTerminationIfNeeded(session_host: *host.SessionHost) !?host.ExitStatus {
@@ -248,12 +228,11 @@ fn drainWakePipe() void {
 
 fn stepLifecycle(
     session_host: *host.SessionHost,
-    model: *TerminalModel,
-    render_actor: *RenderActor,
-    render_policy: *RenderPolicy,
+    shared_model: *SharedTerminalModel,
+    render_thread: *RenderThread,
     terminal: *vpty_terminal.TerminalMode,
 ) !?host.ExitStatus {
-    handleResizeIfNeeded(session_host, model, render_actor, render_policy, terminal);
+    handleResizeIfNeeded(session_host, shared_model, render_thread, terminal);
     return try handleTerminationIfNeeded(session_host);
 }
 
@@ -263,11 +242,12 @@ fn stepWake(pfds: []const c.struct_pollfd) void {
     }
 }
 
-fn stepStdoutEarly(stdout_actor: *StdoutThread, model: *TerminalModel, render_actor: *RenderActor, pfds: []const c.struct_pollfd) !void {
+fn stepStdoutCommitted(stdout_actor: *StdoutThread, shared_model: *SharedTerminalModel, pfds: []const c.struct_pollfd) !void {
     _ = pfds;
     if (stdout_actor.takeNewlyCommittedRenderVersion()) |notice| {
-        model.markCommittedThrough(notice.version);
-        render_actor.noteCommitted(notice);
+        shared_model.lock();
+        shared_model.model.markCommittedThrough(notice.version);
+        shared_model.unlock();
     }
 }
 
@@ -284,8 +264,8 @@ fn stepInput(transport: *TransportState, session_host: *host.SessionHost, termin
 fn stepPtyOutput(
     transport: *TransportState,
     session_host: *host.SessionHost,
-    model: *TerminalModel,
-    render_actor: *RenderActor,
+    shared_model: *SharedTerminalModel,
+    render_thread: *RenderThread,
     forwarder: *side_effects.SideEffectForwarder,
     stdout_actor: *StdoutThread,
     pfds: []const c.struct_pollfd,
@@ -296,31 +276,22 @@ fn stepPtyOutput(
 
     var emitted_osc52 = false;
     if (!transport.output_rx.isEmpty()) {
-        emitted_osc52 = try transport.processOutput(model, render_actor, forwarder, stdout_actor);
+        emitted_osc52 = try transport.processOutput(shared_model, render_thread, forwarder, stdout_actor);
     }
     return emitted_osc52;
 }
 
-fn stepRender(render_actor: *RenderActor, render_policy: *RenderPolicy, transport: *const TransportState, model: *const TerminalModel, stdout_actor: *const StdoutThread, emitted_osc52: bool) void {
-    maybeRender(render_actor, render_policy, transport, model, stdout_actor, emitted_osc52);
-}
-
-fn stepStdoutLate(stdout_actor: *StdoutThread, model: *TerminalModel, render_actor: *RenderActor, pfds: []const c.struct_pollfd) !void {
-    _ = pfds;
-    if (stdout_actor.takeNewlyCommittedRenderVersion()) |notice| {
-        model.markCommittedThrough(notice.version);
-        render_actor.noteCommitted(notice);
-    }
-}
-
-fn maybeRender(render_actor: *RenderActor, render_policy: *RenderPolicy, transport: *const TransportState, model: *const TerminalModel, stdout_actor: *const StdoutThread, emitted_osc52: bool) void {
+fn stepRender(render_thread: *RenderThread, transport: *const TransportState, stdout_actor: *const StdoutThread, emitted_osc52: bool) void {
     if (emitted_osc52) {
-        render_policy.noteForced();
+        render_thread.forceNextRender();
         return;
     }
-    if (!render_policy.shouldRenderNow(transport, model, stdout_actor)) return;
-    render_actor.doRender();
-    render_policy.noteRendered();
+
+    render_thread.considerRender(transport.hasHeavyBacklog(), stdout_actor.pendingBytes() >= STDOUT_BACKLOG_THRESHOLD);
+}
+
+fn stepStdoutLate(stdout_actor: *StdoutThread, shared_model: *SharedTerminalModel, pfds: []const c.struct_pollfd) !void {
+    try stepStdoutCommitted(stdout_actor, shared_model, pfds);
 }
 
 fn refreshAndMaybeExit(session_host: *host.SessionHost) !?host.ExitStatus {
@@ -336,16 +307,14 @@ fn refreshAndMaybeExit(session_host: *host.SessionHost) !?host.ExitStatus {
     return null;
 }
 
-fn pumpUntilExit(session_host: *host.SessionHost, model: *TerminalModel, render_actor: *RenderActor, terminal: *vpty_terminal.TerminalMode, forwarder: *side_effects.SideEffectForwarder, stdout_actor: *StdoutThread) !host.ExitStatus {
+fn pumpUntilExit(session_host: *host.SessionHost, shared_model: *SharedTerminalModel, render_thread: *RenderThread, terminal: *vpty_terminal.TerminalMode, forwarder: *side_effects.SideEffectForwarder, stdout_actor: *StdoutThread) !host.ExitStatus {
     var transport = TransportState{};
     defer transport.deinit(std.heap.page_allocator);
-
-    var render_policy = RenderPolicy{};
 
     try transport.configureNonBlocking(session_host, terminal.stdin_fd, terminal.stdout_fd);
 
     while (true) {
-        if (try stepLifecycle(session_host, model, render_actor, &render_policy, terminal)) |status| return status;
+        if (try stepLifecycle(session_host, shared_model, render_thread, terminal)) |status| return status;
 
         var pfds = [4]c.struct_pollfd{
             .{ .fd = if (transport.stdin_open) terminal.stdin_fd else -1, .events = if (transport.stdin_open) c.POLLIN else 0, .revents = 0 },
@@ -362,11 +331,11 @@ fn pumpUntilExit(session_host: *host.SessionHost, model: *TerminalModel, render_
         }
 
         stepWake(&pfds);
-        try stepStdoutEarly(stdout_actor, model, render_actor, &pfds);
+        try stepStdoutCommitted(stdout_actor, shared_model, &pfds);
         try stepInput(&transport, session_host, terminal, &pfds);
-        const emitted_osc52 = try stepPtyOutput(&transport, session_host, model, render_actor, forwarder, stdout_actor, &pfds);
-        stepRender(render_actor, &render_policy, &transport, model, stdout_actor, emitted_osc52);
-        try stepStdoutLate(stdout_actor, model, render_actor, &pfds);
+        const emitted_osc52 = try stepPtyOutput(&transport, session_host, shared_model, render_thread, forwarder, stdout_actor, &pfds);
+        stepRender(render_thread, &transport, stdout_actor, emitted_osc52);
+        try stepStdoutLate(stdout_actor, shared_model, &pfds);
 
         if (try refreshAndMaybeExit(session_host)) |status| return status;
     }
@@ -419,9 +388,6 @@ pub fn main(init: std.process.Init) !u8 {
     var stdout_actor = StdoutThread.init(allocator);
     defer stdout_actor.deinit();
 
-    var render_actor = RenderActor{};
-    defer render_actor.deinit();
-
     const size = terminal.currentSize() catch vpty_terminal.Size{ .rows = 24, .cols = 80 };
 
     var session_host = try host.SessionHost.init(allocator, .{
@@ -433,19 +399,23 @@ pub fn main(init: std.process.Init) !u8 {
     });
     defer session_host.deinit();
 
-    var model = try TerminalModel.init(size.rows, size.cols);
-    defer model.deinit();
+    var shared_model = SharedTerminalModel.init(init.io, try TerminalModel.init(size.rows, size.cols));
+    defer shared_model.model.deinit();
+
+    var render_thread = RenderThread.init(allocator, &shared_model, &stdout_actor);
+    defer render_thread.deinit();
 
     try session_host.start();
     try terminal.enterRaw();
     try stdout_actor.start();
+    try render_thread.start();
 
-    render_actor.setTerminalModel(&model);
-    render_actor.setStdoutActor(&stdout_actor);
-    model.forceFullDamage();
-    render_actor.renderDamaged();
-    render_actor.reset();
-    render_actor.doRender();
+    shared_model.lock();
+    shared_model.model.forceFullDamage();
+    shared_model.unlock();
+    render_thread.reset();
+    render_thread.forceNextRender();
+    render_thread.considerRender(false, false);
 
     if (c.pipe(&wake_pipe) != 0) return error.IoError;
     defer {
@@ -463,8 +433,9 @@ pub fn main(init: std.process.Init) !u8 {
     }
     winch_changed = true;
 
-    const status = try pumpUntilExit(&session_host, &model, &render_actor, &terminal, &forwarder, &stdout_actor);
-    render_actor.shutdown();
+    const status = try pumpUntilExit(&session_host, &shared_model, &render_thread, &terminal, &forwarder, &stdout_actor);
+    render_thread.shutdownActor();
+    render_thread.stop();
     stdout_actor.stop();
     terminal.restore();
     _ = session_host.close() catch {};
