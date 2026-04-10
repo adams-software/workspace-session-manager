@@ -9,7 +9,7 @@ const c = @cImport({
     @cInclude("poll.h");
 });
 
-const MAX_RENDER_DEFERRALS = 8;
+const MAX_RENDER_DEFERRALS = 0;
 
 pub const SharedTerminalModel = struct {
     io: Io,
@@ -30,10 +30,26 @@ pub const SharedTerminalModel = struct {
 };
 
 pub const RenderThread = struct {
+    const PendingBatch = struct {
+        latest_model_changed: ?actor_mailboxes.ModelChanged = null,
+        reset_requested: bool = false,
+        force_render_requested: bool = false,
+        shutdown_actor_requested: bool = false,
+        render_hint_pending: bool = false,
+        transport_has_heavy_backlog: bool = false,
+        stdout_has_heavy_backlog: bool = false,
+    };
+
+    const PendingRequests = struct {
+        mutex: Io.Mutex = .init,
+        batch: PendingBatch = .{},
+    };
+
     allocator: std.mem.Allocator,
     actor: RenderActor,
     stdout_thread: *StdoutThread,
     shared_model: *SharedTerminalModel,
+    pending: PendingRequests = .{},
     deferred_iterations: usize = 0,
     force_render: bool = false,
     thread: ?std.Thread = null,
@@ -71,7 +87,9 @@ pub const RenderThread = struct {
     }
 
     pub fn publishModelChanged(self: *RenderThread, changed: actor_mailboxes.ModelChanged) void {
-        self.actor.publishModelChanged(changed);
+        self.pending.mutex.lockUncancelable(self.shared_model.io);
+        self.pending.batch.latest_model_changed = changed;
+        self.pending.mutex.unlock(self.shared_model.io);
         self.wake();
     }
 
@@ -80,17 +98,82 @@ pub const RenderThread = struct {
     }
 
     pub fn reset(self: *RenderThread) void {
-        self.actor.reset();
-        self.deferred_iterations = 0;
-        self.force_render = false;
+        self.pending.mutex.lockUncancelable(self.shared_model.io);
+        self.pending.batch.reset_requested = true;
+        self.pending.batch.force_render_requested = false;
+        self.pending.batch.render_hint_pending = false;
+        self.pending.mutex.unlock(self.shared_model.io);
         self.wake();
     }
 
     pub fn forceNextRender(self: *RenderThread) void {
-        self.force_render = true;
+        self.pending.mutex.lockUncancelable(self.shared_model.io);
+        self.pending.batch.force_render_requested = true;
+        self.pending.mutex.unlock(self.shared_model.io);
+        self.wake();
     }
 
     pub fn considerRender(self: *RenderThread, transport_has_heavy_backlog: bool, stdout_has_heavy_backlog: bool) void {
+        self.pending.mutex.lockUncancelable(self.shared_model.io);
+        self.pending.batch.render_hint_pending = true;
+        self.pending.batch.transport_has_heavy_backlog = transport_has_heavy_backlog;
+        self.pending.batch.stdout_has_heavy_backlog = stdout_has_heavy_backlog;
+        self.pending.mutex.unlock(self.shared_model.io);
+        self.wake();
+    }
+
+    pub fn shutdownActor(self: *RenderThread) void {
+        self.pending.mutex.lockUncancelable(self.shared_model.io);
+        self.pending.batch.shutdown_actor_requested = true;
+        self.pending.mutex.unlock(self.shared_model.io);
+        self.wake();
+    }
+
+    fn currentVersion(self: *RenderThread) u64 {
+        self.shared_model.lock();
+        defer self.shared_model.unlock();
+        return self.shared_model.model.currentVersion();
+    }
+
+    fn wake(self: *RenderThread) void {
+        if (self.wake_pipe[1] >= 0) {
+            const b: u8 = 1;
+            _ = c.write(self.wake_pipe[1], &b, 1);
+        }
+    }
+
+    fn takePendingRequests(self: *RenderThread) PendingBatch {
+        self.pending.mutex.lockUncancelable(self.shared_model.io);
+        defer self.pending.mutex.unlock(self.shared_model.io);
+
+        const pending = self.pending.batch;
+        self.pending.batch = .{};
+        return pending;
+    }
+
+    fn applyPendingRequests(self: *RenderThread) void {
+        const pending = self.takePendingRequests();
+
+        if (pending.reset_requested) {
+            self.actor.reset();
+            self.deferred_iterations = 0;
+            self.force_render = false;
+        }
+        if (pending.latest_model_changed) |changed| {
+            self.actor.publishModelChanged(changed);
+        }
+        if (pending.force_render_requested) {
+            self.force_render = true;
+        }
+        if (pending.render_hint_pending) {
+            self.applyRenderHint(pending.transport_has_heavy_backlog, pending.stdout_has_heavy_backlog);
+        }
+        if (pending.shutdown_actor_requested) {
+            self.actor.shutdown(self.currentVersion());
+        }
+    }
+
+    fn applyRenderHint(self: *RenderThread, transport_has_heavy_backlog: bool, stdout_has_heavy_backlog: bool) void {
         const model_version = self.currentVersion();
         if (model_version <= self.stdout_thread.committedRenderVersion()) return;
         if (stdout_has_heavy_backlog) return;
@@ -102,25 +185,6 @@ pub const RenderThread = struct {
         self.actor.renderDamaged();
         self.deferred_iterations = 0;
         self.force_render = false;
-        self.wake();
-    }
-
-    pub fn shutdownActor(self: *RenderThread) void {
-        self.actor.shutdown(self.currentVersion());
-        self.wake();
-    }
-
-    pub fn currentVersion(self: *RenderThread) u64 {
-        self.shared_model.lock();
-        defer self.shared_model.unlock();
-        return self.shared_model.model.currentVersion();
-    }
-
-    fn wake(self: *RenderThread) void {
-        if (self.wake_pipe[1] >= 0) {
-            const b: u8 = 1;
-            _ = c.write(self.wake_pipe[1], &b, 1);
-        }
     }
 
     fn drainWakePipe(self: *RenderThread) void {
@@ -134,6 +198,7 @@ pub const RenderThread = struct {
     fn run(self: *RenderThread) void {
         while (true) {
             self.syncCommittedVersion();
+            self.applyPendingRequests();
 
             if (self.actor.needsRender()) {
                 self.shared_model.lock();

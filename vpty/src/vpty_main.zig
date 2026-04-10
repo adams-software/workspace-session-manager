@@ -385,7 +385,7 @@ pub fn main(init: std.process.Init) !u8 {
     var forwarder = side_effects.SideEffectForwarder.init(allocator);
     defer forwarder.deinit();
 
-    var stdout_actor = StdoutThread.init(allocator);
+    var stdout_actor = StdoutThread.init(allocator, init.io);
     defer stdout_actor.deinit();
 
     const size = terminal.currentSize() catch vpty_terminal.Size{ .rows = 24, .cols = 80 };

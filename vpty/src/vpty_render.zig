@@ -45,7 +45,6 @@ pub const RenderActor = struct {
 
     pub fn publishModelChanged(self: *RenderActor, changed: actor_mailboxes.ModelChanged) void {
         self.latest_model_changed = changed;
-        self.needs_render = true;
     }
 
     pub fn renderDamaged(self: *RenderActor) void {

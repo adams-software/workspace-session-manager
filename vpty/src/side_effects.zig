@@ -4,6 +4,7 @@ const actor_mailboxes = @import("actor_mailboxes");
 const State = enum {
     idle,
     esc,
+    csi,
     osc,
     osc_seen_5,
     osc_seen_52,
@@ -22,6 +23,7 @@ pub const SideEffectForwarder = struct {
     allocator: std.mem.Allocator,
     state: State = .idle,
     osc_buf: std.ArrayList(u8),
+    csi_buf: std.ArrayList(u8),
     screen_buf: std.ArrayList(u8),
 
     pub fn init(allocator: std.mem.Allocator) SideEffectForwarder {
@@ -29,12 +31,14 @@ pub const SideEffectForwarder = struct {
             .allocator = allocator,
             .state = .idle,
             .osc_buf = .{},
+            .csi_buf = .{},
             .screen_buf = .{},
         };
     }
 
     pub fn deinit(self: *SideEffectForwarder) void {
         self.osc_buf.deinit(self.allocator);
+        self.csi_buf.deinit(self.allocator);
         self.screen_buf.deinit(self.allocator);
     }
 
@@ -48,12 +52,41 @@ pub const SideEffectForwarder = struct {
         try self.osc_buf.append(self.allocator, b);
     }
 
+    fn startCsi(self: *SideEffectForwarder) !void {
+        self.csi_buf.clearRetainingCapacity();
+        try self.csi_buf.appendSlice(self.allocator, "\x1b[");
+        self.state = .csi;
+    }
+
+    fn appendCsi(self: *SideEffectForwarder, b: u8) !void {
+        try self.csi_buf.append(self.allocator, b);
+    }
+
     fn appendScreen(self: *SideEffectForwarder, b: u8) !void {
         try self.screen_buf.append(self.allocator, b);
     }
 
+    fn appendScreenSlice(self: *SideEffectForwarder, bytes: []const u8) !void {
+        try self.screen_buf.appendSlice(self.allocator, bytes);
+    }
+
     fn flushOsc52(self: *SideEffectForwarder, stdout_actor: anytype) !void {
         try stdout_actor.enqueueControl(actor_mailboxes.ControlChunk{ .bytes = self.osc_buf.items });
+    }
+
+    fn isBracketedPasteModeCsi(self: *SideEffectForwarder) bool {
+        return std.mem.eql(u8, self.csi_buf.items, "\x1b[?2004h") or
+            std.mem.eql(u8, self.csi_buf.items, "\x1b[?2004l");
+    }
+
+    fn flushCsi(self: *SideEffectForwarder, stdout_actor: anytype) !void {
+        if (self.isBracketedPasteModeCsi()) {
+            try stdout_actor.enqueueControl(actor_mailboxes.ControlChunk{ .bytes = self.csi_buf.items });
+        } else {
+            try self.appendScreenSlice(self.csi_buf.items);
+        }
+        self.csi_buf.clearRetainingCapacity();
+        self.state = .idle;
     }
 
     fn resetOsc(self: *SideEffectForwarder) void {
@@ -81,10 +114,19 @@ pub const SideEffectForwarder = struct {
                 .esc => {
                     if (b == ']') {
                         try self.startOsc();
+                    } else if (b == '[') {
+                        try self.startCsi();
                     } else {
                         try self.appendScreen(0x1b);
                         try self.appendScreen(b);
                         self.state = .idle;
+                    }
+                },
+
+                .csi => {
+                    try self.appendCsi(b);
+                    if (b >= 0x40 and b <= 0x7e) {
+                        try self.flushCsi(stdout_actor);
                     }
                 },
 

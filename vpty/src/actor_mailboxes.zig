@@ -1,18 +1,20 @@
 const std = @import("std");
+const Io = std.Io;
 
 pub fn DurableQueue(comptime T: type) type {
     return struct {
         const Self = @This();
 
         allocator: std.mem.Allocator,
-        mutex: std.Thread.Mutex = .{},
-        cond: std.Thread.Condition = .{},
+        io: Io,
+        mutex: Io.Mutex = .init,
         items: std.ArrayList(T),
         closed: bool = false,
 
-        pub fn init(allocator: std.mem.Allocator) Self {
+        pub fn init(allocator: std.mem.Allocator, io: Io) Self {
             return .{
                 .allocator = allocator,
+                .io = io,
                 .items = .{},
             };
         }
@@ -22,31 +24,29 @@ pub fn DurableQueue(comptime T: type) type {
         }
 
         pub fn push(self: *Self, item: T) !void {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
             if (self.closed) return error.Closed;
             try self.items.append(self.allocator, item);
-            self.cond.signal();
         }
 
         pub fn pop(self: *Self) ?T {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
             if (self.items.items.len == 0) return null;
             return self.items.orderedRemove(0);
         }
 
         pub fn len(self: *Self) usize {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
             return self.items.items.len;
         }
 
         pub fn close(self: *Self) void {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
             self.closed = true;
-            self.cond.broadcast();
         }
     };
 }
@@ -55,38 +55,40 @@ pub fn LatestBox(comptime T: type) type {
     return struct {
         const Self = @This();
 
-        mutex: std.Thread.Mutex = .{},
-        cond: std.Thread.Condition = .{},
+        io: Io,
+        mutex: Io.Mutex = .init,
         value: ?T = null,
         closed: bool = false,
 
+        pub fn init(io: Io) Self {
+            return .{ .io = io };
+        }
+
         pub fn publish(self: *Self, item: T) !void {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
             if (self.closed) return error.Closed;
             self.value = item;
-            self.cond.signal();
         }
 
         pub fn take(self: *Self) ?T {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
             const item = self.value;
             self.value = null;
             return item;
         }
 
         pub fn peek(self: *Self) ?T {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
             return self.value;
         }
 
         pub fn close(self: *Self) void {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
             self.closed = true;
-            self.cond.broadcast();
         }
     };
 }

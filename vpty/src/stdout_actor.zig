@@ -49,6 +49,12 @@ pub const StdoutActor = struct {
         try self.control_queue.appendSlice(self.allocator, chunk.bytes);
     }
 
+    pub fn enqueueOwnedControl(self: *StdoutActor, bytes: []u8) !void {
+        errdefer self.allocator.free(bytes);
+        try self.control_queue.appendSlice(self.allocator, bytes);
+        self.allocator.free(bytes);
+    }
+
     pub fn publishRenderCandidate(self: *StdoutActor, publish: actor_mailboxes.RenderPublish) !void {
         if (self.pending_render) |*candidate| {
             candidate.storage.deinit(self.allocator);
@@ -59,6 +65,18 @@ pub const StdoutActor = struct {
         self.pending_render = .{
             .publish = .{ .version = publish.version, .bytes = buf.items },
             .storage = buf,
+            .offset = 0,
+        };
+    }
+
+    pub fn publishOwnedRenderCandidate(self: *StdoutActor, version: u64, bytes: []u8) void {
+        if (self.pending_render) |*candidate| {
+            candidate.storage.deinit(self.allocator);
+        }
+
+        self.pending_render = .{
+            .publish = .{ .version = version, .bytes = bytes },
+            .storage = std.ArrayList(u8).fromOwnedSlice(bytes),
             .offset = 0,
         };
     }
