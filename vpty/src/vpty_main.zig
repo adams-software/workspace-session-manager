@@ -18,6 +18,7 @@ const TerminalModel = terminal_model_mod.TerminalModel;
 const render_thread_mod = @import("render_thread");
 const RenderThread = render_thread_mod.RenderThread;
 const SharedTerminalModel = render_thread_mod.SharedTerminalModel;
+const WakePipe = @import("wake_pipe").WakePipe;
 
 const INPUT_READ_CHUNK = 4096;
 const OUTPUT_READ_CHUNK = 4096;
@@ -28,7 +29,7 @@ const STDOUT_BACKLOG_THRESHOLD = 256 * 1024;
 var winch_changed: bool = false;
 var terminate_requested: bool = false;
 var terminate_signal: c_int = 0;
-var wake_pipe: [2]c_int = .{ -1, -1 };
+var wake_pipe: WakePipe = .{};
 
 const TransportState = struct {
     stdin_open: bool = true,
@@ -160,10 +161,7 @@ fn childExitCode(status: host.ExitStatus) u8 {
 fn handleTerminationSignal(sig: c_int) callconv(.c) void {
     terminate_requested = true;
     terminate_signal = sig;
-    if (wake_pipe[1] >= 0) {
-        const b: u8 = 1;
-        _ = c.write(wake_pipe[1], &b, 1);
-    }
+    wake_pipe.notify();
 }
 
 fn applyViewerSize(
@@ -185,10 +183,7 @@ fn applyViewerSize(
 
 fn handleSigwinch(_: c_int) callconv(.c) void {
     winch_changed = true;
-    if (wake_pipe[1] >= 0) {
-        const b: u8 = 1;
-        _ = c.write(wake_pipe[1], &b, 1);
-    }
+    wake_pipe.notify();
 }
 
 fn handleResizeIfNeeded(session_host: *host.SessionHost, shared_model: *SharedTerminalModel, render_thread: *RenderThread, terminal: *vpty_terminal.TerminalMode) void {
@@ -219,11 +214,7 @@ fn handleTerminationIfNeeded(session_host: *host.SessionHost) !?host.ExitStatus 
 }
 
 fn drainWakePipe() void {
-    var tmp: [64]u8 = undefined;
-    while (true) {
-        const n = c.read(wake_pipe[0], &tmp, tmp.len);
-        if (n <= 0 or n < tmp.len) break;
-    }
+    wake_pipe.drain();
 }
 
 fn stepLifecycle(
@@ -319,7 +310,7 @@ fn pumpUntilExit(session_host: *host.SessionHost, shared_model: *SharedTerminalM
         var pfds = [4]c.struct_pollfd{
             .{ .fd = if (transport.stdin_open) terminal.stdin_fd else -1, .events = if (transport.stdin_open) c.POLLIN else 0, .revents = 0 },
             .{ .fd = session_host.getMasterFd() orelse -1, .events = transport.ptyPollEvents(), .revents = 0 },
-            .{ .fd = wake_pipe[0], .events = c.POLLIN, .revents = 0 },
+            .{ .fd = wake_pipe.readFd(), .events = c.POLLIN, .revents = 0 },
             .{ .fd = -1, .events = 0, .revents = 0 },
         };
 
@@ -392,10 +383,8 @@ pub fn main(init: std.process.Init) !u8 {
 
     var session_host = try host.SessionHost.init(allocator, .{
         .argv = child_argv,
-        .enable_terminal_state = false,
         .rows = size.rows,
         .cols = size.cols,
-        .replay_capacity = 0,
     });
     defer session_host.deinit();
 
@@ -417,11 +406,8 @@ pub fn main(init: std.process.Init) !u8 {
     render_thread.forceNextRender();
     render_thread.considerRender(false, false);
 
-    if (c.pipe(&wake_pipe) != 0) return error.IoError;
-    defer {
-        if (wake_pipe[0] >= 0) _ = c.close(wake_pipe[0]);
-        if (wake_pipe[1] >= 0) _ = c.close(wake_pipe[1]);
-    }
+    wake_pipe = try WakePipe.init();
+    defer wake_pipe.deinit();
 
     const old_winch = c.signal(c.SIGWINCH, handleSigwinch);
     const old_int = c.signal(c.SIGINT, handleTerminationSignal);

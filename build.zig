@@ -283,6 +283,13 @@ pub fn build(b: *std.Build) void {
     terminal_model_mod.addImport("actor_mailboxes", actor_mailboxes_mod);
     stdout_actor_mod.addImport("actor_mailboxes", actor_mailboxes_mod);
 
+    const wake_pipe_mod = b.addModule("wake_pipe", .{
+        .root_source_file = b.path("vpty/src/wake_pipe.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+
     const stdout_thread_mod = b.addModule("stdout_thread", .{
         .root_source_file = b.path("vpty/src/stdout_thread.zig"),
         .target = target,
@@ -291,6 +298,7 @@ pub fn build(b: *std.Build) void {
     });
     stdout_thread_mod.addImport("stdout_actor", stdout_actor_mod);
     stdout_thread_mod.addImport("actor_mailboxes", actor_mailboxes_mod);
+    stdout_thread_mod.addImport("wake_pipe", wake_pipe_mod);
 
     const vpty_render_mod = b.addModule("vpty_render", .{
         .root_source_file = b.path("vpty/src/vpty_render.zig"),
@@ -313,6 +321,7 @@ pub fn build(b: *std.Build) void {
     render_thread_mod.addImport("terminal_model", terminal_model_mod);
     render_thread_mod.addImport("stdout_thread", stdout_thread_mod);
     render_thread_mod.addImport("actor_mailboxes", actor_mailboxes_mod);
+    render_thread_mod.addImport("wake_pipe", wake_pipe_mod);
 
     const vpty_root = b.createModule(.{
         .root_source_file = b.path("vpty/src/vpty_main.zig"),
@@ -340,6 +349,7 @@ pub fn build(b: *std.Build) void {
     vpty_root.addImport("stdout_actor", stdout_actor_mod);
     vpty_root.addImport("stdout_thread", stdout_thread_mod);
     vpty_root.addImport("actor_mailboxes", actor_mailboxes_mod);
+    vpty_root.addImport("wake_pipe", wake_pipe_mod);
 
     const vpty_exe = b.addExecutable(.{
         .name = "vpty",

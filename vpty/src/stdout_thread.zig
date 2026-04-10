@@ -1,9 +1,9 @@
 const std = @import("std");
 const actor_mailboxes = @import("actor_mailboxes");
 const StdoutActor = @import("stdout_actor").StdoutActor;
+const WakePipe = @import("wake_pipe").WakePipe;
 const Io = std.Io;
 const c = @cImport({
-    @cInclude("unistd.h");
     @cInclude("poll.h");
 });
 
@@ -26,20 +26,20 @@ pub const StdoutThread = struct {
     allocator: std.mem.Allocator,
     io: Io,
     actor: StdoutActor,
-    control_queue: actor_mailboxes.DurableQueue(OwnedControlChunk),
+    control_queue: actor_mailboxes.MutexQueue(OwnedControlChunk),
     render_mutex: Io.Mutex = .init,
     pending_render_publish: ?OwnedRenderPublish = null,
     shared: SharedState = .{},
     thread: ?std.Thread = null,
     shutdown_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-    wake_pipe: [2]c_int = .{ -1, -1 },
+    wake_pipe: WakePipe = .{},
 
     pub fn init(allocator: std.mem.Allocator, io: Io) StdoutThread {
         return .{
             .allocator = allocator,
             .io = io,
             .actor = StdoutActor.init(allocator),
-            .control_queue = actor_mailboxes.DurableQueue(OwnedControlChunk).init(allocator, io),
+            .control_queue = actor_mailboxes.MutexQueue(OwnedControlChunk).init(allocator, io),
         };
     }
 
@@ -54,7 +54,7 @@ pub const StdoutThread = struct {
     }
 
     pub fn start(self: *StdoutThread) !void {
-        if (c.pipe(&self.wake_pipe) != 0) return error.IoError;
+        self.wake_pipe = try WakePipe.init();
         self.thread = try std.Thread.spawn(.{}, run, .{self});
     }
 
@@ -65,9 +65,7 @@ pub const StdoutThread = struct {
             thread.join();
             self.thread = null;
         }
-        if (self.wake_pipe[0] >= 0) _ = c.close(self.wake_pipe[0]);
-        if (self.wake_pipe[1] >= 0) _ = c.close(self.wake_pipe[1]);
-        self.wake_pipe = .{ -1, -1 };
+        self.wake_pipe.deinit();
     }
 
     pub fn enqueueControl(self: *StdoutThread, chunk: actor_mailboxes.ControlChunk) !void {
@@ -110,18 +108,11 @@ pub const StdoutThread = struct {
     }
 
     fn wake(self: *StdoutThread) void {
-        if (self.wake_pipe[1] >= 0) {
-            const b: u8 = 1;
-            _ = c.write(self.wake_pipe[1], &b, 1);
-        }
+        self.wake_pipe.notify();
     }
 
     fn drainWakePipe(self: *StdoutThread) void {
-        var buf: [64]u8 = undefined;
-        while (true) {
-            const n = c.read(self.wake_pipe[0], &buf, buf.len);
-            if (n <= 0 or n < buf.len) break;
-        }
+        self.wake_pipe.drain();
     }
 
     fn run(self: *StdoutThread) void {
@@ -144,7 +135,7 @@ pub const StdoutThread = struct {
             if (self.shutdown_requested.load(.seq_cst) and !self.hasPending()) break;
 
             var pfd = c.struct_pollfd{
-                .fd = self.wake_pipe[0],
+                .fd = self.wake_pipe.readFd(),
                 .events = c.POLLIN,
                 .revents = 0,
             };

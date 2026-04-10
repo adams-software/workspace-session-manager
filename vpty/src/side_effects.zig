@@ -1,6 +1,11 @@
 const std = @import("std");
 const actor_mailboxes = @import("actor_mailboxes");
 
+// Routes terminal output by semantic effect: ordinary screen/model bytes stay on the
+// virtual path, while selected outer-terminal control sequences (for example OSC 52,
+// bracketed paste mode, focus reporting, and mouse-reporting setup) are forwarded to
+// the real terminal control channel instead of being swallowed into screen rendering.
+
 const State = enum {
     idle,
     esc,
@@ -17,6 +22,25 @@ const State = enum {
 pub const FeedResult = struct {
     emitted_osc52: bool = false,
     screen_bytes: []const u8,
+};
+
+const TestStdoutActor = struct {
+    allocator: std.mem.Allocator,
+    controls: std.ArrayList([]u8) = .{},
+
+    fn init(allocator: std.mem.Allocator) TestStdoutActor {
+        return .{ .allocator = allocator };
+    }
+
+    fn deinit(self: *TestStdoutActor) void {
+        for (self.controls.items) |bytes| self.allocator.free(bytes);
+        self.controls.deinit(self.allocator);
+    }
+
+    fn enqueueControl(self: *TestStdoutActor, chunk: actor_mailboxes.ControlChunk) !void {
+        const owned = try self.allocator.dupe(u8, chunk.bytes);
+        try self.controls.append(self.allocator, owned);
+    }
 };
 
 pub const SideEffectForwarder = struct {
@@ -74,13 +98,32 @@ pub const SideEffectForwarder = struct {
         try stdout_actor.enqueueControl(actor_mailboxes.ControlChunk{ .bytes = self.osc_buf.items });
     }
 
-    fn isBracketedPasteModeCsi(self: *SideEffectForwarder) bool {
-        return std.mem.eql(u8, self.csi_buf.items, "\x1b[?2004h") or
-            std.mem.eql(u8, self.csi_buf.items, "\x1b[?2004l");
+    fn isPassthroughCsi(self: *SideEffectForwarder) bool {
+        const csi = self.csi_buf.items;
+        return std.mem.eql(u8, csi, "\x1b[?2004h") or
+            std.mem.eql(u8, csi, "\x1b[?2004l") or
+            std.mem.eql(u8, csi, "\x1b[?1004h") or
+            std.mem.eql(u8, csi, "\x1b[?1004l") or
+            std.mem.eql(u8, csi, "\x1b[?1000h") or
+            std.mem.eql(u8, csi, "\x1b[?1000l") or
+            std.mem.eql(u8, csi, "\x1b[?1002h") or
+            std.mem.eql(u8, csi, "\x1b[?1002l") or
+            std.mem.eql(u8, csi, "\x1b[?1003h") or
+            std.mem.eql(u8, csi, "\x1b[?1003l") or
+            std.mem.eql(u8, csi, "\x1b[?1005h") or
+            std.mem.eql(u8, csi, "\x1b[?1005l") or
+            std.mem.eql(u8, csi, "\x1b[?1006h") or
+            std.mem.eql(u8, csi, "\x1b[?1006l") or
+            std.mem.eql(u8, csi, "\x1b[?1015h") or
+            std.mem.eql(u8, csi, "\x1b[?1015l") or
+            std.mem.eql(u8, csi, "\x1b[?2005h") or
+            std.mem.eql(u8, csi, "\x1b[?2005l") or
+            std.mem.eql(u8, csi, "\x1b[?2006h") or
+            std.mem.eql(u8, csi, "\x1b[?2006l");
     }
 
     fn flushCsi(self: *SideEffectForwarder, stdout_actor: anytype) !void {
-        if (self.isBracketedPasteModeCsi()) {
+        if (self.isPassthroughCsi()) {
             try stdout_actor.enqueueControl(actor_mailboxes.ControlChunk{ .bytes = self.csi_buf.items });
         } else {
             try self.appendScreenSlice(self.csi_buf.items);
@@ -207,3 +250,128 @@ pub const SideEffectForwarder = struct {
         return result;
     }
 };
+
+test "OSC 52 is passed through and removed from screen bytes" {
+    var forwarder = SideEffectForwarder.init(std.testing.allocator);
+    defer forwarder.deinit();
+
+    var stdout_actor = TestStdoutActor.init(std.testing.allocator);
+    defer stdout_actor.deinit();
+
+    const input = "hello\x1b]52;c;Zm9v\x07world";
+    const result = try forwarder.feed(&stdout_actor, input);
+
+    try std.testing.expect(result.emitted_osc52);
+    try std.testing.expectEqualStrings("helloworld", result.screen_bytes);
+    try std.testing.expectEqual(@as(usize, 1), stdout_actor.controls.items.len);
+    try std.testing.expectEqualStrings("\x1b]52;c;Zm9v\x07", stdout_actor.controls.items[0]);
+}
+
+test "bracketed paste mode enable is passed through and removed from screen bytes" {
+    var forwarder = SideEffectForwarder.init(std.testing.allocator);
+    defer forwarder.deinit();
+
+    var stdout_actor = TestStdoutActor.init(std.testing.allocator);
+    defer stdout_actor.deinit();
+
+    const input = "a\x1b[?2004hb";
+    const result = try forwarder.feed(&stdout_actor, input);
+
+    try std.testing.expect(!result.emitted_osc52);
+    try std.testing.expectEqualStrings("ab", result.screen_bytes);
+    try std.testing.expectEqual(@as(usize, 1), stdout_actor.controls.items.len);
+    try std.testing.expectEqualStrings("\x1b[?2004h", stdout_actor.controls.items[0]);
+}
+
+test "bracketed paste mode disable is passed through and removed from screen bytes" {
+    var forwarder = SideEffectForwarder.init(std.testing.allocator);
+    defer forwarder.deinit();
+
+    var stdout_actor = TestStdoutActor.init(std.testing.allocator);
+    defer stdout_actor.deinit();
+
+    const input = "a\x1b[?2004lb";
+    const result = try forwarder.feed(&stdout_actor, input);
+
+    try std.testing.expectEqualStrings("ab", result.screen_bytes);
+    try std.testing.expectEqual(@as(usize, 1), stdout_actor.controls.items.len);
+    try std.testing.expectEqualStrings("\x1b[?2004l", stdout_actor.controls.items[0]);
+}
+
+test "split chunk bracketed paste CSI is passed through only after completion" {
+    var forwarder = SideEffectForwarder.init(std.testing.allocator);
+    defer forwarder.deinit();
+
+    var stdout_actor = TestStdoutActor.init(std.testing.allocator);
+    defer stdout_actor.deinit();
+
+    const first = try forwarder.feed(&stdout_actor, "x\x1b[?20");
+    try std.testing.expectEqualStrings("x", first.screen_bytes);
+    try std.testing.expectEqual(@as(usize, 0), stdout_actor.controls.items.len);
+
+    const second = try forwarder.feed(&stdout_actor, "04hy");
+    try std.testing.expectEqualStrings("y", second.screen_bytes);
+    try std.testing.expectEqual(@as(usize, 1), stdout_actor.controls.items.len);
+    try std.testing.expectEqualStrings("\x1b[?2004h", stdout_actor.controls.items[0]);
+}
+
+test "focus reporting enable is passed through and removed from screen bytes" {
+    var forwarder = SideEffectForwarder.init(std.testing.allocator);
+    defer forwarder.deinit();
+
+    var stdout_actor = TestStdoutActor.init(std.testing.allocator);
+    defer stdout_actor.deinit();
+
+    const input = "a\x1b[?1004hb";
+    const result = try forwarder.feed(&stdout_actor, input);
+
+    try std.testing.expectEqualStrings("ab", result.screen_bytes);
+    try std.testing.expectEqual(@as(usize, 1), stdout_actor.controls.items.len);
+    try std.testing.expectEqualStrings("\x1b[?1004h", stdout_actor.controls.items[0]);
+}
+
+test "mouse reporting enable is passed through and removed from screen bytes" {
+    var forwarder = SideEffectForwarder.init(std.testing.allocator);
+    defer forwarder.deinit();
+
+    var stdout_actor = TestStdoutActor.init(std.testing.allocator);
+    defer stdout_actor.deinit();
+
+    const input = "a\x1b[?1006hb";
+    const result = try forwarder.feed(&stdout_actor, input);
+
+    try std.testing.expectEqualStrings("ab", result.screen_bytes);
+    try std.testing.expectEqual(@as(usize, 1), stdout_actor.controls.items.len);
+    try std.testing.expectEqualStrings("\x1b[?1006h", stdout_actor.controls.items[0]);
+}
+
+test "split chunk focus reporting CSI is passed through only after completion" {
+    var forwarder = SideEffectForwarder.init(std.testing.allocator);
+    defer forwarder.deinit();
+
+    var stdout_actor = TestStdoutActor.init(std.testing.allocator);
+    defer stdout_actor.deinit();
+
+    const first = try forwarder.feed(&stdout_actor, "x\x1b[?10");
+    try std.testing.expectEqualStrings("x", first.screen_bytes);
+    try std.testing.expectEqual(@as(usize, 0), stdout_actor.controls.items.len);
+
+    const second = try forwarder.feed(&stdout_actor, "04hy");
+    try std.testing.expectEqualStrings("y", second.screen_bytes);
+    try std.testing.expectEqual(@as(usize, 1), stdout_actor.controls.items.len);
+    try std.testing.expectEqualStrings("\x1b[?1004h", stdout_actor.controls.items[0]);
+}
+
+test "ordinary CSI screen control stays in screen bytes" {
+    var forwarder = SideEffectForwarder.init(std.testing.allocator);
+    defer forwarder.deinit();
+
+    var stdout_actor = TestStdoutActor.init(std.testing.allocator);
+    defer stdout_actor.deinit();
+
+    const input = "a\x1b[2Jb";
+    const result = try forwarder.feed(&stdout_actor, input);
+
+    try std.testing.expectEqualStrings("a\x1b[2Jb", result.screen_bytes);
+    try std.testing.expectEqual(@as(usize, 0), stdout_actor.controls.items.len);
+}

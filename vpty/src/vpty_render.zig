@@ -13,14 +13,15 @@ pub const OutputState = struct {
 };
 
 pub const RenderActor = struct {
+    // Current renderer policy is intentionally simple: generate a full-frame redraw,
+    // track only generated/committed versions, and avoid retaining whole snapshots
+    // until committed-diff rendering is intentionally reintroduced.
     output_state: OutputState = .{},
     stdout_actor: ?*StdoutThread = null,
     latest_model_changed: ?actor_mailboxes.ModelChanged = null,
     latest_commit_notice: ?actor_mailboxes.CommitNotice = null,
     needs_render: bool = true,
-    last_generated_frame: ?host.HostScreenSnapshot = null,
     last_generated_version: u64 = 0,
-    committed_frame: ?host.HostScreenSnapshot = null,
     committed_version: u64 = 0,
     render_buf: std.ArrayList(u8) = .{},
 
@@ -31,8 +32,6 @@ pub const RenderActor = struct {
     }
 
     pub fn deinit(self: *RenderActor) void {
-        self.freeLastGeneratedFrame();
-        self.freeCommittedFrame();
         self.render_buf.deinit(std.heap.page_allocator);
     }
 
@@ -96,8 +95,7 @@ pub const RenderActor = struct {
         self.output_state.cursor_col = owned_snapshot.cursor_col;
         self.output_state.has_drawn = true;
 
-        self.freeLastGeneratedFrame();
-        self.last_generated_frame = owned_snapshot;
+        host.freeScreenSnapshot(std.heap.page_allocator, &owned_snapshot);
         self.last_generated_version = version;
 
         const stdout_actor = self.stdout_actor orelse return;
@@ -108,8 +106,6 @@ pub const RenderActor = struct {
     }
 
     pub fn reset(self: *RenderActor) void {
-        self.freeLastGeneratedFrame();
-        self.freeCommittedFrame();
         self.render_buf.clearRetainingCapacity();
         self.output_state = .{};
         self.latest_model_changed = null;
@@ -121,17 +117,8 @@ pub const RenderActor = struct {
 
     pub fn noteCommitted(self: *RenderActor, notice: actor_mailboxes.CommitNotice) void {
         self.latest_commit_notice = notice;
-        if (self.last_generated_frame == null) return;
         if (self.last_generated_version == 0 or self.last_generated_version > notice.version) return;
-
-        self.freeCommittedFrame();
-        self.committed_frame = self.last_generated_frame;
         self.committed_version = self.last_generated_version;
-        self.last_generated_frame = null;
-    }
-
-    fn noteCommittedThrough(self: *RenderActor, version: u64) void {
-        self.noteCommitted(.{ .version = version });
     }
 
     pub fn shutdown(self: *RenderActor, version: u64) void {
@@ -151,8 +138,6 @@ pub const RenderActor = struct {
             }) catch {};
         }
 
-        self.freeLastGeneratedFrame();
-        self.freeCommittedFrame();
         self.render_buf.clearRetainingCapacity();
         self.output_state = .{};
         self.latest_model_changed = null;
@@ -205,58 +190,6 @@ pub const RenderActor = struct {
             if (line.eol) {
                 self.eraseToEndOfLine();
             }
-        }
-    }
-
-    fn renderDiff(self: *RenderActor, prev: *const host.HostScreenSnapshot, next: *const host.HostScreenSnapshot) void {
-        if (prev.rows != next.rows or prev.cols != next.cols) {
-            self.renderFullFrame(next);
-            return;
-        }
-
-        var style_state = StyleState{};
-        style_state.reset(self);
-
-        for (next.lines, 0..) |next_line, row_idx| {
-            const prev_line = prev.lines[row_idx];
-
-            if (lineEqual(prev_line, next_line)) continue;
-
-            var col: usize = 0;
-            while (col < next_line.cells.len) {
-                if (cellEqual(prev_line.cells[col], next_line.cells[col])) {
-                    col += 1;
-                    continue;
-                }
-
-                const run_start = col;
-                col += 1;
-
-                while (col < next_line.cells.len and !cellEqual(prev_line.cells[col], next_line.cells[col])) : (col += 1) {}
-
-                renderChangedRun(self, row_idx, run_start, col, next_line, &style_state);
-            }
-
-            const prev_end = lineVisibleEnd(prev_line);
-            const next_end = lineVisibleEnd(next_line);
-            if (prev_end > next_end or next_line.eol != prev_line.eol) {
-                self.moveCursor(@intCast(row_idx), @intCast(next_end));
-                self.eraseToEndOfLine();
-            }
-        }
-    }
-
-    fn freeLastGeneratedFrame(self: *RenderActor) void {
-        if (self.last_generated_frame) |*snap| {
-            host.freeScreenSnapshot(std.heap.page_allocator, snap);
-            self.last_generated_frame = null;
-        }
-    }
-
-    fn freeCommittedFrame(self: *RenderActor) void {
-        if (self.committed_frame) |*snap| {
-            host.freeScreenSnapshot(std.heap.page_allocator, snap);
-            self.committed_frame = null;
         }
     }
 };
@@ -319,100 +252,42 @@ const StyleState = struct {
         emitBool(actor, "\x1b[5m", "\x1b[25m", &self.attrs.blink, cell.attrs.blink);
         emitBool(actor, "\x1b[7m", "\x1b[27m", &self.attrs.reverse, cell.attrs.reverse);
         emitBool(actor, "\x1b[8m", "\x1b[28m", &self.attrs.conceal, cell.attrs.conceal);
-        emitBool(actor, "\x1b[9m", "\x1b[29m", &self.attrs.strike, cell.attrs.strike);
 
-        if (self.attrs.font != cell.attrs.font) {
-            if (cell.attrs.font == 0) {
-                actor.writeBytes("\x1b[10m");
-            } else {
-                actor.out("\x1b[{d}m", .{10 + cell.attrs.font});
-            }
-            self.attrs.font = cell.attrs.font;
-        }
-
-        if (!std.meta.eql(self.fg, cell.fg)) {
-            switch (cell.fg.kind) {
-                .default => actor.writeBytes("\x1b[39m"),
-                .indexed => actor.out("\x1b[38;5;{d}m", .{cell.fg.palette_index}),
-                .rgb => actor.out("\x1b[38;2;{d};{d};{d}m", .{ cell.fg.red, cell.fg.green, cell.fg.blue }),
-            }
+        if (!colorEq(self.fg, cell.fg)) {
+            emitColor(actor, 38, cell.fg);
             self.fg = cell.fg;
         }
-
-        if (!std.meta.eql(self.bg, cell.bg)) {
-            switch (cell.bg.kind) {
-                .default => actor.writeBytes("\x1b[49m"),
-                .indexed => actor.out("\x1b[48;5;{d}m", .{cell.bg.palette_index}),
-                .rgb => actor.out("\x1b[48;2;{d};{d};{d}m", .{ cell.bg.red, cell.bg.green, cell.bg.blue }),
-            }
+        if (!colorEq(self.bg, cell.bg)) {
+            emitColor(actor, 48, cell.bg);
             self.bg = cell.bg;
         }
     }
 };
 
-fn cellEqual(a: host.HostScreenCell, b: host.HostScreenCell) bool {
-    return a.chars_len == b.chars_len and
-        a.width == b.width and
-        std.mem.eql(u32, a.chars[0..a.chars_len], b.chars[0..b.chars_len]) and
-        std.meta.eql(a.fg, b.fg) and
-        std.meta.eql(a.bg, b.bg) and
-        std.meta.eql(a.attrs, b.attrs);
+fn colorEq(a: host.HostColor, b: host.HostColor) bool {
+    return a.kind == b.kind and
+        a.palette_index == b.palette_index and
+        a.red == b.red and
+        a.green == b.green and
+        a.blue == b.blue;
 }
 
-fn lineEqual(a: host.HostScreenLine, b: host.HostScreenLine) bool {
-    if (a.eol != b.eol) return false;
-    if (a.cells.len != b.cells.len) return false;
-    for (a.cells, b.cells) |ac, bc| {
-        if (!cellEqual(ac, bc)) return false;
+fn emitColor(actor: *RenderActor, base: u8, color: host.HostColor) void {
+    switch (color.kind) {
+        .default => actor.out("\x1b[{d}m", .{base + 1}),
+        .indexed => actor.out("\x1b[{d};5;{d}m", .{ base, color.palette_index }),
+        .rgb => actor.out("\x1b[{d};2;{d};{d};{d}m", .{ base, color.red, color.green, color.blue }),
     }
-    return true;
-}
-
-fn lineVisibleEnd(line: host.HostScreenLine) usize {
-    var col = line.cells.len;
-    while (col > 0) {
-        const cell = line.cells[col - 1];
-        if (cell.width == 0) {
-            col -= 1;
-            continue;
-        }
-        return col;
-    }
-    return 0;
 }
 
 fn emitCell(actor: *RenderActor, cell: host.HostScreenCell, style_state: *StyleState) void {
-    if (cell.width == 0) return;
-
     style_state.diffAndEmit(actor, cell);
-
-    if (cell.chars_len == 0) {
-        actor.writeBytes(" ");
-        return;
-    }
 
     var buf: [32]u8 = undefined;
     const text = encodeCodepoints(&buf, cell);
-    actor.writeBytes(text);
-}
-
-fn renderChangedRun(
-    actor: *RenderActor,
-    row_idx: usize,
-    start_col: usize,
-    end_col: usize,
-    line: host.HostScreenLine,
-    style_state: *StyleState,
-) void {
-    var draw_start = start_col;
-    while (draw_start > 0 and line.cells[draw_start].width == 0) {
-        draw_start -= 1;
-    }
-
-    actor.moveCursor(@intCast(row_idx), @intCast(draw_start));
-
-    var col = draw_start;
-    while (col < end_col and col < line.cells.len) : (col += 1) {
-        emitCell(actor, line.cells[col], style_state);
+    if (text.len == 0) {
+        actor.writeBytes(" ");
+    } else {
+        actor.writeBytes(text);
     }
 }

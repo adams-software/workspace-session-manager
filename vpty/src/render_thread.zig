@@ -3,9 +3,9 @@ const actor_mailboxes = @import("actor_mailboxes");
 const RenderActor = @import("vpty_render").RenderActor;
 const TerminalModel = @import("terminal_model").TerminalModel;
 const StdoutThread = @import("stdout_thread").StdoutThread;
+const WakePipe = @import("wake_pipe").WakePipe;
 const Io = std.Io;
 const c = @cImport({
-    @cInclude("unistd.h");
     @cInclude("poll.h");
 });
 
@@ -54,7 +54,7 @@ pub const RenderThread = struct {
     force_render: bool = false,
     thread: ?std.Thread = null,
     shutdown_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-    wake_pipe: [2]c_int = .{ -1, -1 },
+    wake_pipe: WakePipe = .{},
 
     pub fn init(allocator: std.mem.Allocator, shared_model: *SharedTerminalModel, stdout_thread: *StdoutThread) RenderThread {
         return .{
@@ -70,7 +70,7 @@ pub const RenderThread = struct {
     }
 
     pub fn start(self: *RenderThread) !void {
-        if (c.pipe(&self.wake_pipe) != 0) return error.IoError;
+        self.wake_pipe = try WakePipe.init();
         self.thread = try std.Thread.spawn(.{}, run, .{self});
     }
 
@@ -81,9 +81,7 @@ pub const RenderThread = struct {
             thread.join();
             self.thread = null;
         }
-        if (self.wake_pipe[0] >= 0) _ = c.close(self.wake_pipe[0]);
-        if (self.wake_pipe[1] >= 0) _ = c.close(self.wake_pipe[1]);
-        self.wake_pipe = .{ -1, -1 };
+        self.wake_pipe.deinit();
     }
 
     pub fn publishModelChanged(self: *RenderThread, changed: actor_mailboxes.ModelChanged) void {
@@ -136,10 +134,7 @@ pub const RenderThread = struct {
     }
 
     fn wake(self: *RenderThread) void {
-        if (self.wake_pipe[1] >= 0) {
-            const b: u8 = 1;
-            _ = c.write(self.wake_pipe[1], &b, 1);
-        }
+        self.wake_pipe.notify();
     }
 
     fn takePendingRequests(self: *RenderThread) PendingBatch {
@@ -188,11 +183,7 @@ pub const RenderThread = struct {
     }
 
     fn drainWakePipe(self: *RenderThread) void {
-        var buf: [64]u8 = undefined;
-        while (true) {
-            const n = c.read(self.wake_pipe[0], &buf, buf.len);
-            if (n <= 0 or n < buf.len) break;
-        }
+        self.wake_pipe.drain();
     }
 
     fn run(self: *RenderThread) void {
@@ -213,7 +204,7 @@ pub const RenderThread = struct {
             if (self.shutdown_requested.load(.seq_cst)) break;
 
             var pfd = c.struct_pollfd{
-                .fd = self.wake_pipe[0],
+                .fd = self.wake_pipe.readFd(),
                 .events = c.POLLIN,
                 .revents = 0,
             };

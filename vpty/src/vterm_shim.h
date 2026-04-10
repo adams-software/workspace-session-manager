@@ -32,15 +32,6 @@ typedef struct {
 
 typedef struct {
   uint8_t bold;
-  uint8_t underline;
-  uint8_t inverse;
-  uint8_t font;
-  msr_vterm_color fg;
-  msr_vterm_color bg;
-} msr_vterm_cell_style;
-
-typedef struct {
-  uint8_t bold;
   uint8_t italic;
   uint8_t underline;
   uint8_t blink;

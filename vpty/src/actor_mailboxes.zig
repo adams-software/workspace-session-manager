@@ -1,7 +1,7 @@
 const std = @import("std");
 const Io = std.Io;
 
-pub fn DurableQueue(comptime T: type) type {
+pub fn MutexQueue(comptime T: type) type {
     return struct {
         const Self = @This();
 
@@ -41,48 +41,6 @@ pub fn DurableQueue(comptime T: type) type {
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
             return self.items.items.len;
-        }
-
-        pub fn close(self: *Self) void {
-            self.mutex.lockUncancelable(self.io);
-            defer self.mutex.unlock(self.io);
-            self.closed = true;
-        }
-    };
-}
-
-pub fn LatestBox(comptime T: type) type {
-    return struct {
-        const Self = @This();
-
-        io: Io,
-        mutex: Io.Mutex = .init,
-        value: ?T = null,
-        closed: bool = false,
-
-        pub fn init(io: Io) Self {
-            return .{ .io = io };
-        }
-
-        pub fn publish(self: *Self, item: T) !void {
-            self.mutex.lockUncancelable(self.io);
-            defer self.mutex.unlock(self.io);
-            if (self.closed) return error.Closed;
-            self.value = item;
-        }
-
-        pub fn take(self: *Self) ?T {
-            self.mutex.lockUncancelable(self.io);
-            defer self.mutex.unlock(self.io);
-            const item = self.value;
-            self.value = null;
-            return item;
-        }
-
-        pub fn peek(self: *Self) ?T {
-            self.mutex.lockUncancelable(self.io);
-            defer self.mutex.unlock(self.io);
-            return self.value;
         }
 
         pub fn close(self: *Self) void {

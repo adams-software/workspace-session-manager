@@ -20,8 +20,6 @@ pub const SpawnOptions = struct {
     env: ?[]const []const u8 = null,
     cols: ?u16 = null,
     rows: ?u16 = null,
-    enable_terminal_state: bool = false,
-    replay_capacity: usize = 0,
 };
 
 pub const SessionHost = struct {
@@ -38,8 +36,6 @@ pub const SessionHost = struct {
             }),
         };
 
-        _ = opts.enable_terminal_state;
-        _ = opts.replay_capacity;
         return self;
     }
 
