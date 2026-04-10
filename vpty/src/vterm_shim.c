@@ -3,11 +3,8 @@
 #include <string.h>
 
 static int on_damage(VTermRect rect, void *user) {
-  msr_vterm_handle *h = (msr_vterm_handle *)user;
-  if (!h || !h->dirty_rows) return 1;
-  for (int row = rect.start_row; row < rect.end_row && row < h->rows; row++) {
-    if (row >= 0) h->dirty_rows[row] = 1;
-  }
+  (void)rect;
+  (void)user;
   return 1;
 }
 
@@ -18,12 +15,10 @@ static int on_moverect(VTermRect dest, VTermRect src, void *user) {
 
 static int on_movecursor(VTermPos pos, VTermPos oldpos, int visible, void *user) {
   msr_vterm_handle *h = (msr_vterm_handle *)user;
+  (void)pos;
+  (void)oldpos;
   if (!h) return 1;
   h->cursor_visible = visible;
-  if (h->dirty_rows) {
-    if (oldpos.row >= 0 && oldpos.row < h->rows) h->dirty_rows[oldpos.row] = 1;
-    if (pos.row >= 0 && pos.row < h->rows) h->dirty_rows[pos.row] = 1;
-  }
   return 1;
 }
 
@@ -31,10 +26,7 @@ static int on_settermprop(VTermProp prop, VTermValue *val, void *user) {
   msr_vterm_handle *h = (msr_vterm_handle *)user;
   if (!h) return 1;
   if (prop == VTERM_PROP_CURSORVISIBLE) h->cursor_visible = val->boolean;
-  if (prop == VTERM_PROP_ALTSCREEN) {
-    h->alt_screen = val->boolean;
-    h->full_damage = 1;
-  }
+  if (prop == VTERM_PROP_ALTSCREEN) h->alt_screen = val->boolean;
   return 1;
 }
 
@@ -43,9 +35,6 @@ static int on_resize(int rows, int cols, void *user) {
   if (!h) return 1;
   h->rows = rows;
   h->cols = cols;
-  h->full_damage = 1;
-  h->dirty_rows = (uint8_t *)realloc(h->dirty_rows, rows > 0 ? (size_t)rows : 1u);
-  if (h->dirty_rows) memset(h->dirty_rows, 1, rows > 0 ? (size_t)rows : 1u);
   return 1;
 }
 
@@ -87,7 +76,6 @@ msr_vterm_handle *msr_vterm_new(int rows, int cols) {
     return NULL;
   }
 
-  // ←←← ADD THIS LINE (this is the official way)
   vterm_set_utf8(h->vt, 1);
 
   h->screen = vterm_obtain_screen(h->vt);
@@ -95,9 +83,6 @@ msr_vterm_handle *msr_vterm_new(int rows, int cols) {
   h->cols = cols;
   h->cursor_visible = 1;
   h->alt_screen = 0;
-  h->full_damage = 1;
-  h->dirty_rows = (uint8_t *)calloc(rows > 0 ? (size_t)rows : 1u, 1);
-  if (h->dirty_rows) memset(h->dirty_rows, 1, rows > 0 ? (size_t)rows : 1u);
 
   vterm_screen_set_callbacks(h->screen, &screen_cbs, h);
   vterm_screen_enable_altscreen(h->screen, 1);
@@ -110,7 +95,6 @@ msr_vterm_handle *msr_vterm_new(int rows, int cols) {
 
 void msr_vterm_free(msr_vterm_handle *handle) {
   if (!handle) return;
-  free(handle->dirty_rows);
   if (handle->vt) vterm_free(handle->vt);
   free(handle);
 }
@@ -118,13 +102,11 @@ void msr_vterm_free(msr_vterm_handle *handle) {
 void msr_vterm_set_size(msr_vterm_handle *handle, int rows, int cols) {
   if (!handle || !handle->vt) return;
   vterm_set_size(handle->vt, rows, cols);
-  if (handle->screen) vterm_screen_flush_damage(handle->screen);
 }
 
 void msr_vterm_feed(msr_vterm_handle *handle, const char *bytes, size_t len) {
   if (!handle || !handle->vt) return;
   vterm_input_write(handle->vt, bytes, len);
-  if (handle->screen) vterm_screen_flush_damage(handle->screen);
 }
 
 void msr_vterm_get_size(msr_vterm_handle *handle, int *rows, int *cols) {
@@ -162,16 +144,8 @@ size_t msr_vterm_get_rect_text(msr_vterm_handle *handle, int row, int start_col,
   return vterm_screen_get_text(handle->screen, buf, len, rect);
 }
 
-// New: expose a way to force a full redraw when needed
 void msr_vterm_force_full_damage(msr_vterm_handle *handle) {
-  if (!handle) return;
-  handle->full_damage = 1;
-  if (handle->dirty_rows) memset(handle->dirty_rows, 1, handle->rows > 0 ? (size_t)handle->rows : 1u);
-}
-
-// Already had this, make sure it's here
-void msr_vterm_flush_damage(msr_vterm_handle *handle) {
-  if (handle && handle->screen) vterm_screen_flush_damage(handle->screen);
+  (void)handle;
 }
 
 void msr_vterm_get_cell(msr_vterm_handle *handle, int row, int col, msr_vterm_cell *out) {

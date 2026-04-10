@@ -7,8 +7,6 @@ pub const HostScreenSnapshot = screen_types.HostScreenSnapshot;
 
 pub const ModelUpdate = struct {
     version: u64,
-    dirty: bool,
-    full_redraw_needed: bool,
 
     pub fn asModelChanged(self: ModelUpdate) actor_mailboxes.ModelChanged {
         return .{ .version = self.version };
@@ -18,8 +16,6 @@ pub const ModelUpdate = struct {
 pub const TerminalModel = struct {
     adapter: VTermAdapter,
     version: u64 = 0,
-    dirty: bool = true,
-    full_redraw_needed: bool = true,
 
     pub fn init(rows: u16, cols: u16) !TerminalModel {
         return .{
@@ -35,26 +31,15 @@ pub const TerminalModel = struct {
         if (bytes.len > 0) {
             self.adapter.feed(bytes);
             self.version += 1;
-            self.dirty = true;
         }
-        return .{
-            .version = self.version,
-            .dirty = self.dirty,
-            .full_redraw_needed = self.full_redraw_needed,
-        };
+        return .{ .version = self.version };
     }
 
     pub fn resize(self: *TerminalModel, rows: u16, cols: u16) ModelUpdate {
         self.adapter.resize(rows, cols);
         self.adapter.forceFullDamage();
         self.version += 1;
-        self.dirty = true;
-        self.full_redraw_needed = true;
-        return .{
-            .version = self.version,
-            .dirty = self.dirty,
-            .full_redraw_needed = self.full_redraw_needed,
-        };
+        return .{ .version = self.version };
     }
 
     pub fn snapshot(self: *const TerminalModel, allocator: std.mem.Allocator) !HostScreenSnapshot {
@@ -65,33 +50,12 @@ pub const TerminalModel = struct {
         return self.version;
     }
 
-    pub fn currentSnapshotVersion(self: *const TerminalModel) u64 {
-        return self.version;
-    }
-
-    pub fn isDirty(self: *const TerminalModel) bool {
-        return self.dirty;
-    }
-
-    pub fn fullRedrawNeeded(self: *const TerminalModel) bool {
-        return self.full_redraw_needed;
-    }
-
-    pub fn markCommitted(self: *TerminalModel) void {
-        self.dirty = false;
-        self.full_redraw_needed = false;
-    }
-
     pub fn markCommittedThrough(self: *TerminalModel, version: u64) void {
-        if (self.version <= version) {
-            self.dirty = false;
-            self.full_redraw_needed = false;
-        }
+        _ = self;
+        _ = version;
     }
 
     pub fn forceFullDamage(self: *TerminalModel) void {
         self.adapter.forceFullDamage();
-        self.dirty = true;
-        self.full_redraw_needed = true;
     }
 };

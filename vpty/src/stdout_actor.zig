@@ -172,4 +172,3 @@ pub const StdoutBuffer = struct {
     }
 };
 
-pub const StdoutActor = StdoutBuffer;

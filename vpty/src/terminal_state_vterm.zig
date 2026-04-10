@@ -37,12 +37,7 @@ pub const VTermAdapter = struct {
     pub fn feed(self: *VTermAdapter, bytes: []const u8) void {
         if (self.handle) |handle| {
             c.msr_vterm_feed(handle, bytes.ptr, bytes.len);
-            c.msr_vterm_flush_damage(handle);
         }
-    }
-
-    pub fn flushDamage(self: *VTermAdapter) void {
-        if (self.handle) |h| c.msr_vterm_flush_damage(h);
     }
 
     pub fn forceFullDamage(self: *VTermAdapter) void {
@@ -122,7 +117,6 @@ pub const VTermAdapter = struct {
             .alt_screen = c.msr_vterm_get_alt_screen(handle) != 0,
             .title = null,
             .seq = 0,
-            .full_damage = true,
             .lines = lines,
         };
     }

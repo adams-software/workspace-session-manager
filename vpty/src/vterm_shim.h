@@ -16,8 +16,6 @@ typedef struct {
   int cols;
   int cursor_visible;
   int alt_screen;
-  uint8_t *dirty_rows;
-  int full_damage;
 } msr_vterm_handle;
 
 typedef struct {
@@ -57,10 +55,8 @@ void msr_vterm_feed(msr_vterm_handle *handle, const char *bytes, size_t len);
 void msr_vterm_get_cursor(msr_vterm_handle *handle, int *row, int *col, int *visible);
 int msr_vterm_get_alt_screen(msr_vterm_handle *handle);
 void msr_vterm_force_full_damage(msr_vterm_handle *handle);
-void msr_vterm_flush_damage(msr_vterm_handle *handle);
 void msr_vterm_get_cell(msr_vterm_handle *handle, int row, int col, msr_vterm_cell *out);
 int msr_vterm_row_is_eol(msr_vterm_handle *handle, int row);
-
 
 #ifdef __cplusplus
 }

@@ -1,6 +1,6 @@
 const std = @import("std");
 const actor_mailboxes = @import("actor_mailboxes");
-const StdoutActor = @import("stdout_actor").StdoutActor;
+const StdoutBuffer = @import("stdout_actor").StdoutBuffer;
 const WakePipe = @import("wake_pipe").WakePipe;
 const Io = std.Io;
 const c = @cImport({
@@ -25,7 +25,7 @@ const SharedState = struct {
 pub const StdoutThread = struct {
     allocator: std.mem.Allocator,
     io: Io,
-    actor: StdoutActor,
+    buffer: StdoutBuffer,
     control_queue: actor_mailboxes.MutexQueue(OwnedControlChunk),
     render_mutex: Io.Mutex = .init,
     pending_render_publish: ?OwnedRenderPublish = null,
@@ -38,7 +38,7 @@ pub const StdoutThread = struct {
         return .{
             .allocator = allocator,
             .io = io,
-            .actor = StdoutActor.init(allocator),
+            .buffer = StdoutBuffer.init(allocator),
             .control_queue = actor_mailboxes.MutexQueue(OwnedControlChunk).init(allocator, io),
         };
     }
@@ -50,7 +50,7 @@ pub const StdoutThread = struct {
             self.allocator.free(publish.bytes);
             self.pending_render_publish = null;
         }
-        self.actor.deinit();
+        self.buffer.deinit();
     }
 
     pub fn start(self: *StdoutThread) !void {
@@ -118,14 +118,14 @@ pub const StdoutThread = struct {
     fn run(self: *StdoutThread) void {
         while (true) {
             self.drainInbound();
-            while (self.actor.hasPending()) {
-                const before = self.actor.pendingBytes();
-                _ = self.actor.flushSome(64 * 1024) catch break;
-                const after = self.actor.pendingBytes();
+            while (self.buffer.hasPending()) {
+                const before = self.buffer.pendingBytes();
+                _ = self.buffer.flushSome(64 * 1024) catch break;
+                const after = self.buffer.pendingBytes();
                 if (before > after) {
                     _ = self.shared.pending_bytes.fetchSub(before - after, .seq_cst);
                 }
-                const committed = self.actor.takeNewlyCommittedRenderVersion();
+                const committed = self.buffer.takeNewlyCommittedRenderVersion();
                 if (committed) |notice| {
                     self.shared.committed_render_version.store(notice.version, .seq_cst);
                     _ = self.shared.latest_commit_notice.swap(notice.version, .seq_cst);
@@ -148,7 +148,7 @@ pub const StdoutThread = struct {
 
     fn drainInbound(self: *StdoutThread) void {
         while (self.control_queue.pop()) |chunk| {
-            self.actor.enqueueOwnedControl(chunk.bytes) catch {
+            self.buffer.enqueueOwnedControl(chunk.bytes) catch {
                 _ = self.shared.pending_bytes.fetchSub(chunk.bytes.len, .seq_cst);
                 self.allocator.free(chunk.bytes);
                 break;
@@ -161,9 +161,9 @@ pub const StdoutThread = struct {
         self.render_mutex.unlock(self.io);
 
         if (publish) |owned| {
-            const before = self.actor.pendingBytes();
-            self.actor.publishOwnedRenderCandidate(owned.version, owned.bytes);
-            const after = self.actor.pendingBytes();
+            const before = self.buffer.pendingBytes();
+            self.buffer.publishOwnedRenderCandidate(owned.version, owned.bytes);
+            const after = self.buffer.pendingBytes();
             if (before > after) {
                 _ = self.shared.pending_bytes.fetchSub(before - after, .seq_cst);
             }

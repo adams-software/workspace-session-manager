@@ -48,7 +48,6 @@ pub const HostScreenSnapshot = struct {
     alt_screen: bool,
     title: ?[]const u8 = null,
     seq: u64,
-    full_damage: bool = true,
     lines: []HostScreenLine,
 };
 

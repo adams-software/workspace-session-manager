@@ -23,8 +23,6 @@ const WakePipe = @import("wake_pipe").WakePipe;
 const INPUT_READ_CHUNK = 4096;
 const OUTPUT_READ_CHUNK = 4096;
 const IO_SPIN_LIMIT = 16;
-const RENDER_BACKLOG_THRESHOLD = 16 * 1024;
-const STDOUT_BACKLOG_THRESHOLD = 256 * 1024;
 
 var winch_changed: bool = false;
 var terminate_requested: bool = false;
@@ -52,10 +50,6 @@ const TransportState = struct {
         var events: c_short = c.POLLIN;
         if (!self.input_tx.isEmpty()) events |= c.POLLOUT;
         return events;
-    }
-
-    fn hasHeavyBacklog(self: *const TransportState) bool {
-        return self.input_tx.len() >= RENDER_BACKLOG_THRESHOLD or self.output_rx.len() >= RENDER_BACKLOG_THRESHOLD;
     }
 
     fn ingestStdin(self: *TransportState, stdin_fd: c_int) !void {
@@ -116,7 +110,7 @@ const TransportState = struct {
             const update = shared_model.model.feedScreenBytes(result.screen_bytes);
             shared_model.unlock();
 
-            if (update.dirty) render_thread.publishModelChanged(update.asModelChanged());
+            render_thread.publishModelChanged(update.asModelChanged());
             self.output_rx.discard(chunk_len);
         }
         return emitted_osc52;
@@ -177,8 +171,7 @@ fn applyViewerSize(
     shared_model.unlock();
 
     render_thread.reset();
-    if (update.dirty) render_thread.publishModelChanged(update.asModelChanged());
-    render_thread.forceNextRender();
+    render_thread.publishModelChanged(update.asModelChanged());
 }
 
 fn handleSigwinch(_: c_int) callconv(.c) void {
@@ -273,12 +266,10 @@ fn stepPtyOutput(
 }
 
 fn stepRender(render_thread: *RenderThread, transport: *const TransportState, stdout_actor: *const StdoutThread, emitted_osc52: bool) void {
-    if (emitted_osc52) {
-        render_thread.forceNextRender();
-        return;
-    }
-
-    render_thread.considerRender(transport.hasHeavyBacklog(), stdout_actor.pendingBytes() >= STDOUT_BACKLOG_THRESHOLD);
+    _ = render_thread;
+    _ = transport;
+    _ = stdout_actor;
+    _ = emitted_osc52;
 }
 
 fn stepStdoutLate(stdout_actor: *StdoutThread, shared_model: *SharedTerminalModel, pfds: []const c.struct_pollfd) !void {
@@ -393,8 +384,7 @@ const VptyRuntime = struct {
         self.shared_model.model.forceFullDamage();
         self.shared_model.unlock();
         self.render_thread.reset();
-        self.render_thread.forceNextRender();
-        self.render_thread.considerRender(false, false);
+        self.render_thread.publishModelChanged(.{ .version = self.shared_model.model.currentVersion() });
     }
 
     fn installSignalHandlers() !SignalHandlers {

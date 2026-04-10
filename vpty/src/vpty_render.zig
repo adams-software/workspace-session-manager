@@ -13,21 +13,17 @@ pub const OutputState = struct {
 };
 
 pub const Renderer = struct {
-    // Current renderer policy is intentionally simple: generate a full-frame redraw,
-    // track only generated/committed versions, and avoid retaining whole snapshots
-    // until committed-diff rendering is intentionally reintroduced.
+    // Full-frame renderer by policy. We capture a fresh snapshot for each
+    // accepted model change and keep only publish/commit version ordering.
     output_state: OutputState = .{},
-    stdout_actor: ?*StdoutThread = null,
-    latest_model_changed: ?actor_mailboxes.ModelChanged = null,
-    latest_commit_notice: ?actor_mailboxes.CommitNotice = null,
+    stdout_thread: *StdoutThread,
     needs_render: bool = true,
     last_generated_version: u64 = 0,
-    committed_version: u64 = 0,
     render_buf: std.ArrayList(u8) = .{},
 
-    pub fn init(stdout_actor: *StdoutThread) Renderer {
-        var self = Renderer{};
-        self.setStdoutActor(stdout_actor);
+    pub fn init(stdout_thread: *StdoutThread) Renderer {
+        var self = Renderer{ .stdout_thread = stdout_thread };
+        self.ensureBufferCapacity();
         return self;
     }
 
@@ -35,22 +31,18 @@ pub const Renderer = struct {
         self.render_buf.deinit(std.heap.page_allocator);
     }
 
-    fn setStdoutActor(self: *Renderer, stdout_actor: *StdoutThread) void {
-        self.stdout_actor = stdout_actor;
+    fn ensureBufferCapacity(self: *Renderer) void {
         if (self.render_buf.capacity == 0) {
             self.render_buf.ensureTotalCapacity(std.heap.page_allocator, 4096) catch {};
         }
     }
 
     pub fn publishModelChanged(self: *Renderer, changed: actor_mailboxes.ModelChanged) void {
-        self.latest_model_changed = changed;
-    }
-
-    pub fn renderDamaged(self: *Renderer) void {
+        _ = changed;
         self.needs_render = true;
     }
 
-    pub fn needsRender(self: *const RenderActor) bool {
+    pub fn needsRender(self: *const Renderer) bool {
         return self.needs_render;
     }
 
@@ -98,8 +90,7 @@ pub const Renderer = struct {
         host.freeScreenSnapshot(std.heap.page_allocator, &owned_snapshot);
         self.last_generated_version = version;
 
-        const stdout_actor = self.stdout_actor orelse return;
-        stdout_actor.publishRenderCandidate(actor_mailboxes.RenderPublish{
+        self.stdout_thread.publishRenderCandidate(actor_mailboxes.RenderPublish{
             .version = self.last_generated_version,
             .bytes = self.render_buf.items,
         }) catch return;
@@ -108,17 +99,14 @@ pub const Renderer = struct {
     pub fn reset(self: *Renderer) void {
         self.render_buf.clearRetainingCapacity();
         self.output_state = .{};
-        self.latest_model_changed = null;
-        self.latest_commit_notice = null;
         self.last_generated_version = 0;
-        self.committed_version = 0;
         self.needs_render = true;
+        self.ensureBufferCapacity();
     }
 
     pub fn noteCommitted(self: *Renderer, notice: actor_mailboxes.CommitNotice) void {
-        self.latest_commit_notice = notice;
-        if (self.last_generated_version == 0 or self.last_generated_version > notice.version) return;
-        self.committed_version = self.last_generated_version;
+        _ = self;
+        _ = notice;
     }
 
     pub fn shutdown(self: *Renderer, version: u64) void {
@@ -131,19 +119,14 @@ pub const Renderer = struct {
         self.resetStyle();
         self.writeBytes("\x1b(B");
 
-        if (self.stdout_actor) |stdout_actor| {
-            stdout_actor.publishRenderCandidate(actor_mailboxes.RenderPublish{
-                .version = version,
-                .bytes = self.render_buf.items,
-            }) catch {};
-        }
+        self.stdout_thread.publishRenderCandidate(actor_mailboxes.RenderPublish{
+            .version = version,
+            .bytes = self.render_buf.items,
+        }) catch {};
 
         self.render_buf.clearRetainingCapacity();
         self.output_state = .{};
-        self.latest_model_changed = null;
-        self.latest_commit_notice = null;
         self.last_generated_version = 0;
-        self.committed_version = 0;
         self.needs_render = false;
     }
 
@@ -234,31 +217,31 @@ const StyleState = struct {
     bg: host.HostColor = .{},
     attrs: host.HostCellAttrs = .{},
 
-    fn reset(self: *StyleState, actor: *Renderer) void {
-        actor.resetStyle();
+    fn reset(self: *StyleState, renderer: *Renderer) void {
+        renderer.resetStyle();
         self.* = .{};
     }
 
-    fn emitBool(actor: *Renderer, on_code: []const u8, off_code: []const u8, current: *bool, target: bool) void {
+    fn emitBool(renderer: *Renderer, on_code: []const u8, off_code: []const u8, current: *bool, target: bool) void {
         if (current.* == target) return;
-        actor.writeBytes(if (target) on_code else off_code);
+        renderer.writeBytes(if (target) on_code else off_code);
         current.* = target;
     }
 
-    fn diffAndEmit(self: *StyleState, actor: *Renderer, cell: host.HostScreenCell) void {
-        emitBool(actor, "\x1b[1m", "\x1b[22m", &self.attrs.bold, cell.attrs.bold);
-        emitBool(actor, "\x1b[3m", "\x1b[23m", &self.attrs.italic, cell.attrs.italic);
-        emitBool(actor, "\x1b[4m", "\x1b[24m", &self.attrs.underline, cell.attrs.underline);
-        emitBool(actor, "\x1b[5m", "\x1b[25m", &self.attrs.blink, cell.attrs.blink);
-        emitBool(actor, "\x1b[7m", "\x1b[27m", &self.attrs.reverse, cell.attrs.reverse);
-        emitBool(actor, "\x1b[8m", "\x1b[28m", &self.attrs.conceal, cell.attrs.conceal);
+    fn diffAndEmit(self: *StyleState, renderer: *Renderer, cell: host.HostScreenCell) void {
+        emitBool(renderer, "\x1b[1m", "\x1b[22m", &self.attrs.bold, cell.attrs.bold);
+        emitBool(renderer, "\x1b[3m", "\x1b[23m", &self.attrs.italic, cell.attrs.italic);
+        emitBool(renderer, "\x1b[4m", "\x1b[24m", &self.attrs.underline, cell.attrs.underline);
+        emitBool(renderer, "\x1b[5m", "\x1b[25m", &self.attrs.blink, cell.attrs.blink);
+        emitBool(renderer, "\x1b[7m", "\x1b[27m", &self.attrs.reverse, cell.attrs.reverse);
+        emitBool(renderer, "\x1b[8m", "\x1b[28m", &self.attrs.conceal, cell.attrs.conceal);
 
         if (!colorEq(self.fg, cell.fg)) {
-            emitColor(actor, 38, cell.fg);
+            emitColor(renderer, 38, cell.fg);
             self.fg = cell.fg;
         }
         if (!colorEq(self.bg, cell.bg)) {
-            emitColor(actor, 48, cell.bg);
+            emitColor(renderer, 48, cell.bg);
             self.bg = cell.bg;
         }
     }
@@ -272,25 +255,22 @@ fn colorEq(a: host.HostColor, b: host.HostColor) bool {
         a.blue == b.blue;
 }
 
-fn emitColor(actor: *Renderer, base: u8, color: host.HostColor) void {
+fn emitColor(renderer: *Renderer, base: u8, color: host.HostColor) void {
     switch (color.kind) {
-        .default => actor.out("\x1b[{d}m", .{base + 1}),
-        .indexed => actor.out("\x1b[{d};5;{d}m", .{ base, color.palette_index }),
-        .rgb => actor.out("\x1b[{d};2;{d};{d};{d}m", .{ base, color.red, color.green, color.blue }),
+        .default => renderer.out("\x1b[{d}m", .{base + 1}),
+        .indexed => renderer.out("\x1b[{d};5;{d}m", .{ base, color.palette_index }),
+        .rgb => renderer.out("\x1b[{d};2;{d};{d};{d}m", .{ base, color.red, color.green, color.blue }),
     }
 }
 
-fn emitCell(actor: *Renderer, cell: host.HostScreenCell, style_state: *StyleState) void {
-    style_state.diffAndEmit(actor, cell);
+fn emitCell(renderer: *Renderer, cell: host.HostScreenCell, style_state: *StyleState) void {
+    style_state.diffAndEmit(renderer, cell);
 
     var buf: [32]u8 = undefined;
     const text = encodeCodepoints(&buf, cell);
     if (text.len == 0) {
-        actor.writeBytes(" ");
+        renderer.writeBytes(" ");
     } else {
-        actor.writeBytes(text);
+        renderer.writeBytes(text);
     }
 }
-
-
-pub const RenderActor = Renderer;
