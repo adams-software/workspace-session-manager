@@ -12,7 +12,7 @@ pub const OutputState = struct {
     has_drawn: bool = false,
 };
 
-pub const RenderActor = struct {
+pub const Renderer = struct {
     // Current renderer policy is intentionally simple: generate a full-frame redraw,
     // track only generated/committed versions, and avoid retaining whole snapshots
     // until committed-diff rendering is intentionally reintroduced.
@@ -25,28 +25,28 @@ pub const RenderActor = struct {
     committed_version: u64 = 0,
     render_buf: std.ArrayList(u8) = .{},
 
-    pub fn init(stdout_actor: *StdoutThread) RenderActor {
-        var self = RenderActor{};
+    pub fn init(stdout_actor: *StdoutThread) Renderer {
+        var self = Renderer{};
         self.setStdoutActor(stdout_actor);
         return self;
     }
 
-    pub fn deinit(self: *RenderActor) void {
+    pub fn deinit(self: *Renderer) void {
         self.render_buf.deinit(std.heap.page_allocator);
     }
 
-    fn setStdoutActor(self: *RenderActor, stdout_actor: *StdoutThread) void {
+    fn setStdoutActor(self: *Renderer, stdout_actor: *StdoutThread) void {
         self.stdout_actor = stdout_actor;
         if (self.render_buf.capacity == 0) {
             self.render_buf.ensureTotalCapacity(std.heap.page_allocator, 4096) catch {};
         }
     }
 
-    pub fn publishModelChanged(self: *RenderActor, changed: actor_mailboxes.ModelChanged) void {
+    pub fn publishModelChanged(self: *Renderer, changed: actor_mailboxes.ModelChanged) void {
         self.latest_model_changed = changed;
     }
 
-    pub fn renderDamaged(self: *RenderActor) void {
+    pub fn renderDamaged(self: *Renderer) void {
         self.needs_render = true;
     }
 
@@ -54,14 +54,14 @@ pub const RenderActor = struct {
         return self.needs_render;
     }
 
-    pub fn takeSnapshot(self: *RenderActor, model: *const TerminalModel) ?struct { version: u64, snapshot: host.HostScreenSnapshot } {
+    pub fn takeSnapshot(self: *Renderer, model: *const TerminalModel) ?struct { version: u64, snapshot: host.HostScreenSnapshot } {
         if (!self.needs_render) return null;
 
         const snapshot = model.snapshot(std.heap.page_allocator) catch return null;
         return .{ .version = model.currentVersion(), .snapshot = snapshot };
     }
 
-    pub fn renderSnapshot(self: *RenderActor, version: u64, snapshot: host.HostScreenSnapshot) void {
+    pub fn renderSnapshot(self: *Renderer, version: u64, snapshot: host.HostScreenSnapshot) void {
         if (!self.needs_render) {
             var discarded = snapshot;
             host.freeScreenSnapshot(std.heap.page_allocator, &discarded);
@@ -105,7 +105,7 @@ pub const RenderActor = struct {
         }) catch return;
     }
 
-    pub fn reset(self: *RenderActor) void {
+    pub fn reset(self: *Renderer) void {
         self.render_buf.clearRetainingCapacity();
         self.output_state = .{};
         self.latest_model_changed = null;
@@ -115,13 +115,13 @@ pub const RenderActor = struct {
         self.needs_render = true;
     }
 
-    pub fn noteCommitted(self: *RenderActor, notice: actor_mailboxes.CommitNotice) void {
+    pub fn noteCommitted(self: *Renderer, notice: actor_mailboxes.CommitNotice) void {
         self.latest_commit_notice = notice;
         if (self.last_generated_version == 0 or self.last_generated_version > notice.version) return;
         self.committed_version = self.last_generated_version;
     }
 
-    pub fn shutdown(self: *RenderActor, version: u64) void {
+    pub fn shutdown(self: *Renderer, version: u64) void {
         self.render_buf.clearRetainingCapacity();
 
         if (self.output_state.alt_screen) {
@@ -147,33 +147,33 @@ pub const RenderActor = struct {
         self.needs_render = false;
     }
 
-    fn writeBytes(self: *RenderActor, bytes: []const u8) void {
+    fn writeBytes(self: *Renderer, bytes: []const u8) void {
         self.render_buf.appendSlice(std.heap.page_allocator, bytes) catch return;
     }
 
-    fn out(self: *RenderActor, comptime fmt: []const u8, args: anytype) void {
+    fn out(self: *Renderer, comptime fmt: []const u8, args: anytype) void {
         var buf: [256]u8 = undefined;
         const rendered = std.fmt.bufPrint(&buf, fmt, args) catch return;
         self.writeBytes(rendered);
     }
 
-    fn resetStyle(self: *RenderActor) void {
+    fn resetStyle(self: *Renderer) void {
         self.writeBytes("\x1b[0m");
     }
 
-    fn moveCursor(self: *RenderActor, row: u16, col: u16) void {
+    fn moveCursor(self: *Renderer, row: u16, col: u16) void {
         self.out("\x1b[{d};{d}H", .{ row + 1, col + 1 });
     }
 
-    fn clearScreen(self: *RenderActor) void {
+    fn clearScreen(self: *Renderer) void {
         self.writeBytes("\x1b[2J\x1b[H");
     }
 
-    fn eraseToEndOfLine(self: *RenderActor) void {
+    fn eraseToEndOfLine(self: *Renderer) void {
         self.writeBytes("\x1b[K");
     }
 
-    fn renderFullFrame(self: *RenderActor, snapshot: *const host.HostScreenSnapshot) void {
+    fn renderFullFrame(self: *Renderer, snapshot: *const host.HostScreenSnapshot) void {
         self.clearScreen();
 
         var style_state = StyleState{};
@@ -234,18 +234,18 @@ const StyleState = struct {
     bg: host.HostColor = .{},
     attrs: host.HostCellAttrs = .{},
 
-    fn reset(self: *StyleState, actor: *RenderActor) void {
+    fn reset(self: *StyleState, actor: *Renderer) void {
         actor.resetStyle();
         self.* = .{};
     }
 
-    fn emitBool(actor: *RenderActor, on_code: []const u8, off_code: []const u8, current: *bool, target: bool) void {
+    fn emitBool(actor: *Renderer, on_code: []const u8, off_code: []const u8, current: *bool, target: bool) void {
         if (current.* == target) return;
         actor.writeBytes(if (target) on_code else off_code);
         current.* = target;
     }
 
-    fn diffAndEmit(self: *StyleState, actor: *RenderActor, cell: host.HostScreenCell) void {
+    fn diffAndEmit(self: *StyleState, actor: *Renderer, cell: host.HostScreenCell) void {
         emitBool(actor, "\x1b[1m", "\x1b[22m", &self.attrs.bold, cell.attrs.bold);
         emitBool(actor, "\x1b[3m", "\x1b[23m", &self.attrs.italic, cell.attrs.italic);
         emitBool(actor, "\x1b[4m", "\x1b[24m", &self.attrs.underline, cell.attrs.underline);
@@ -272,7 +272,7 @@ fn colorEq(a: host.HostColor, b: host.HostColor) bool {
         a.blue == b.blue;
 }
 
-fn emitColor(actor: *RenderActor, base: u8, color: host.HostColor) void {
+fn emitColor(actor: *Renderer, base: u8, color: host.HostColor) void {
     switch (color.kind) {
         .default => actor.out("\x1b[{d}m", .{base + 1}),
         .indexed => actor.out("\x1b[{d};5;{d}m", .{ base, color.palette_index }),
@@ -280,7 +280,7 @@ fn emitColor(actor: *RenderActor, base: u8, color: host.HostColor) void {
     }
 }
 
-fn emitCell(actor: *RenderActor, cell: host.HostScreenCell, style_state: *StyleState) void {
+fn emitCell(actor: *Renderer, cell: host.HostScreenCell, style_state: *StyleState) void {
     style_state.diffAndEmit(actor, cell);
 
     var buf: [32]u8 = undefined;
@@ -291,3 +291,6 @@ fn emitCell(actor: *RenderActor, cell: host.HostScreenCell, style_state: *StyleS
         actor.writeBytes(text);
     }
 }
+
+
+pub const RenderActor = Renderer;

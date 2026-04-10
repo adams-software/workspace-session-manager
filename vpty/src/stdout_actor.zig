@@ -23,7 +23,7 @@ pub const RenderCandidate = struct {
     offset: usize = 0,
 };
 
-pub const StdoutActor = struct {
+pub const StdoutBuffer = struct {
     allocator: std.mem.Allocator,
     control_queue: std.ArrayList(u8),
     control_offset: usize = 0,
@@ -31,31 +31,31 @@ pub const StdoutActor = struct {
     committed_render_version: u64 = 0,
     newly_committed_render_version: ?u64 = null,
 
-    pub fn init(allocator: std.mem.Allocator) StdoutActor {
+    pub fn init(allocator: std.mem.Allocator) StdoutBuffer {
         return .{
             .allocator = allocator,
             .control_queue = .{},
         };
     }
 
-    pub fn deinit(self: *StdoutActor) void {
+    pub fn deinit(self: *StdoutBuffer) void {
         self.control_queue.deinit(self.allocator);
         if (self.pending_render) |*candidate| {
             candidate.storage.deinit(self.allocator);
         }
     }
 
-    pub fn enqueueControl(self: *StdoutActor, chunk: actor_mailboxes.ControlChunk) !void {
+    pub fn enqueueControl(self: *StdoutBuffer, chunk: actor_mailboxes.ControlChunk) !void {
         try self.control_queue.appendSlice(self.allocator, chunk.bytes);
     }
 
-    pub fn enqueueOwnedControl(self: *StdoutActor, bytes: []u8) !void {
+    pub fn enqueueOwnedControl(self: *StdoutBuffer, bytes: []u8) !void {
         errdefer self.allocator.free(bytes);
         try self.control_queue.appendSlice(self.allocator, bytes);
         self.allocator.free(bytes);
     }
 
-    pub fn publishRenderCandidate(self: *StdoutActor, publish: actor_mailboxes.RenderPublish) !void {
+    pub fn publishRenderCandidate(self: *StdoutBuffer, publish: actor_mailboxes.RenderPublish) !void {
         if (self.pending_render) |*candidate| {
             candidate.storage.deinit(self.allocator);
         }
@@ -69,7 +69,7 @@ pub const StdoutActor = struct {
         };
     }
 
-    pub fn publishOwnedRenderCandidate(self: *StdoutActor, version: u64, bytes: []u8) void {
+    pub fn publishOwnedRenderCandidate(self: *StdoutBuffer, version: u64, bytes: []u8) void {
         if (self.pending_render) |*candidate| {
             candidate.storage.deinit(self.allocator);
         }
@@ -81,21 +81,21 @@ pub const StdoutActor = struct {
         };
     }
 
-    pub fn committedRenderVersion(self: *const StdoutActor) u64 {
+    pub fn committedRenderVersion(self: *const StdoutBuffer) u64 {
         return self.committed_render_version;
     }
 
-    pub fn takeNewlyCommittedRenderVersion(self: *StdoutActor) ?CommitNotice {
+    pub fn takeNewlyCommittedRenderVersion(self: *StdoutBuffer) ?CommitNotice {
         const version = self.newly_committed_render_version;
         self.newly_committed_render_version = null;
         return if (version) |v| CommitNotice{ .version = v } else null;
     }
 
-    pub fn hasPending(self: *const StdoutActor) bool {
+    pub fn hasPending(self: *const StdoutBuffer) bool {
         return self.control_offset < self.control_queue.items.len or self.pending_render != null;
     }
 
-    pub fn pendingBytes(self: *const StdoutActor) usize {
+    pub fn pendingBytes(self: *const StdoutBuffer) usize {
         const control_pending = if (self.control_offset < self.control_queue.items.len)
             self.control_queue.items.len - self.control_offset
         else
@@ -107,7 +107,7 @@ pub const StdoutActor = struct {
         return control_pending + render_pending;
     }
 
-    pub fn flushSome(self: *StdoutActor, max_bytes: usize) Error!FlushStatus {
+    pub fn flushSome(self: *StdoutBuffer, max_bytes: usize) Error!FlushStatus {
         var total_written: usize = 0;
 
         while (total_written < max_bytes) {
@@ -171,3 +171,5 @@ pub const StdoutActor = struct {
         return error.IoError;
     }
 };
+
+pub const StdoutActor = StdoutBuffer;

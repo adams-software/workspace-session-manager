@@ -342,7 +342,7 @@ const VptyRuntime = struct {
     shared_model: SharedTerminalModel,
     render_thread: RenderThread,
 
-    fn init(allocator: std.mem.Allocator, io: anytype, child_argv: []const []const u8) !VptyRuntime {
+    fn init(self: *VptyRuntime, allocator: std.mem.Allocator, io: anytype, child_argv: []const []const u8) !void {
         var terminal = vpty_terminal.TerminalMode.init(c.STDIN_FILENO, c.STDOUT_FILENO);
         errdefer terminal.restore();
 
@@ -364,9 +364,7 @@ const VptyRuntime = struct {
         var shared_model = SharedTerminalModel.init(io, try TerminalModel.init(size.rows, size.cols));
         errdefer shared_model.model.deinit();
 
-        const render_thread = RenderThread.init(allocator, &shared_model, &stdout_actor);
-
-        return .{
+        self.* = .{
             .allocator = allocator,
             .child_argv = child_argv,
             .terminal = terminal,
@@ -374,8 +372,9 @@ const VptyRuntime = struct {
             .stdout_actor = stdout_actor,
             .session_host = session_host,
             .shared_model = shared_model,
-            .render_thread = render_thread,
+            .render_thread = undefined,
         };
+        self.render_thread = RenderThread.init(allocator, &self.shared_model, &self.stdout_actor);
     }
 
     fn deinit(self: *VptyRuntime) void {
@@ -448,7 +447,7 @@ const SignalHandlers = struct {
     }
 };
 
-fn parseChildArgv(allocator: std.mem.Allocator, init: std.process.Init) ![]const []const u8 {
+fn parseChildArgv(allocator: std.mem.Allocator, init: std.process.Init) !std.ArrayList([]const u8) {
     var args_it = std.process.Args.Iterator.init(init.minimal.args);
     var argv_list = std.ArrayList([]const u8){};
     errdefer argv_list.deinit(allocator);
@@ -480,7 +479,11 @@ fn parseChildArgv(allocator: std.mem.Allocator, init: std.process.Init) ![]const
         return error.InvalidArgs;
     }
 
-    return argv[(cmd_start + 1)..];
+    var result = std.ArrayList([]const u8){};
+    errdefer result.deinit(allocator);
+    try result.appendSlice(allocator, argv[(cmd_start + 1)..]);
+    argv_list.deinit(allocator);
+    return result;
 }
 
 pub fn main(init: std.process.Init) !u8 {
@@ -488,12 +491,14 @@ pub fn main(init: std.process.Init) !u8 {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const child_argv = parseChildArgv(allocator, init) catch |parse_err| switch (parse_err) {
+    var child_argv_list = parseChildArgv(allocator, init) catch |parse_err| switch (parse_err) {
         error.InvalidArgs => return 1,
         else => return parse_err,
     };
+    defer child_argv_list.deinit(allocator);
 
-    var runtime = try VptyRuntime.init(allocator, init.io, child_argv);
+    var runtime: VptyRuntime = undefined;
+    try runtime.init(allocator, init.io, child_argv_list.items);
     defer runtime.deinit();
     return runtime.run();
 }
