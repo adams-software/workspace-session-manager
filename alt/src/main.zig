@@ -1,4 +1,7 @@
-const PtyChildHost = @import("host").PtyChildHost;
+const pty_host = @import("host");
+const PtyChildHost = pty_host.PtyChildHost;
+const SpawnOptions = pty_host.SpawnOptions;
+const Size = pty_host.Size;
 const ByteQueue = @import("byte_queue").ByteQueue;
 const fd_stream = @import("fd_stream");
 const getTtySize = @import("ptyio_tty_size").getTtySize;
@@ -24,18 +27,15 @@ const c = @cImport({
 
 const Allocator = std.mem.Allocator;
 
-const HOOK_SCREEN_ENTER = "\x1b[0m\x1b[?25h\x1b[2J\x1b[H";
-const HOOK_SCREEN_LEAVE = "\x1b[0m\x1b[?25h\x1b[2J\x1b[H";
+const ALTERNATE_SCREEN_ENTER = "\x1b[?1049h";
+const ALTERNATE_SCREEN_LEAVE = "\x1b[?1049l";
 const DEFAULT_KEY = "ctrl-g";
 
 const Error = error{
     InvalidArgs,
-    MissingHookCommand,
-    MissingChildCommand,
+    MissingAlternateCommand,
+    MissingPrimaryCommand,
     UnsupportedKeySpec,
-    OpenPtyFailed,
-    ForkFailed,
-    ExecFailed,
     TerminalUnavailable,
     TcGetAttrFailed,
     TcSetAttrFailed,
@@ -43,14 +43,104 @@ const Error = error{
     FcntlFailed,
     PollFailed,
     ChildExited,
-    HookSpawnFailed,
 };
 
-const HookResult = union(enum) {
-    ok,
-    exec_failed,
-    exited: u8,
-    signaled: c_int,
+const ActiveSide = enum {
+    primary,
+    alternate,
+
+    fn toggled(self: ActiveSide) ActiveSide {
+        return switch (self) {
+            .primary => .alternate,
+            .alternate => .primary,
+        };
+    }
+};
+
+const LoopDecision = union(enum) {
+    stay: ActiveSide,
+    switch_to: ActiveSide,
+    exit,
+};
+
+const SideConfig = struct {
+    allocator: Allocator,
+    spawn: SpawnOptions,
+};
+
+const SideRuntime = struct {
+    config: SideConfig,
+    session: PtyChildHost,
+    desired_size: ?Size = null,
+    input_tx: ByteQueue = ByteQueue.init(),
+    output_tx: ByteQueue = ByteQueue.init(),
+
+    fn init(config: SideConfig) !SideRuntime {
+        return .{
+            .config = config,
+            .session = try PtyChildHost.init(config.allocator, config.spawn),
+        };
+    }
+
+    fn deinit(self: *SideRuntime, allocator: Allocator) void {
+        self.input_tx.deinit(allocator);
+        self.output_tx.deinit(allocator);
+        self.session.deinit();
+    }
+
+    fn rebuildSession(self: *SideRuntime) !void {
+        self.session.deinit();
+        var spawn = self.config.spawn;
+        if (self.desired_size) |size| {
+            spawn.cols = size.cols;
+            spawn.rows = size.rows;
+        }
+        self.session = try PtyChildHost.init(self.config.allocator, spawn);
+    }
+
+    fn restart(self: *SideRuntime, tty_fd: c_int) !void {
+        try self.captureDesiredSize(tty_fd);
+        try self.rebuildSession();
+        self.input_tx.clear();
+        self.output_tx.clear();
+        try self.session.start();
+        try setNonBlockingIfPresent(self.session.masterFd());
+    }
+
+    fn masterFd(self: *SideRuntime) Error!c_int {
+        return self.session.masterFd() orelse Error.ChildExited;
+    }
+
+    fn currentState(self: *const SideRuntime) @TypeOf(self.session.currentState()) {
+        return self.session.currentState();
+    }
+
+    fn isRunning(self: *const SideRuntime) bool {
+        return self.currentState() == .running;
+    }
+
+    fn captureDesiredSize(self: *SideRuntime, tty_fd: c_int) !void {
+        const tty_size = getTtySize(tty_fd) catch return Error.IoctlFailed;
+        self.desired_size = .{ .cols = tty_size.cols, .rows = tty_size.rows };
+    }
+
+    fn ensureLive(self: *SideRuntime, tty_fd: c_int) !void {
+        switch (self.currentState()) {
+            .idle => {
+                try self.captureDesiredSize(tty_fd);
+                try self.rebuildSession();
+                try self.session.start();
+                try setNonBlockingIfPresent(self.session.masterFd());
+            },
+            .starting, .running => {},
+            .exited, .closed => try self.restart(tty_fd),
+        }
+    }
+
+    fn syncActivation(self: *SideRuntime, tty_fd: c_int) !void {
+        if (!self.isRunning()) return;
+        try syncSideWindowSize(tty_fd, self);
+    }
 };
 
 const ResizeState = struct {
@@ -74,9 +164,9 @@ fn syncWindowSize(tty_fd: c_int, session: *PtyChildHost) !void {
 const Config = struct {
     allocator: Allocator,
     key_spec: []const u8,
-    hook_path: []const u8,
+    alternate_path: []const u8,
     debug_keys: bool,
-    child_argv: []const []const u8,
+    primary_argv: []const []const u8,
 
     fn parse(allocator: Allocator, args_src: std.process.Args) !Config {
         var args_it = std.process.Args.Iterator.init(args_src);
@@ -91,7 +181,7 @@ const Config = struct {
         }
 
         var key_spec: []const u8 = if (c.getenv("ALT_KEY")) |v| std.mem.span(v) else DEFAULT_KEY;
-        var hook_path: ?[]const u8 = if (c.getenv("ALT_RUN")) |v| std.mem.span(v) else null;
+        var alternate_path: ?[]const u8 = if (c.getenv("ALT_RUN")) |v| std.mem.span(v) else null;
 
         var i: usize = 1;
         var child_start: ?usize = null;
@@ -110,7 +200,7 @@ const Config = struct {
             if (std.mem.eql(u8, arg, "--run")) {
                 i += 1;
                 if (i >= args.items.len) return Error.InvalidArgs;
-                hook_path = args.items[i];
+                alternate_path = args.items[i];
                 continue;
             }
             if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
@@ -119,27 +209,27 @@ const Config = struct {
             return Error.InvalidArgs;
         }
 
-        const resolved_hook_path = hook_path orelse return Error.MissingHookCommand;
-        const start = child_start orelse return Error.MissingChildCommand;
-        if (start >= args.items.len) return Error.MissingChildCommand;
+        const resolved_alternate_path = alternate_path orelse return Error.MissingAlternateCommand;
+        const start = child_start orelse return Error.MissingPrimaryCommand;
+        if (start >= args.items.len) return Error.MissingPrimaryCommand;
 
-        const child_copy = try allocator.alloc([]const u8, args.items.len - start);
-        for (args.items[start..], 0..) |arg, idx| child_copy[idx] = try allocator.dupe(u8, arg);
+        const primary_copy = try allocator.alloc([]const u8, args.items.len - start);
+        for (args.items[start..], 0..) |arg, idx| primary_copy[idx] = try allocator.dupe(u8, arg);
 
         return .{
             .allocator = allocator,
             .key_spec = try allocator.dupe(u8, key_spec),
-            .hook_path = try allocator.dupe(u8, resolved_hook_path),
+            .alternate_path = try allocator.dupe(u8, resolved_alternate_path),
             .debug_keys = if (c.getenv("ALT_DEBUG_KEYS")) |v| v[0] != 0 and v[0] != '0' else false,
-            .child_argv = child_copy,
+            .primary_argv = primary_copy,
         };
     }
 
     fn deinit(self: *Config) void {
         self.allocator.free(self.key_spec);
-        self.allocator.free(self.hook_path);
-        for (self.child_argv) |arg| self.allocator.free(arg);
-        self.allocator.free(self.child_argv);
+        self.allocator.free(self.alternate_path);
+        for (self.primary_argv) |arg| self.allocator.free(arg);
+        self.allocator.free(self.primary_argv);
     }
 };
 
@@ -220,7 +310,9 @@ const TerminalState = struct {
     }
 };
 
-const ChildSession = PtyChildHost;
+fn setNonBlockingIfPresent(fd: ?c_int) !void {
+    if (fd) |real_fd| try setNonBlocking(real_fd);
+}
 
 fn setNonBlocking(fd: c_int) !void {
     const flags = c.fcntl(fd, c.F_GETFL, @as(c_int, 0));
@@ -352,49 +444,66 @@ fn keySpecEq(a: KeySpec, b: KeySpec) bool {
     return a.kind == b.kind and a.ch == b.ch and a.mods.ctrl == b.mods.ctrl and a.mods.alt == b.mods.alt and a.mods.shift == b.mods.shift;
 }
 
-fn queueInput(allocator: Allocator, tty_fd: c_int, queue: *ByteQueue, hotkey: KeyBinding, debug_keys: bool) !bool {
-    var buf: [256]u8 = undefined;
-    const rc = c.read(tty_fd, &buf, buf.len);
-    if (rc == 0) return false;
-    if (rc < 0) {
-        const err = std.c.errno(rc);
-        if (err == .INTR or err == .AGAIN) return false;
-        return std.posix.unexpectedErrno(err);
-    }
+const QueueInputResult = struct {
+    intercepted: bool = false,
+    tail: []u8 = &.{},
 
-    const n: usize = @intCast(rc);
+    fn deinit(self: *QueueInputResult, allocator: Allocator) void {
+        if (self.tail.len != 0) allocator.free(self.tail);
+        self.* = .{};
+    }
+};
+
+fn handleInputBytes(allocator: Allocator, bytes: []const u8, queue: *ByteQueue, hotkey: KeyBinding, debug_keys: bool) !QueueInputResult {
+    if (bytes.len == 0) return .{};
+
     if (debug_keys) {
-        debugBytes("alt debug: tty bytes=", buf[0..n]);
+        debugBytes("alt debug: tty bytes=", bytes);
         debugKeySpec("alt debug: hotkey=", hotkey.spec);
     }
 
-    if (decodeInputEvent(buf[0..n])) |event| {
+    if (decodeInputEvent(bytes)) |event| {
         if (debug_keys) debugKeySpec("alt debug: decoded=", event.spec);
         if (keySpecEq(event.spec, hotkey.spec)) {
             if (debug_keys) std.debug.print("alt debug: hotkey matched\n", .{});
-            if (event.bytes_len < n) try queue.append(allocator, buf[event.bytes_len..n]);
-            return true;
+            return .{
+                .intercepted = true,
+                .tail = try allocator.dupe(u8, bytes[event.bytes_len..]),
+            };
         }
     }
 
-    try queue.append(allocator, buf[0..n]);
-    return false;
+    try queue.append(allocator, bytes);
+    return .{};
 }
 
-fn enterHookScreen(tty_fd: c_int) !void {
-    try writeAll(tty_fd, HOOK_SCREEN_ENTER);
+fn queueInput(allocator: Allocator, tty_fd: c_int, queue: *ByteQueue, hotkey: KeyBinding, debug_keys: bool) !QueueInputResult {
+    var buf: [256]u8 = undefined;
+    const rc = c.read(tty_fd, &buf, buf.len);
+    if (rc == 0) return .{};
+    if (rc < 0) {
+        const err = std.c.errno(rc);
+        if (err == .INTR or err == .AGAIN) return .{};
+        return std.posix.unexpectedErrno(err);
+    }
+
+    return handleInputBytes(allocator, buf[0..@intCast(rc)], queue, hotkey, debug_keys);
 }
 
-fn leaveHookScreen(tty_fd: c_int) !void {
-    try writeAll(tty_fd, HOOK_SCREEN_LEAVE);
+fn enterAlternateScreenHandoff(tty_fd: c_int) !void {
+    try writeAll(tty_fd, ALTERNATE_SCREEN_ENTER);
+}
+
+fn leaveAlternateScreenHandoff(tty_fd: c_int) !void {
+    try writeAll(tty_fd, ALTERNATE_SCREEN_LEAVE);
 }
 
 fn usage() void {
     std.debug.print(
-        "Usage: alt [--key <spec>] --run <path> -- <child-command...>\n\n" ++
+        "Usage: alt [--key <spec>] --run <path> -- <primary-command...>\n\n" ++
             "Options:\n" ++
             "  --key <spec>   Local hotkey (default: ctrl-g or ALT_KEY)\n" ++
-            "  --run <path>   Hook executable to run in alternate screen (or ALT_RUN)\n" ++
+            "  --run <path>   Alternate-side executable to run on its own PTY (or ALT_RUN)\n" ++
             "  -h, --help     Show this help\n" ++
             "\nEnvironment:\n" ++
             "  ALT_DEBUG_KEYS=1  Print raw tty bytes read for hotkey debugging\n",
@@ -402,153 +511,240 @@ fn usage() void {
     );
 }
 
-fn waitForAnyKey(tty_fd: c_int) void {
-    var buf: [32]u8 = undefined;
-    while (true) {
-        const rc = c.read(tty_fd, &buf, buf.len);
-        if (rc > 0) return;
-        if (rc < 0) {
-            const err = std.c.errno(rc);
-            if (err == .INTR or err == .AGAIN) continue;
-            return;
-        }
-    }
+fn refreshSide(side: *SideRuntime) Error!void {
+    side.session.refresh() catch return Error.ChildExited;
+    if (side.session.currentState() == .exited or side.session.currentState() == .closed) return Error.ChildExited;
 }
 
-fn showHookError(tty_fd: c_int, hook_path: []const u8, result: HookResult) void {
-    switch (result) {
-        .exec_failed => {
-            std.debug.print("\r\nalt: hook executable not found or not executable: {s}\r\n", .{hook_path});
+fn syncSideWindowSize(tty_fd: c_int, side: *SideRuntime) !void {
+    try syncWindowSize(tty_fd, &side.session);
+}
+
+fn handleResizeIfPending(tty_fd: c_int, primary: *SideRuntime, alternate: *SideRuntime) !void {
+    if (!ResizeState.pending) return;
+    ResizeState.pending = false;
+    try primary.captureDesiredSize(tty_fd);
+    try alternate.captureDesiredSize(tty_fd);
+    if (primary.isRunning()) try syncSideWindowSize(tty_fd, primary);
+    if (alternate.isRunning()) try syncSideWindowSize(tty_fd, alternate);
+}
+
+fn activeSidePtr(active: ActiveSide, primary: *SideRuntime, alternate: *SideRuntime) *SideRuntime {
+    return switch (active) {
+        .primary => primary,
+        .alternate => alternate,
+    };
+}
+
+fn flushActiveOutput(term: *TerminalState, active: *SideRuntime) !void {
+    if (active.output_tx.isEmpty()) return;
+    _ = fd_stream.writeFromQueue(term.tty_fd, &active.output_tx, 64 * 1024) catch |e| switch (e) {
+        fd_stream.Error.IoError => return Error.ChildExited,
+        else => return e,
+    };
+}
+
+fn flushSideInput(side: *SideRuntime) !void {
+    if (side.input_tx.isEmpty()) return;
+    _ = fd_stream.writeFromQueue(try side.masterFd(), &side.input_tx, 64 * 1024) catch |e| switch (e) {
+        fd_stream.Error.IoError => return Error.ChildExited,
+        else => return e,
+    };
+}
+
+fn readSideOutput(allocator: Allocator, side: *SideRuntime) !void {
+    try pumpPtyToQueue(allocator, try side.masterFd(), &side.output_tx);
+}
+
+fn discardInactiveOutput(side: *SideRuntime) void {
+    side.output_tx.clear();
+}
+
+fn activateSide(term: *TerminalState, next: ActiveSide, active: *ActiveSide, primary: *SideRuntime, alternate: *SideRuntime) !void {
+    const previous_side = activeSidePtr(active.*, primary, alternate);
+    const next_side = activeSidePtr(next, primary, alternate);
+    previous_side.output_tx.clear();
+    try next_side.ensureLive(term.tty_fd);
+    try next_side.syncActivation(term.tty_fd);
+    switch (next) {
+        .primary => try leaveAlternateScreenHandoff(term.tty_fd),
+        .alternate => try enterAlternateScreenHandoff(term.tty_fd),
+    }
+    active.* = next;
+    next_side.output_tx.clear();
+}
+
+fn decideLoopState(active: ActiveSide, primary_running: bool, alternate_running: bool, requested: ?ActiveSide) LoopDecision {
+    if (requested) |target| {
+        if (target == active) return .{ .stay = active };
+        return .{ .switch_to = target };
+    }
+
+    const active_running = switch (active) {
+        .primary => primary_running,
+        .alternate => alternate_running,
+    };
+    if (active_running) return .{ .stay = active };
+
+    const fallback = active.toggled();
+    const fallback_running = switch (fallback) {
+        .primary => primary_running,
+        .alternate => alternate_running,
+    };
+    if (fallback_running) return .{ .switch_to = fallback };
+    return .exit;
+}
+
+fn applyLoopDecision(term: *TerminalState, active: *ActiveSide, primary: *SideRuntime, alternate: *SideRuntime, decision: LoopDecision) !bool {
+    switch (decision) {
+        .stay => return false,
+        .switch_to => |next| {
+            try activateSide(term, next, active, primary, alternate);
+            return false;
         },
-        .exited => return,
-        .signaled => |sig| {
-            std.debug.print("\r\nalt: hook terminated by signal {d}: {s}\r\n", .{ sig, hook_path });
-        },
-        .ok => return,
+        .exit => return true,
     }
-    std.debug.print("alt: press any key to return\r\n", .{});
-    waitForAnyKey(tty_fd);
 }
 
-fn runHook(allocator: Allocator, tty_fd: c_int, hook_path: []const u8) !void {
-    const pid = c.fork();
-    if (pid < 0) return Error.HookSpawnFailed;
-
-    if (pid == 0) {
-        const hook_z = allocator.dupeZ(u8, hook_path) catch c._exit(127);
-        const argv = allocator.alloc(?[*:0]const u8, 2) catch c._exit(127);
-        argv[0] = hook_z;
-        argv[1] = null;
-        _ = c.execvp(argv[0], @ptrCast(argv.ptr));
-        c._exit(127);
-    }
-
-    var status: c_int = 0;
-    while (true) {
-        const rc = c.waitpid(pid, &status, 0);
-        if (rc < 0) {
-            if (std.c.errno(rc) == .INTR) continue;
-            return Error.HookSpawnFailed;
-        }
-        break;
-    }
-
-    const result: HookResult = if (c.WIFEXITED(status)) blk: {
-        const code = c.WEXITSTATUS(status);
-        if (code == 0) break :blk .ok;
-        if (code == 127) break :blk .exec_failed;
-        break :blk .{ .exited = @intCast(code) };
-    } else if (c.WIFSIGNALED(status)) .{ .signaled = c.WTERMSIG(status) } else .exec_failed;
-
-    showHookError(tty_fd, hook_path, result);
+fn handleToggle(term: *TerminalState, active: *ActiveSide, primary: *SideRuntime, alternate: *SideRuntime) !bool {
+    const decision = decideLoopState(active.*, primary.isRunning(), alternate.isRunning(), active.toggled());
+    return applyLoopDecision(term, active, primary, alternate, decision);
 }
 
-fn passthroughLoop(allocator: Allocator, term: *TerminalState, session: *ChildSession, key: KeyBinding, hook_path: []const u8, debug_keys: bool) !void {
+fn passthroughLoop(allocator: Allocator, term: *TerminalState, primary: *SideRuntime, alternate: *SideRuntime, key: KeyBinding, debug_keys: bool) !void {
     try setNonBlocking(term.tty_fd);
+    try setNonBlockingIfPresent(primary.session.masterFd());
+    try setNonBlockingIfPresent(alternate.session.masterFd());
     installSigwinchHandler();
 
-    var input_tx = ByteQueue.init();
-    defer input_tx.deinit(allocator);
-
-    var output_tx = ByteQueue.init();
-    defer output_tx.deinit(allocator);
-
+    var active: ActiveSide = .primary;
     var pollfds = [_]c.struct_pollfd{
         .{ .fd = term.tty_fd, .events = 0, .revents = 0 },
-        .{ .fd = session.masterFd() orelse return Error.ChildExited, .events = 0, .revents = 0 },
+        .{ .fd = -1, .events = 0, .revents = 0 },
+        .{ .fd = -1, .events = 0, .revents = 0 },
     };
 
     while (true) {
-        session.refresh() catch return Error.ChildExited;
-        if (session.currentState() == .exited or session.currentState() == .closed) return Error.ChildExited;
+        refreshSide(primary) catch |err| switch (err) {
+            Error.ChildExited => {},
+            else => return err,
+        };
+        refreshSide(alternate) catch |err| switch (err) {
+            Error.ChildExited => {},
+            else => return err,
+        };
+        try handleResizeIfPending(term.tty_fd, primary, alternate);
 
-        pollfds[0].fd = term.tty_fd;
-        pollfds[0].events = c.POLLIN;
-        // When alt is used as a relay inside another PTY/stream layer, queued output
-        // can otherwise stall waiting for an unrelated readable event. Keep writable
-        // interest active whenever output is buffered, while still preserving the
-        // opportunistic same-iteration flushes below for standalone responsiveness.
-        if (!output_tx.isEmpty()) pollfds[0].events |= c.POLLOUT;
-        pollfds[0].revents = 0;
+        if (try applyLoopDecision(term, &active, primary, alternate, decideLoopState(active, primary.isRunning(), alternate.isRunning(), null))) return;
 
-        pollfds[1].fd = session.masterFd() orelse return Error.ChildExited;
-        pollfds[1].events = c.POLLIN;
-        if (!input_tx.isEmpty()) pollfds[1].events |= c.POLLOUT;
-        pollfds[1].revents = 0;
+        const current = activeSidePtr(active, primary, alternate);
+
+        pollfds[0] = .{ .fd = term.tty_fd, .events = c.POLLIN, .revents = 0 };
+        if (!current.output_tx.isEmpty()) pollfds[0].events |= c.POLLOUT;
+
+        pollfds[1] = .{ .fd = if (primary.isRunning()) try primary.masterFd() else -1, .events = 0, .revents = 0 };
+        if (primary.isRunning()) {
+            pollfds[1].events = c.POLLIN;
+            if (!primary.input_tx.isEmpty()) pollfds[1].events |= c.POLLOUT;
+        }
+
+        pollfds[2] = .{ .fd = if (alternate.isRunning()) try alternate.masterFd() else -1, .events = 0, .revents = 0 };
+        if (alternate.isRunning()) {
+            pollfds[2].events = c.POLLIN;
+            if (!alternate.input_tx.isEmpty()) pollfds[2].events |= c.POLLOUT;
+        }
 
         const rc = c.poll(&pollfds, pollfds.len, 250);
         if (rc < 0) {
             if (std.c.errno(rc) == .INTR) continue;
             return Error.PollFailed;
         }
-        if (rc == 0) {
-            if (ResizeState.pending) {
-                ResizeState.pending = false;
-                try syncWindowSize(term.tty_fd, session);
-            }
+        if (rc == 0) continue;
+
+        try handleResizeIfPending(term.tty_fd, primary, alternate);
+
+        if ((pollfds[1].revents & c.POLLIN) != 0) {
+            try readSideOutput(allocator, primary);
+            if (active != .primary) discardInactiveOutput(primary);
+        }
+        if ((pollfds[2].revents & c.POLLIN) != 0) {
+            try readSideOutput(allocator, alternate);
+            if (active != .alternate) discardInactiveOutput(alternate);
+        }
+        if ((pollfds[1].revents & (c.POLLHUP | c.POLLERR | c.POLLNVAL)) != 0) {
+            refreshSide(primary) catch |err| switch (err) {
+                Error.ChildExited => {},
+                else => return err,
+            };
+            continue;
+        }
+        if ((pollfds[2].revents & (c.POLLHUP | c.POLLERR | c.POLLNVAL)) != 0) {
+            refreshSide(alternate) catch |err| switch (err) {
+                Error.ChildExited => {},
+                else => return err,
+            };
             continue;
         }
 
-        if (ResizeState.pending) {
-            ResizeState.pending = false;
-            try syncWindowSize(term.tty_fd, session);
-        }
-
-        if ((pollfds[1].revents & c.POLLIN) != 0) {
-            try pumpPtyToQueue(allocator, session.masterFd() orelse return Error.ChildExited, &output_tx);
-        }
-        if ((pollfds[1].revents & (c.POLLHUP | c.POLLERR | c.POLLNVAL)) != 0) {
-            return Error.ChildExited;
-        }
-
         if ((pollfds[0].revents & c.POLLIN) != 0) {
-            const intercepted = try queueInput(allocator, term.tty_fd, &input_tx, key, debug_keys);
-            if (intercepted) {
-                try term.restore();
-                defer term.enableRaw() catch {};
-
-                try enterHookScreen(term.tty_fd);
-                defer leaveHookScreen(term.tty_fd) catch {};
-
-                try runHook(allocator, term.tty_fd, hook_path);
-                try syncWindowSize(term.tty_fd, session);
+            var input = try queueInput(allocator, term.tty_fd, &current.input_tx, key, debug_keys);
+            defer input.deinit(allocator);
+            if (input.intercepted) {
+                current.input_tx.clear();
+                if (try handleToggle(term, &active, primary, alternate)) return;
+                if (input.tail.len != 0) try activeSidePtr(active, primary, alternate).input_tx.append(allocator, input.tail);
             }
         }
 
-        if (!input_tx.isEmpty() and ((pollfds[1].revents & c.POLLOUT) != 0 or (pollfds[0].revents & c.POLLIN) != 0)) {
-            _ = fd_stream.writeFromQueue(session.masterFd() orelse return Error.ChildExited, &input_tx, 64 * 1024) catch |e| switch (e) {
-                fd_stream.Error.IoError => return Error.ChildExited,
-                else => return e,
-            };
-        }
-
-        if (!output_tx.isEmpty() and ((pollfds[0].revents & c.POLLOUT) != 0 or (pollfds[1].revents & c.POLLIN) != 0)) {
-            _ = fd_stream.writeFromQueue(term.tty_fd, &output_tx, 64 * 1024) catch |e| switch (e) {
-                fd_stream.Error.IoError => return Error.ChildExited,
-                else => return e,
-            };
-        }
+        if (primary.isRunning() and ((pollfds[1].revents & c.POLLOUT) != 0 or active == .primary)) try flushSideInput(primary);
+        if (alternate.isRunning() and ((pollfds[2].revents & c.POLLOUT) != 0 or active == .alternate)) try flushSideInput(alternate);
+        if ((pollfds[0].revents & c.POLLOUT) != 0 or !current.output_tx.isEmpty()) try flushActiveOutput(term, current);
     }
+}
+
+test "decideLoopState falls back symmetrically when active side exits" {
+    try std.testing.expectEqual(LoopDecision{ .switch_to = .alternate }, decideLoopState(.primary, false, true, null));
+    try std.testing.expectEqual(LoopDecision{ .switch_to = .primary }, decideLoopState(.alternate, true, false, null));
+}
+
+test "decideLoopState exits when neither side is running" {
+    try std.testing.expectEqual(LoopDecision.exit, decideLoopState(.primary, false, false, null));
+    try std.testing.expectEqual(LoopDecision.exit, decideLoopState(.alternate, false, false, null));
+}
+
+test "decideLoopState restarts exited target on explicit toggle" {
+    try std.testing.expectEqual(LoopDecision{ .switch_to = .alternate }, decideLoopState(.primary, true, false, .alternate));
+    try std.testing.expectEqual(LoopDecision{ .switch_to = .primary }, decideLoopState(.alternate, false, true, .primary));
+}
+
+test "decideLoopState allows toggling into an unstarted side" {
+    try std.testing.expectEqual(LoopDecision{ .switch_to = .alternate }, decideLoopState(.primary, true, false, .alternate));
+}
+
+test "handleInputBytes intercepts hotkey and preserves tail for deliberate reroute" {
+    var queue = ByteQueue.init();
+    defer queue.deinit(std.testing.allocator);
+
+    const hotkey: KeyBinding = .{ .spec = .{ .kind = .char, .ch = 'g', .mods = .{ .ctrl = true } } };
+    var result = try handleInputBytes(std.testing.allocator, &[_]u8{ 0x07, 'x', 'y' }, &queue, hotkey, false);
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expect(result.intercepted);
+    try std.testing.expect(queue.isEmpty());
+    try std.testing.expectEqualStrings("xy", result.tail);
+}
+
+test "handleInputBytes forwards non-hotkey bytes unchanged" {
+    var queue = ByteQueue.init();
+    defer queue.deinit(std.testing.allocator);
+
+    const hotkey: KeyBinding = .{ .spec = .{ .kind = .char, .ch = 'g', .mods = .{ .ctrl = true } } };
+    var result = try handleInputBytes(std.testing.allocator, "abc", &queue, hotkey, false);
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expect(!result.intercepted);
+    try std.testing.expectEqualStrings("abc", queue.readableSlice());
+    try std.testing.expectEqual(@as(usize, 0), result.tail.len);
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -569,7 +765,7 @@ pub fn main(init: std.process.Init) !void {
             usage();
             return err;
         },
-        Error.MissingHookCommand, Error.MissingChildCommand => {
+        Error.MissingAlternateCommand, Error.MissingPrimaryCommand => {
             usage();
             return err;
         },
@@ -584,17 +780,33 @@ pub fn main(init: std.process.Init) !void {
     try term.enableRaw();
 
     const size = getTtySize(term.tty_fd) catch return Error.IoctlFailed;
-    var session = try ChildSession.init(gpa, .{
-        .argv = cfg.child_argv,
-        .cols = size.cols,
-        .rows = size.rows,
+    var primary = try SideRuntime.init(.{
+        .allocator = gpa,
+        .spawn = .{
+            .argv = cfg.primary_argv,
+            .cols = size.cols,
+            .rows = size.rows,
+        },
     });
-    defer session.deinit();
-    try session.start();
+    primary.desired_size = .{ .cols = size.cols, .rows = size.rows };
+    defer primary.deinit(gpa);
+    try primary.session.start();
+    try setNonBlockingIfPresent(primary.session.masterFd());
 
-    passthroughLoop(gpa, &term, &session, key, cfg.hook_path, cfg.debug_keys) catch |err| switch (err) {
+    const alternate_argv = [_][]const u8{cfg.alternate_path};
+    var alternate = try SideRuntime.init(.{
+        .allocator = gpa,
+        .spawn = .{
+            .argv = &alternate_argv,
+            .cols = size.cols,
+            .rows = size.rows,
+        },
+    });
+    alternate.desired_size = .{ .cols = size.cols, .rows = size.rows };
+    defer alternate.deinit(gpa);
+
+    passthroughLoop(gpa, &term, &primary, &alternate, key, cfg.debug_keys) catch |err| switch (err) {
         Error.ChildExited => {},
         else => return err,
     };
 }
-

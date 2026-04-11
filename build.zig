@@ -383,6 +383,19 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(alt_exe);
 
+    const alt_test_root = b.createModule(.{
+        .root_source_file = b.path("alt/src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    alt_test_root.linkSystemLibrary("util", .{});
+    alt_test_root.addImport("host", host_mod);
+    alt_test_root.addImport("byte_queue", byte_queue_mod);
+    alt_test_root.addImport("fd_stream", fd_stream_mod);
+    alt_test_root.addImport("ptyio_tty_size", ptyio_tty_size_mod);
+    const alt_tests = b.addTest(.{ .root_module = alt_test_root });
+
     const terminal_state_vterm_test_root = b.createModule(.{
         .root_source_file = b.path("vpty/src/terminal_state_vterm.zig"),
         .target = target,
@@ -399,6 +412,7 @@ pub fn build(b: *std.Build) void {
 
     // Test runners and aliases
     const run_terminal_state_vterm_tests = b.addRunArtifact(terminal_state_vterm_tests);
+    const run_alt_tests = b.addRunArtifact(alt_tests);
     const run_byte_queue_tests = b.addRunArtifact(byte_queue_tests);
     const run_fd_stream_tests = b.addRunArtifact(fd_stream_tests);
     const run_session_core_tests = b.addRunArtifact(session_core_tests);
@@ -411,6 +425,7 @@ pub fn build(b: *std.Build) void {
     const run_server_tests = b.addRunArtifact(server_tests);
 
     const test_step = b.step("test", "Run msr tests");
+    test_step.dependOn(&run_alt_tests.step);
     test_step.dependOn(&run_byte_queue_tests.step);
     test_step.dependOn(&run_fd_stream_tests.step);
     test_step.dependOn(&run_session_core_tests.step);
@@ -424,6 +439,9 @@ pub fn build(b: *std.Build) void {
 
     const test_terminal_state_vterm_step = b.step("test-vterm", "Run libvterm adapter tests");
     test_terminal_state_vterm_step.dependOn(&run_terminal_state_vterm_tests.step);
+
+    const test_alt_step = b.step("test-alt", "Run alt tests");
+    test_alt_step.dependOn(&run_alt_tests.step);
 
     const test_host_step = b.step("test-host", "Run host module tests");
     test_host_step.dependOn(&run_host_tests.step);
