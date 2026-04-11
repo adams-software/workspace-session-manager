@@ -24,8 +24,8 @@ const c = @cImport({
 
 const Allocator = std.mem.Allocator;
 
-const ALT_SCREEN_ENTER = "\x1b[?1049h\x1b[H";
-const ALT_SCREEN_LEAVE = "\x1b[?1049l";
+const HOOK_SCREEN_ENTER = "\x1b[0m\x1b[?25h\x1b[2J\x1b[H";
+const HOOK_SCREEN_LEAVE = "\x1b[0m\x1b[?25h\x1b[2J\x1b[H";
 const DEFAULT_KEY = "ctrl-g";
 
 const Error = error{
@@ -381,12 +381,12 @@ fn queueInput(allocator: Allocator, tty_fd: c_int, queue: *ByteQueue, hotkey: Ke
     return false;
 }
 
-fn enterAltScreen(tty_fd: c_int) !void {
-    try writeAll(tty_fd, ALT_SCREEN_ENTER);
+fn enterHookScreen(tty_fd: c_int) !void {
+    try writeAll(tty_fd, HOOK_SCREEN_ENTER);
 }
 
-fn leaveAltScreen(tty_fd: c_int) !void {
-    try writeAll(tty_fd, ALT_SCREEN_LEAVE);
+fn leaveHookScreen(tty_fd: c_int) !void {
+    try writeAll(tty_fd, HOOK_SCREEN_LEAVE);
 }
 
 fn usage() void {
@@ -527,8 +527,8 @@ fn passthroughLoop(allocator: Allocator, term: *TerminalState, session: *ChildSe
                 try term.restore();
                 defer term.enableRaw() catch {};
 
-                try enterAltScreen(term.tty_fd);
-                defer leaveAltScreen(term.tty_fd) catch {};
+                try enterHookScreen(term.tty_fd);
+                defer leaveHookScreen(term.tty_fd) catch {};
 
                 try runHook(allocator, term.tty_fd, hook_path);
                 try syncWindowSize(term.tty_fd, session);

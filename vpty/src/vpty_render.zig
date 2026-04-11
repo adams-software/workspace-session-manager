@@ -16,6 +16,8 @@ pub const Renderer = struct {
     // Full-frame renderer by policy. We capture a fresh snapshot for each
     // accepted model change and keep only publish/commit version ordering.
     output_state: OutputState = .{},
+    pending_output_state: ?OutputState = null,
+    pending_output_version: u64 = 0,
     stdout_thread: *StdoutThread,
     needs_render: bool = true,
     last_generated_version: u64 = 0,
@@ -66,9 +68,11 @@ pub const Renderer = struct {
         var owned_snapshot = snapshot;
         errdefer host.freeScreenSnapshot(std.heap.page_allocator, &owned_snapshot);
 
+        var next_output_state = self.output_state;
+
         if (owned_snapshot.alt_screen != self.output_state.alt_screen or !self.output_state.has_drawn) {
             self.writeBytes(if (owned_snapshot.alt_screen) "\x1b[?1049h" else "\x1b[?1049l");
-            self.output_state.alt_screen = owned_snapshot.alt_screen;
+            next_output_state.alt_screen = owned_snapshot.alt_screen;
         }
 
         self.writeBytes("\x1b[?25l");
@@ -78,14 +82,14 @@ pub const Renderer = struct {
 
         if (owned_snapshot.cursor_visible != self.output_state.cursor_visible) {
             self.writeBytes(if (owned_snapshot.cursor_visible) "\x1b[?25h" else "\x1b[?25l");
-            self.output_state.cursor_visible = owned_snapshot.cursor_visible;
+            next_output_state.cursor_visible = owned_snapshot.cursor_visible;
         } else if (owned_snapshot.cursor_visible) {
             self.writeBytes("\x1b[?25h");
         }
 
-        self.output_state.cursor_row = owned_snapshot.cursor_row;
-        self.output_state.cursor_col = owned_snapshot.cursor_col;
-        self.output_state.has_drawn = true;
+        next_output_state.cursor_row = owned_snapshot.cursor_row;
+        next_output_state.cursor_col = owned_snapshot.cursor_col;
+        next_output_state.has_drawn = true;
 
         host.freeScreenSnapshot(std.heap.page_allocator, &owned_snapshot);
         self.last_generated_version = version;
@@ -94,19 +98,28 @@ pub const Renderer = struct {
             .version = self.last_generated_version,
             .bytes = self.render_buf.items,
         }) catch return;
+        self.pending_output_state = next_output_state;
+        self.pending_output_version = self.last_generated_version;
     }
 
     pub fn reset(self: *Renderer) void {
         self.render_buf.clearRetainingCapacity();
         self.output_state = .{};
+        self.pending_output_state = null;
+        self.pending_output_version = 0;
         self.last_generated_version = 0;
         self.needs_render = true;
         self.ensureBufferCapacity();
     }
 
     pub fn noteCommitted(self: *Renderer, notice: actor_mailboxes.CommitNotice) void {
-        _ = self;
-        _ = notice;
+        if (self.pending_output_state) |state| {
+            if (notice.version >= self.pending_output_version) {
+                self.output_state = state;
+                self.pending_output_state = null;
+                self.pending_output_version = 0;
+            }
+        }
     }
 
     pub fn shutdown(self: *Renderer, version: u64) void {
@@ -126,6 +139,8 @@ pub const Renderer = struct {
 
         self.render_buf.clearRetainingCapacity();
         self.output_state = .{};
+        self.pending_output_state = null;
+        self.pending_output_version = 0;
         self.last_generated_version = 0;
         self.needs_render = false;
     }
@@ -170,9 +185,7 @@ pub const Renderer = struct {
                 emitCell(self, line.cells[col], &style_state);
             }
 
-            if (line.eol) {
-                self.eraseToEndOfLine();
-            }
+            self.eraseToEndOfLine();
         }
     }
 };
@@ -264,6 +277,8 @@ fn emitColor(renderer: *Renderer, base: u8, color: host.HostColor) void {
 }
 
 fn emitCell(renderer: *Renderer, cell: host.HostScreenCell, style_state: *StyleState) void {
+    if (cell.width == 0) return;
+
     style_state.diffAndEmit(renderer, cell);
 
     var buf: [32]u8 = undefined;
