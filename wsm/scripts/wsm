@@ -298,13 +298,13 @@ create_canonical() {
   if [[ -n "$MENU_KEY_OVERRIDE" ]]; then
     alt_prefix+=(--key "$MENU_KEY_OVERRIDE")
   fi
-  alt_prefix+=(--run "$WSM_MENU_BIN" --)
+  alt_prefix+=(--run "$WSM_MENU_BIN" --signal-2 TERM --)
 
   if [[ $# -gt 1 ]]; then
     shift
-    env WSM_ROOT="$WSM_ROOT_RESOLVED" "$MSR_BIN" create -a "$sock" -- "$VPTY_BIN" -- "${alt_prefix[@]}" "$@"
+    env WSM_ROOT="$WSM_ROOT_RESOLVED" "$MSR_BIN" create -a "$sock" -- "${alt_prefix[@]}" "$VPTY_BIN" -- "$@"
   else
-    env WSM_ROOT="$WSM_ROOT_RESOLVED" "$MSR_BIN" create -a "$sock" -- "$VPTY_BIN" -- "${alt_prefix[@]}" "$SHELL" -i
+    env WSM_ROOT="$WSM_ROOT_RESOLVED" "$MSR_BIN" create -a "$sock" -- "${alt_prefix[@]}" "$VPTY_BIN" -- "$SHELL" -i
   fi
 }
 
@@ -490,4 +490,5 @@ case "$cmd" in
     exit 1
     ;;
 esac
+
 

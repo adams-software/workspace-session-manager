@@ -209,6 +209,19 @@ pub const PtyChildHost = struct {
         };
     }
 
+    pub fn sendSignal(self: *PtyChildHost, signal: c_int) Error!void {
+        return switch (self.state) {
+            .idle, .starting => Error.NotStarted,
+            .running => blk: {
+                const pid = self.pid orelse return Error.InvalidState;
+                if (c.kill(pid, signal) != 0) break :blk Error.InvalidArgs;
+                break :blk;
+            },
+            .exited => {},
+            .closed => Error.Closed,
+        };
+    }
+
     pub fn terminate(self: *PtyChildHost, signal: ?[]const u8) Error!void {
         return switch (self.state) {
             .idle, .starting => Error.NotStarted,
@@ -334,4 +347,3 @@ pub const PtyChildHost = struct {
         return self.master_fd;
     }
 };
-

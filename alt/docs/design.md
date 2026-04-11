@@ -2,9 +2,9 @@
 
 ## Summary
 
-`alt` is a thin terminal-owning passthrough shim.
+`alt` is a thin two-PTY switcher.
 
-It runs a child command under normal interactive terminal passthrough, but reserves a single local hotkey. When that hotkey is pressed, `alt` temporarily pauses passthrough, switches to the terminal alternate screen, runs a local hook executable, exits the alternate screen when the hook finishes, and then resumes the original passthrough session.
+It runs a primary command and an alternate command on separate PTYs, while reserving a single local hotkey to switch between them. One side is active at a time. `alt` forwards bytes to the active side, drains and intentionally drops inactive-side output, and applies only a minimal activation nudge when switching sides.
 
 The goal is to add a lightweight local control plane above an existing interactive terminal stack without pushing workspace semantics into lower layers like `msr` or terminal-rendering semantics into `wsm`.
 
@@ -15,9 +15,9 @@ Current session usage has a useful higher-level control model in `wsm`, but once
 We want:
 
 * a local hotkey while attached
-* a temporary local UI or script execution path
-* automatic return to the original interactive session view
-* no special return protocol from the hook
+* a second PTY-backed side for a temporary local UI or script
+* fast switching between sides
+* automatic fallback if one side exits
 * no coupling to `wsm`, `msr`, or `vpty` internals
 
 ## Non-Goals
@@ -28,18 +28,19 @@ We want:
 * a terminal multiplexer like tmux
 * a full terminal emulator
 * a workspace-aware tool
-* a command router for hook results
+* a command router for side results
 * a structured IPC protocol
+* a screen-state buffer or restorer
 
-For the initial version, `alt` does not interpret hook output. The hook runs for side effects only.
+Inactive-side output is intentionally drained and discarded. `alt` does not reconstruct hidden views.
 
 ## Design Principles
 
 * Keep `alt` generic and pure.
 * Keep workspace/session semantics outside `alt`.
-* Let the hook do whatever it needs to do.
-* Preserve the user’s current session screen by using the terminal alternate screen.
-* Resume normal passthrough automatically after the hook exits.
+* Let each side do whatever it needs to do.
+* Keep both sides on symmetric PTY plumbing.
+* Keep activation minimal: current tty size sync plus `SIGWINCH`.
 * Favor minimal configuration and sensible defaults.
 
 ## High-Level Behavior
@@ -47,28 +48,22 @@ For the initial version, `alt` does not interpret hook output. The hook runs for
 At runtime, `alt` behaves as follows:
 
 1. Parse startup configuration from flags and environment.
-2. Spawn the child command under a PTY.
-3. Put the local terminal into raw mode.
-4. Proxy local input to the child PTY and child PTY output back to the terminal.
-5. Watch for the configured local hotkey in the input stream.
-6. When the hotkey is pressed:
-
-   1. pause normal passthrough
-   2. restore terminal mode as needed for the hook
-   3. enter alternate screen
-   4. run the configured hook executable
-   5. leave alternate screen when the hook exits
-   6. re-enable raw passthrough mode
-   7. resume the child session
-
-The child session continues to exist throughout this flow unless the hook itself changes external state.
+2. Spawn the primary command under a PTY.
+3. Defer alternate-side start until first activation.
+4. Put the local terminal into raw mode.
+5. Proxy local input to the active side PTY and active side PTY output back to the terminal.
+6. Drain and intentionally discard inactive-side output.
+7. Watch for the configured local hotkey in the input stream.
+8. When the hotkey is pressed, switch active side.
+9. On activation, ensure the target side is live, sync current tty size, and send `SIGWINCH`.
+10. If one side exits, fall back to the other running side. If neither remains, exit.
 
 ## CLI
 
 Initial CLI:
 
 ```text
-alt [--key <spec>] [--run <path>] -- <child-command...>
+alt [--key <spec>] --run <path> [--signal-1 <sig>] [--signal-2 <sig>] -- <primary-command...>
 ```
 
 ### Flags
@@ -77,7 +72,13 @@ alt [--key <spec>] [--run <path>] -- <child-command...>
 : Local hotkey specification. Overrides `ALT_KEY`.
 
 `--run <path>`
-: Hook executable to run when the hotkey is pressed. Overrides `ALT_RUN`.
+: Alternate-side executable to run on its own PTY. Overrides `ALT_RUN`.
+
+`--signal-1 <sig>`
+: Optional signal to send to side 1's root child PID when switching away from it.
+
+`--signal-2 <sig>`
+: Optional signal to send to side 2's root child PID when switching away from it.
 
 `--`
 : Separates `alt` options from the child command. Everything after `--` is passed to the child command literally.
@@ -96,7 +97,8 @@ Initial defaults:
 
 * key: `ctrl-g`
 
-No default for run, must be specified by user. 
+No default for run, must be specified by user.
+No default switch-away signals.
 
 ## Hotkey Semantics
 
@@ -114,18 +116,18 @@ Not yet included in initial scope:
 * arbitrary named key combinations
 * a command mode or secondary control layer
 
-## Hook Semantics
+## Side Semantics
 
-The hook is executed as a normal local process.
+The alternate side is executed as a normal local process on its own PTY.
 
-Initial contract:
+Current contract:
 
-* The hook is invoked for side effects only.
-* `alt` does not read or interpret the hook’s stdout.
-* `alt` does not require the hook to return a structured command.
-* When the hook exits, `alt` returns to the prior passthrough session view.
-
-This keeps the first version extremely simple.
+* Side 1 is the primary command after `--`.
+* Side 2 is the alternate executable from `--run`.
+* `alt` does not read or interpret side stdout.
+* Inactive-side output is drained and dropped.
+* If a side exits and is explicitly reactivated later, it is restarted.
+* Optional `--signal-1` / `--signal-2` fire only on switch-away and target that side's root child PID.
 
 ## Terminal Behavior
 
@@ -145,18 +147,14 @@ In normal operation:
 
 When the hotkey fires:
 
-* normal forwarding pauses
-* the terminal leaves raw passthrough mode as needed for the hook
-* `alt` enters alternate screen
-* the hook runs attached to the terminal
-* on hook exit, `alt` leaves alternate screen
-* raw passthrough mode is restored
+* normal forwarding switches to the other side
+* the newly active side is ensured live
+* current tty size is synced to that side
+* `SIGWINCH` is sent to that side
 
-### Why Alternate Screen
+### Alternate Screen Policy
 
-Using the terminal alternate screen gives a clean way to show a temporary local UI without manually repainting or preserving the child session contents.
-
-This allows the hook to display whatever it needs, then disappear cleanly, revealing the original session view underneath.
+`alt` does not own terminal alternate-screen entry or exit for side activation. It only emits a hard local reset and clear at the switch boundary, leaving nested apps to manage any `?1049` usage themselves. It does not own hidden screen restoration for child apps and does not buffer or reconstruct view state.
 
 ## Purity and Layering
 
@@ -169,7 +167,7 @@ It should **not**:
 * inject domain-specific environment variables
 * understand `msr`, `dsm`, or `wsm` semantics
 
-It may infer only what is necessary for its own operation, such as the child argv and the configured hotkey/hook executable.
+It may infer only what is necessary for its own operation, such as the child argv, alternate executable, configured hotkey, and optional switch-away signals.
 
 Any higher-level context discovery should happen inside the hook script itself or in outer tooling.
 
@@ -187,10 +185,16 @@ Explicit hotkey:
 alt --key ctrl-g -- wsm attach foo/bar
 ```
 
-Explicit hook executable:
+Explicit alternate executable:
 
 ```bash
 alt --run ./scripts/wsm_menu -- wsm attach foo/bar
+```
+
+Alternate executable with switch-away signal:
+
+```bash
+alt --run ./scripts/wsm_menu --signal-2 TERM -- wsm attach foo/bar
 ```
 
 Environment-driven configuration:
@@ -205,28 +209,29 @@ Generic non-WSM usage:
 alt --run ./local-tools/debug-menu -- bash
 ```
 
-## Initial Implementation Notes
+## Current Implementation Notes
 
-The initial Zig prototype is expected to:
+The Zig implementation currently:
 
-* open `/dev/tty`
-* capture and restore terminal attributes with `termios`
-* create a PTY for the child command
-* proxy bytes using `poll`
-* intercept the configured hotkey locally before forwarding
-* run the hook with inherited environment and inherited stdio
-* use standard alternate-screen enter/leave sequences
+* opens `/dev/tty`
+* captures and restores terminal attributes with `termios`
+* creates a PTY for the primary command and a PTY for the alternate side
+* proxies bytes using `poll`
+* intercepts the configured hotkey locally before forwarding
+* preserves post-hotkey tail bytes and routes them to the newly active side
+* uses minimal activation only: tty size sync plus `SIGWINCH`
+* supports optional switch-away signaling to a side's root child PID
 
-## Expected Limitations in V1
+## Current Limitations
 
-The first version may intentionally omit:
+The current version intentionally omits or limits:
 
-* hook arguments beyond a single executable path
-* SIGWINCH forwarding
+* hook/alternate argv beyond a single executable path for `--run`
 * transparent literal send-through of the reserved hotkey
 * sophisticated error reporting/UI
-* action-return protocol from the hook
+* action-return protocol from the alternate side
 * nested local menus or overlay composition
+* hidden-screen restoration for nested apps launched under an outer shell
 
 These can be added later if needed.
 
@@ -234,12 +239,12 @@ These can be added later if needed.
 
 Possible future enhancements:
 
-* forward resize events to the child PTY
-* allow a wrapper or argv form for hook execution
+* allow a wrapper or argv form for alternate-side execution
 * add a “send literal hotkey” escape path
-* allow optional hook output interpretation
+* allow optional side output interpretation
 * add structured logging/debug mode
 * expose clearer exit status propagation
+* expand switch-away signaling semantics if needed
 
 None of these are required for the initial feature.
 
@@ -247,8 +252,8 @@ None of these are required for the initial feature.
 
 These are intentionally left open for now:
 
-* Whether the default hook should remain `wsm_menu` or become unset by default
-* Whether `alt` should eventually support hook args directly
+* Whether the default alternate executable should remain `wsm_menu` or become unset by default
+* Whether `alt` should eventually support alternate-side argv directly
 * Whether hotkey passthrough for the reserved key is needed immediately
 * Whether the final install path should make `alt` a general utility or an internal helper in the session stack
 

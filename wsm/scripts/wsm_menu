@@ -245,7 +245,8 @@ attach_flow() {
 
     case "$key" in
       ''|$'
-'|$'')
+'|$'
+')
         if (( ${#matches[@]} > 0 )); then
           wsm_cmd attach "${matches[$selection]}"
           return 0
@@ -399,3 +400,5 @@ main_loop() {
 }
 
 main_loop
+
+
