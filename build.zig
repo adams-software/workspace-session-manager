@@ -108,6 +108,13 @@ pub fn build(b: *std.Build) void {
     server_mod.addImport("session_wire", session_wire_mod);
     server_mod.addImport("session_stream_transport", session_stream_transport_mod);
 
+    const attach_wake_pipe_mod = b.addModule("attach_wake_pipe", .{
+        .root_source_file = b.path("vpty/src/wake_pipe.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+
     const attach_bridge_mod = b.addModule("attach_bridge", .{
         .root_source_file = b.path("msr/src/attach_bridge.zig"),
         .target = target,
@@ -120,6 +127,7 @@ pub fn build(b: *std.Build) void {
     attach_bridge_mod.addImport("byte_queue", byte_queue_mod);
     attach_bridge_mod.addImport("fd_stream", fd_stream_mod);
     attach_bridge_mod.addImport("session_stream_transport", session_stream_transport_mod);
+    attach_bridge_mod.addImport("wake_pipe", attach_wake_pipe_mod);
 
     const argv_parse_mod = b.addModule("argv_parse", .{
         .root_source_file = b.path("msr1/src/argv_parse.zig"),
@@ -226,6 +234,7 @@ pub fn build(b: *std.Build) void {
     attach_bridge_test_root.addImport("byte_queue", byte_queue_mod);
     attach_bridge_test_root.addImport("fd_stream", fd_stream_mod);
     attach_bridge_test_root.addImport("session_stream_transport", session_stream_transport_mod);
+    attach_bridge_test_root.addImport("wake_pipe", attach_wake_pipe_mod);
     const attach_bridge_tests = b.addTest(.{ .root_module = attach_bridge_test_root });
 
     const server_test_root = b.createModule(.{

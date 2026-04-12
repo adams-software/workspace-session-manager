@@ -13,6 +13,8 @@ pub const ModelUpdate = struct {
     }
 };
 
+pub const ModelSize = VTermAdapter.Size;
+
 pub const TerminalModel = struct {
     adapter: VTermAdapter,
     version: u64 = 0,
@@ -48,6 +50,10 @@ pub const TerminalModel = struct {
 
     pub fn currentVersion(self: *const TerminalModel) u64 {
         return self.version;
+    }
+
+    pub fn currentSize(self: *const TerminalModel) ?ModelSize {
+        return self.adapter.currentSize();
     }
 
     pub fn markCommittedThrough(self: *TerminalModel, version: u64) void {

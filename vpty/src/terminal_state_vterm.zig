@@ -20,6 +20,11 @@ fn convertColor(raw: c.msr_vterm_color, is_fg: bool) screen_types.HostColor {
 pub const VTermAdapter = struct {
     handle: ?*c.msr_vterm_handle,
 
+    pub const Size = struct {
+        rows: u16,
+        cols: u16,
+    };
+
     pub fn init(rows: u16, cols: u16) !VTermAdapter {
         const handle = c.msr_vterm_new(@intCast(rows), @intCast(cols)) orelse return error.OutOfMemory;
         return .{
@@ -46,6 +51,14 @@ pub const VTermAdapter = struct {
 
     pub fn resize(self: *VTermAdapter, rows: u16, cols: u16) void {
         if (self.handle) |handle| c.msr_vterm_set_size(handle, @intCast(rows), @intCast(cols));
+    }
+
+    pub fn currentSize(self: *const VTermAdapter) ?Size {
+        const handle = self.handle orelse return null;
+        return .{
+            .rows = @intCast(handle.rows),
+            .cols = @intCast(handle.cols),
+        };
     }
 
     pub fn snapshot(self: *const VTermAdapter, allocator: std.mem.Allocator) !screen_types.HostScreenSnapshot {

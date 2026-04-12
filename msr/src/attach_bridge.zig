@@ -6,6 +6,7 @@ const wire = @import("session_wire");
 const ByteQueue = @import("byte_queue").ByteQueue;
 const fd_stream = @import("fd_stream");
 const streaming = @import("session_stream_transport");
+const WakePipe = @import("wake_pipe").WakePipe;
 
 const c = @cImport({
     @cInclude("unistd.h");
@@ -34,9 +35,11 @@ const PendingTransition = union(enum) {
 };
 
 var winch_changed: bool = false;
+var wake_pipe: WakePipe = .{};
 
 fn handleSigwinch(_: c_int) callconv(.c) void {
     winch_changed = true;
+    wake_pipe.notify();
 }
 
 fn mapAttachRequestError(err: anyerror) core.ErrorCode {
@@ -234,6 +237,11 @@ pub fn runAttachBridge(
         }
     }
 
+    wake_pipe = try WakePipe.init();
+    defer wake_pipe.deinit();
+    try fd_stream.setNonBlocking(wake_pipe.readFd());
+    try fd_stream.setNonBlocking(wake_pipe.writeFd());
+
     const old_winch = c.signal(c.SIGWINCH, handleSigwinch);
     defer _ = c.signal(c.SIGWINCH, old_winch);
     winch_changed = false;
@@ -274,7 +282,7 @@ pub fn runAttachBridge(
             return exit_kind;
         }
 
-        var pfds = [3]c.struct_pollfd{
+        var pfds = [4]c.struct_pollfd{
             .{
                 .fd = if (stdin_open and pending_transition == null) in_fd else -1,
                 .events = if (stdin_open and pending_transition == null) c.POLLIN else 0,
@@ -290,6 +298,11 @@ pub fn runAttachBridge(
                 .events = if (!stdout_tx.isEmpty()) c.POLLOUT else 0,
                 .revents = 0,
             },
+            .{
+                .fd = wake_pipe.readFd(),
+                .events = c.POLLIN,
+                .revents = 0,
+            },
         };
 
         while (true) {
@@ -298,6 +311,10 @@ pub fn runAttachBridge(
             const e = std.c.errno(-1);
             if (e == .INTR) continue;
             return error.IoError;
+        }
+
+        if ((pfds[3].revents & c.POLLIN) != 0) {
+            wake_pipe.drain();
         }
 
         if (stdin_open and (pfds[0].revents & (c.POLLHUP | c.POLLERR | c.POLLNVAL)) != 0) {

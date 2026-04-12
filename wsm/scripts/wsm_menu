@@ -381,8 +381,8 @@ main_loop() {
       $'\e')
         exit 0
         ;;
-      [Aa]) attach_flow ;;
-      [Cc]) create_flow ;;
+      [Aa]) attach_flow; exit $? ;;
+      [Cc]) create_flow; exit $? ;;
       [Nn]) next_flow; exit $? ;;
       [Pp]) prev_flow; exit $? ;;
       [Dd]) detach_flow; exit $? ;;

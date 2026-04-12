@@ -19,6 +19,7 @@ const render_thread_mod = @import("render_thread");
 const RenderThread = render_thread_mod.RenderThread;
 const SharedTerminalModel = render_thread_mod.SharedTerminalModel;
 const WakePipe = @import("wake_pipe").WakePipe;
+const ModelSize = terminal_model_mod.ModelSize;
 
 const INPUT_READ_CHUNK = 4096;
 const OUTPUT_READ_CHUNK = 4096;
@@ -174,6 +175,20 @@ fn applyViewerSize(
     render_thread.publishModelChanged(update.asModelChanged());
 }
 
+fn forceViewerRepaint(shared_model: *SharedTerminalModel, render_thread: *RenderThread) void {
+    shared_model.lock();
+    shared_model.model.forceFullDamage();
+    const version = shared_model.model.currentVersion();
+    shared_model.unlock();
+
+    render_thread.publishModelChanged(.{ .version = version });
+}
+
+fn viewerSizeChanged(current: ?ModelSize, rows: u16, cols: u16) bool {
+    const size = current orelse return true;
+    return size.rows != rows or size.cols != cols;
+}
+
 fn handleSigwinch(_: c_int) callconv(.c) void {
     winch_changed = true;
     wake_pipe.notify();
@@ -183,7 +198,16 @@ fn handleResizeIfNeeded(session_host: *host.SessionHost, shared_model: *SharedTe
     if (!winch_changed) return;
     winch_changed = false;
     const size = terminal.currentSize() catch vpty_terminal.Size{ .rows = 24, .cols = 80 };
-    applyViewerSize(session_host, shared_model, render_thread, size.rows, size.cols);
+
+    shared_model.lock();
+    const changed = viewerSizeChanged(shared_model.model.currentSize(), size.rows, size.cols);
+    shared_model.unlock();
+
+    if (changed) {
+        applyViewerSize(session_host, shared_model, render_thread, size.rows, size.cols);
+    } else {
+        forceViewerRepaint(shared_model, render_thread);
+    }
 }
 
 fn handleTerminationIfNeeded(session_host: *host.SessionHost) !?host.ExitStatus {
@@ -491,4 +515,11 @@ pub fn main(init: std.process.Init) !u8 {
     try runtime.init(allocator, init.io, child_argv_list.items);
     defer runtime.deinit();
     return runtime.run();
+}
+
+test "viewerSizeChanged detects same-size WINCH as repaint-only" {
+    try std.testing.expect(!viewerSizeChanged(.{ .rows = 24, .cols = 80 }, 24, 80));
+    try std.testing.expect(viewerSizeChanged(.{ .rows = 24, .cols = 80 }, 25, 80));
+    try std.testing.expect(viewerSizeChanged(.{ .rows = 24, .cols = 80 }, 24, 81));
+    try std.testing.expect(viewerSizeChanged(null, 24, 80));
 }
