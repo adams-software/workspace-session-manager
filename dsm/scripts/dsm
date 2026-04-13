@@ -13,12 +13,18 @@ resolve_source_path() {
 }
 
 SCRIPT_DIR="$(resolve_source_path)"
-REPO_ROOT="${MSR_REPO_ROOT:-$(cd -- "$SCRIPT_DIR/../.." && pwd)}"
-BIN_DIR="${MSR_BIN_DIR:-$REPO_ROOT/zig-out/bin}"
+if [[ -x "$SCRIPT_DIR/msr" ]]; then
+  BIN_DIR="$SCRIPT_DIR"
+  REPO_ROOT="${MSR_REPO_ROOT:-}"
+  WSM_MENU_BIN="${WSM_MENU_BIN:-$SCRIPT_DIR/wsm_menu}"
+else
+  REPO_ROOT="${MSR_REPO_ROOT:-$(cd -- "$SCRIPT_DIR/../.." && pwd)}"
+  BIN_DIR="${MSR_BIN_DIR:-$REPO_ROOT/zig-out/bin}"
+  WSM_MENU_BIN="${WSM_MENU_BIN:-$REPO_ROOT/wsm/scripts/wsm_menu}"
+fi
 MSR_BIN="$BIN_DIR/msr"
 VPTY_BIN="$BIN_DIR/vpty"
 ALT_BIN="$BIN_DIR/alt"
-WSM_MENU_BIN="$REPO_ROOT/wsm/scripts/wsm_menu"
 
 err() { printf '%s\n' "$*" >&2; }
 out() { printf '%s\n' "$*"; }

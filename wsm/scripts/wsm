@@ -13,11 +13,19 @@ resolve_source_path() {
 }
 
 SCRIPT_DIR="$(resolve_source_path)"
-REPO_ROOT="${MSR_REPO_ROOT:-$(cd -- "$SCRIPT_DIR/../.." && pwd)}"
-BIN_DIR="${MSR_BIN_DIR:-$REPO_ROOT/zig-out/bin}"
-
-DSM_BIN="$REPO_ROOT/dsm/scripts/dsm"
-MSR_BIN="$BIN_DIR/msr"
+if [[ -x "$SCRIPT_DIR/msr" ]]; then
+  BIN_DIR="$SCRIPT_DIR"
+  DSM_BIN="${DSM_BIN:-$SCRIPT_DIR/dsm}"
+  MSR_BIN="${MSR_BIN:-$SCRIPT_DIR/msr}"
+  WSM_MENU_BIN="${WSM_MENU_BIN:-$SCRIPT_DIR/wsm_menu}"
+  REPO_ROOT="${MSR_REPO_ROOT:-}"
+else
+  REPO_ROOT="${MSR_REPO_ROOT:-$(cd -- "$SCRIPT_DIR/../.." && pwd)}"
+  BIN_DIR="${MSR_BIN_DIR:-$REPO_ROOT/zig-out/bin}"
+  DSM_BIN="${DSM_BIN:-$REPO_ROOT/dsm/scripts/dsm}"
+  MSR_BIN="${MSR_BIN:-$BIN_DIR/msr}"
+  WSM_MENU_BIN="${WSM_MENU_BIN:-$REPO_ROOT/wsm/scripts/wsm_menu}"
+fi
 
 err() { printf '%s\n' "$*" >&2; }
 out() { printf '%s\n' "$*"; }
@@ -189,6 +197,24 @@ sock_for_canonical() {
   printf '%s/%s.msr\n' "$WSM_ROOT_RESOLVED" "$id"
 }
 
+canonical_id_is_valid() {
+  local id="$1"
+  [[ -n "$id" ]] || return 1
+  [[ "$id" != -* ]] || return 1
+  [[ "$id" != /* ]] || return 1
+  [[ "$id" != */ ]] || return 1
+  [[ "$id" != *//* ]] || return 1
+  [[ "$id" != *"/./"* ]] || return 1
+  [[ "$id" != *"/../"* ]] || return 1
+  [[ "$id" != "." ]] || return 1
+  [[ "$id" != ".." ]] || return 1
+  [[ "$id" != ./* ]] || return 1
+  [[ "$id" != ../* ]] || return 1
+  [[ "$id" != */. ]] || return 1
+  [[ "$id" != */.. ]] || return 1
+  return 0
+}
+
 resolve_current_id() {
   local raw="${MSR_SESSION:-}"
   [[ -n "$raw" ]] || return 1
@@ -314,20 +340,91 @@ direct_child_ids_of() {
   done < <(list_ids)
 }
 
+dir_session_names() {
+  local dir="$1"
+  find "$dir" -maxdepth 1 \( -type s -o -type f \) -name '*.msr' -printf '%f\n' 2>/dev/null | \
+    sed 's/\.msr$//' | LC_ALL=C sort
+}
+
+resolve_nav_target() {
+  local op="$1"
+  local current_id current_dir child_id parent_id current_name
+  local -a names
+  local i last
+
+  case "$op" in
+    first)
+      current_dir="$(current_node_dir)" || return 1
+      mapfile -t names < <(dir_session_names "$current_dir")
+      [[ ${#names[@]} -gt 0 ]] || return 1
+      canonical_id_for_sock "$current_dir/${names[0]}.msr"
+      ;;
+    last)
+      current_dir="$(current_node_dir)" || return 1
+      mapfile -t names < <(dir_session_names "$current_dir")
+      [[ ${#names[@]} -gt 0 ]] || return 1
+      canonical_id_for_sock "$current_dir/${names[$((${#names[@]} - 1))]}.msr"
+      ;;
+    prev|next)
+      current_dir="$(current_node_dir)" || return 1
+      current_name="${MSR_SESSION##*/}"
+      current_name="${current_name%.msr}"
+      mapfile -t names < <(dir_session_names "$current_dir")
+      [[ ${#names[@]} -gt 0 ]] || return 1
+      last=$((${#names[@]} - 1))
+      for ((i=0; i<${#names[@]}; i++)); do
+        if [[ "${names[$i]}" == "$current_name" ]]; then
+          if [[ "$op" == "prev" ]]; then
+            if [[ $i -gt 0 ]]; then
+              canonical_id_for_sock "$current_dir/${names[$((i-1))]}.msr"
+            else
+              canonical_id_for_sock "$current_dir/${names[$last]}.msr"
+            fi
+          else
+            if [[ $i -lt $last ]]; then
+              canonical_id_for_sock "$current_dir/${names[$((i+1))]}.msr"
+            else
+              canonical_id_for_sock "$current_dir/${names[0]}.msr"
+            fi
+          fi
+          return 0
+        fi
+      done
+      return 1
+      ;;
+    in)
+      current_id="$(resolve_current_id)" || return 1
+      child_id="$(direct_child_ids_of "$current_id" | LC_ALL=C sort | head -n 1)"
+      [[ -n "$child_id" ]] || return 1
+      printf '%s\n' "$child_id"
+      ;;
+    out)
+      current_id="$(resolve_current_id)" || return 1
+      parent_id="$(parent_id_of "$current_id")" || return 1
+      exists_canonical "$parent_id" >/dev/null 2>&1 || return 1
+      printf '%s\n' "$parent_id"
+      ;;
+    *)
+      return 2
+      ;;
+  esac
+}
+
 nav_in() {
-  local current_id child_id
-  current_id="$(resolve_current_id)" || { err "wsm: in requires current WSM session context"; exit 1; }
-  child_id="$(direct_child_ids_of "$current_id" | LC_ALL=C sort | head -n 1)"
-  [[ -n "$child_id" ]] || { err "wsm: no direct child session under: $current_id"; exit 1; }
-  attach_canonical "$child_id"
+  local target
+  target="$(resolve_nav_target in)" || { err "wsm: no direct child session under current session"; exit 1; }
+  attach_canonical "$target"
 }
 
 nav_out() {
-  local current_id parent_id
+  local current_id target
   current_id="$(resolve_current_id)" || { err "wsm: out requires current WSM session context"; exit 1; }
-  parent_id="$(parent_id_of "$current_id")" || { err "wsm: already at workspace root boundary: $current_id"; exit 1; }
-  exists_canonical "$parent_id" >/dev/null 2>&1 || { err "wsm: no exact direct parent session exists for: $current_id"; exit 1; }
-  attach_canonical "$parent_id"
+  target="$(resolve_nav_target out)" || {
+    parent_id_of "$current_id" >/dev/null 2>&1 || { err "wsm: already at workspace root boundary: $current_id"; exit 1; }
+    err "wsm: no exact direct parent session exists for: $current_id"
+    exit 1
+  }
+  attach_canonical "$target"
 }
 
 if [[ $# -lt 1 ]]; then
@@ -354,7 +451,7 @@ case "$cmd" in
   c|create)
     [[ $# -ge 1 ]] || { err "wsm: create requires <target>"; exit 1; }
     target="$1"
-    [[ "$target" != -* ]] || { err "wsm: create requires <target>; got flag-like value: $target"; exit 1; }
+    canonical_id_is_valid "$target" || { err "wsm: invalid canonical target: $target"; exit 1; }
     shift || true
 
     if [[ ${1:-} == -- ]]; then
@@ -483,20 +580,29 @@ case "$cmd" in
     esac
     ;;
 
+  resolve)
+    [[ $# -ge 1 ]] || exit 1
+    resolve_nav_target "$1"
+    ;;
+
   f|first)
-    local_nav_delegate first
+    target="$(resolve_nav_target first)" || { err "wsm: no sessions in current directory"; exit 1; }
+    attach_canonical "$target"
     ;;
 
   l|last)
-    local_nav_delegate last
+    target="$(resolve_nav_target last)" || { err "wsm: no sessions in current directory"; exit 1; }
+    attach_canonical "$target"
     ;;
 
   p|prev)
-    local_nav_delegate prev
+    target="$(resolve_nav_target prev)" || { err "wsm: no previous session in current directory"; exit 1; }
+    attach_canonical "$target"
     ;;
 
   n|next)
-    local_nav_delegate next
+    target="$(resolve_nav_target next)" || { err "wsm: no next session in current directory"; exit 1; }
+    attach_canonical "$target"
     ;;
 
   in|i)

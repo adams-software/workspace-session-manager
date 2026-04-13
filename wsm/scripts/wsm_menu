@@ -16,8 +16,9 @@ SCRIPT_DIR="$(resolve_source_path)"
 REPO_ROOT="${MSR_REPO_ROOT:-$(cd -- "$SCRIPT_DIR/../.." && pwd)}"
 WSM_BIN="$REPO_ROOT/wsm/scripts/wsm"
 
-err() { printf '%s\n' "$*" >&2; }
-out() { printf '%s\n' "$*"; }
+tty_printf() { printf "$@" > /dev/tty; }
+err() { tty_printf '%s\n' "$*"; }
+out() { tty_printf '%s\n' "$*"; }
 
 ROOT_OVERRIDE=""
 
@@ -39,7 +40,6 @@ wsm_cmd() {
 
 CURRENT_ROOT=""
 CURRENT_SESSION=""
-CURRENT_STATUS=""
 
 read_key() {
   local key
@@ -66,12 +66,12 @@ prompt_line() {
   local key
 
   while true; do
-    printf '\r\033[2K%s%s' "$prompt" "$buf" > /dev/tty
+    tty_printf '\r\033[2K%s%s' "$prompt" "$buf"
     key="$(read_key)" || return 1
 
     case "$key" in
       ''|$'\n'|$'\r')
-        printf '\n' > /dev/tty
+        tty_printf '\n'
         if [[ -n "$__outvar" ]]; then
           printf -v "$__outvar" '%s' "$buf"
         else
@@ -80,7 +80,7 @@ prompt_line() {
         return 0
         ;;
       $'\e')
-        printf '\n' > /dev/tty
+        tty_printf '\n'
         return 130
         ;;
       $'\177'|$'\010')
@@ -98,13 +98,13 @@ prompt_line() {
 }
 
 wait_back() {
-  printf '\n[enter/esc] back... ' > /dev/tty
+  tty_printf '\n[enter/esc] back... '
   while true; do
     local key
     key="$(read_key)" || return 0
     case "$key" in
       $'\e'|$'\n'|$'\r')
-        printf '\n' > /dev/tty
+        tty_printf '\n'
         return 0
         ;;
     esac
@@ -120,141 +120,163 @@ refresh_context() {
 
   if current="$(wsm_cmd current 2>/dev/null)"; then
     CURRENT_SESSION="$current"
-    if status="$(wsm_cmd status 2>/dev/null)"; then
-      CURRENT_STATUS="$status"
-    else
-      CURRENT_STATUS="attached"
-    fi
   else
     CURRENT_SESSION=""
-    CURRENT_STATUS="not attached"
   fi
 }
 
 clear_screen() {
-  printf '\033[H\033[2J'
-}
-
-render_header() {
-  clear_screen
-  printf 'WSM MENU\n'
-  printf '========\n\n'
-  printf 'root: %s\n' "$CURRENT_ROOT"
-  if [[ -n "$CURRENT_SESSION" ]]; then
-    printf 'current: %s\n' "$CURRENT_SESSION"
-  else
-    printf 'current: none\n'
-  fi
-  printf 'status: %s\n' "$CURRENT_STATUS"
-  printf '\n'
-}
-
-render_menu() {
-  printf '[a] attach\n'
-  printf '[c] create\n'
-  printf '[f] first\n'
-  printf '[l] last\n'
-  printf '[n] next\n'
-  printf '[p] prev\n'
-  printf '[i] in\n'
-  printf '[o] out\n'
-  printf '[d] detach\n'
-  printf '[u] current\n'
-  printf '[s] list\n'
-  printf '[r] root / refresh\n'
-  printf '[h] help\n'
-  printf '[m] menu\n'
-  printf '[q] quit\n'
-  printf '\n'
+  tty_printf '\033[H\033[2J'
 }
 
 list_ids() {
   wsm_cmd list
 }
 
+canonical_id_is_valid() {
+  local id="$1"
+  [[ -n "$id" ]] || return 1
+  [[ "$id" != -* ]] || return 1
+  [[ "$id" != /* ]] || return 1
+  [[ "$id" != */ ]] || return 1
+  [[ "$id" != *//* ]] || return 1
+  [[ "$id" != *"/./"* ]] || return 1
+  [[ "$id" != *"/../"* ]] || return 1
+  [[ "$id" != "." ]] || return 1
+  [[ "$id" != ".." ]] || return 1
+  [[ "$id" != ./* ]] || return 1
+  [[ "$id" != ../* ]] || return 1
+  [[ "$id" != */. ]] || return 1
+  [[ "$id" != */.. ]] || return 1
+  return 0
+}
+
+preview_nav() {
+  local op="$1"
+  [[ -n "$CURRENT_SESSION" ]] || return 1
+  local target
+  target="$(wsm_cmd resolve "$op" 2>/dev/null || true)"
+  [[ -n "$target" ]] || return 1
+  printf '%s\n' "$target"
+}
+
+render_nav_line() {
+  local key="$1"
+  local label="$2"
+  local op="$3"
+  local target
+  if target="$(preview_nav "$op")"; then
+    tty_printf '[%s] %s -> %s\n' "$key" "$label" "$target"
+  else
+    tty_printf '[%s] %s\n' "$key" "$label"
+  fi
+}
+
+render_header() {
+  clear_screen
+  tty_printf 'WSM MENU\n'
+  tty_printf '========\n\n'
+  tty_printf 'root: %s\n' "$CURRENT_ROOT"
+  if [[ -n "$CURRENT_SESSION" ]]; then
+    tty_printf 'current: %s\n' "$CURRENT_SESSION"
+  else
+    tty_printf 'current: none\n'
+  fi
+  tty_printf '\n'
+}
+
+render_menu() {
+  tty_printf '[a] attach\n'
+  tty_printf '[c] create\n'
+  render_nav_line 'f' 'first' 'first'
+  render_nav_line 'l' 'last' 'last'
+  render_nav_line 'n' 'next' 'next'
+  render_nav_line 'p' 'prev' 'prev'
+  render_nav_line 'i' 'in' 'in'
+  render_nav_line 'o' 'out' 'out'
+  tty_printf '[d] detach\n'
+  tty_printf '[s] list\n'
+  tty_printf '[h] help\n'
+  tty_printf '[q] quit\n'
+  tty_printf '\n'
+}
+
+filter_matches() {
+  local query="$1"
+  local id
+  FILTER_MATCHES=()
+  FILTER_EXACT_MATCH=0
+
+  for id in "${ALL_IDS[@]}"; do
+    if [[ -z "$query" || "$id" == "$query"* ]]; then
+      FILTER_MATCHES+=("$id")
+    fi
+    if [[ -n "$query" && "$id" == "$query" ]]; then
+      FILTER_EXACT_MATCH=1
+    fi
+  done
+}
+
+render_match_list() {
+  local selection="${1:-0}"
+  local selectable="${2:-1}"
+  local -a visible=()
+  local limit=${#FILTER_MATCHES[@]}
+  local i
+
+  if (( limit > 10 )); then
+    limit=10
+  fi
+  for ((i=0; i<limit; i++)); do
+    visible+=("${FILTER_MATCHES[$i]}")
+  done
+
+  if (( ${#FILTER_MATCHES[@]} == 0 )); then
+    tty_printf '  no matches\n'
+    return
+  fi
+
+  for ((i=0; i<${#visible[@]}; i++)); do
+    if (( selectable == 1 && i == selection )); then
+      tty_printf '> %s\n' "${visible[$i]}"
+    else
+      tty_printf '  %s\n' "${visible[$i]}"
+    fi
+  done
+  if (( ${#FILTER_MATCHES[@]} > 10 )); then
+    tty_printf '\n  ... %d more\n' "$((${#FILTER_MATCHES[@]} - 10))"
+  fi
+}
+
 attach_flow() {
   local query=""
-  local -a matches=() visible=() all_ids=()
   local selection=0
-  local max_visible=10
-  local key id
-
-  mapfile -t all_ids < <(list_ids)
+  local key
+  mapfile -t ALL_IDS < <(list_ids)
 
   while true; do
-    matches=()
-    for id in "${all_ids[@]}"; do
-      if [[ -z "$query" || "$id" == "$query"* ]]; then
-        matches+=("$id")
-      fi
-    done
-
-    if (( ${#matches[@]} == 0 )); then
+    filter_matches "$query"
+    if (( ${#FILTER_MATCHES[@]} == 0 )); then
       selection=0
     else
-      if (( selection >= ${#matches[@]} )); then
-        selection=$((${#matches[@]} - 1))
-      fi
-      if (( selection < 0 )); then
-        selection=0
-      fi
+      (( selection >= ${#FILTER_MATCHES[@]} )) && selection=$((${#FILTER_MATCHES[@]} - 1))
+      (( selection < 0 )) && selection=0
     fi
-
-    visible=()
-    local limit=${#matches[@]}
-    if (( limit > max_visible )); then
-      limit=$max_visible
-    fi
-    local i
-    for ((i=0; i<limit; i++)); do
-      visible+=("${matches[$i]}")
-    done
 
     render_header
-    printf 'ATTACH
-'
-    printf '%s
+    tty_printf 'ATTACH\n'
+    tty_printf '%s\n\n' '----'
+    tty_printf 'type a canonical prefix. enter attaches selection.\n'
+    tty_printf 'up/down changes selection. esc goes back.\n\n'
+    tty_printf 'search> %s\n\n' "$query"
+    render_match_list "$selection" 1
+    tty_printf '\n'
 
-' '----'
-    printf 'type a canonical prefix. enter attaches selection.
-'
-    printf 'up/down changes selection. esc clears/back.
-
-'
-    printf 'search> %s
-
-' "$query"
-
-    if (( ${#matches[@]} == 0 )); then
-      printf '  no matches
-'
-    else
-      for ((i=0; i<${#visible[@]}; i++)); do
-        if (( i == selection )); then
-          printf '> %s
-' "${visible[$i]}"
-        else
-          printf '  %s
-' "${visible[$i]}"
-        fi
-      done
-      if (( ${#matches[@]} > max_visible )); then
-        printf '
-  ... %d more
-' "$((${#matches[@]} - max_visible))"
-      fi
-    fi
-
-    printf '
-' > /dev/tty
     key="$(read_key)" || return 0
-
     case "$key" in
-      ''|$'
-'|$'
-')
-        if (( ${#matches[@]} > 0 )); then
-          wsm_cmd attach "${matches[$selection]}"
+      ''|$'\n'|$'\r')
+        if (( ${#FILTER_MATCHES[@]} > 0 )); then
+          wsm_cmd attach "${FILTER_MATCHES[$selection]}"
           return 0
         fi
         ;;
@@ -266,59 +288,78 @@ attach_flow() {
           return 0
         fi
         ;;
-      $'\e[A')
-        if (( ${#matches[@]} > 0 && selection > 0 )); then
-          selection=$((selection - 1))
-        fi
-        ;;
-      $'\e[B')
-        if (( ${#matches[@]} > 0 && selection + 1 < ${#matches[@]} && selection + 1 < max_visible )); then
-          selection=$((selection + 1))
-        fi
-        ;;
-      $''|$'')
-        if [[ -n "$query" ]]; then
-          query="${query%?}"
-          selection=0
-        fi
-        ;;
-      $'\e['*)
-        ;;
-      [[:print:]])
-        query+="$key"
-        selection=0
-        ;;
+      $'\e[A') (( ${#FILTER_MATCHES[@]} > 0 && selection > 0 )) && selection=$((selection - 1)) ;;
+      $'\e[B') (( ${#FILTER_MATCHES[@]} > 0 && selection + 1 < ${#FILTER_MATCHES[@]} && selection + 1 < 10 )) && selection=$((selection + 1)) ;;
+      $'\177'|$'\010') [[ -n "$query" ]] && query="${query%?}" && selection=0 ;;
+      $'\e['*) ;;
+      [[:print:]]) query+="$key"; selection=0 ;;
     esac
   done
 }
 
 create_flow() {
-  local target
-  render_header
-  printf 'CREATE\n'
-  printf '%s\n\n' '----'
-  printf 'enter a canonical workspace-relative target.\n'
-  printf 'examples: api/0, services/backend/dev\n'
-  printf 'blank input cancels. esc goes back.\n\n'
-  target="$(prompt_line 'target> ')" || {
-    rc=$?
-    [[ $rc -eq 130 ]] && return 0
-    return 0
-  }
+  local query=""
+  local key
+  local can_create=0
+  local invalid_hint=""
+  mapfile -t ALL_IDS < <(list_ids)
 
-  [[ -z "$target" ]] && return 0
-  if [[ "$target" == -* ]]; then
-    printf '\ninvalid target: %s\n' "$target"
-    pause
-    return 1
-  fi
+  while true; do
+    filter_matches "$query"
+    can_create=0
+    invalid_hint=""
+    if [[ -n "$query" ]]; then
+      if canonical_id_is_valid "$query"; then
+        if [[ $FILTER_EXACT_MATCH -eq 0 ]]; then
+          can_create=1
+        fi
+      else
+        invalid_hint='invalid canonical target'
+      fi
+    fi
 
-  wsm_cmd create "$target"
+    render_header
+    tty_printf 'CREATE\n'
+    tty_printf '%s\n\n' '----'
+    tty_printf 'type a canonical target. enter creates it when no exact match exists.\n'
+    tty_printf 'matches are shown for context only. esc goes back.\n\n'
+    tty_printf 'target> %s\n\n' "$query"
+    render_match_list 0 0
+    if (( can_create == 1 )); then
+      tty_printf '\n  create -> %s\n' "$query"
+    elif [[ -n "$invalid_hint" ]]; then
+      tty_printf '\n  %s\n' "$invalid_hint"
+    fi
+    tty_printf '\n'
+
+    key="$(read_key)" || return 0
+    case "$key" in
+      ''|$'\n'|$'\r')
+        if [[ -n "$query" && $FILTER_EXACT_MATCH -eq 1 ]]; then
+          wsm_cmd attach "$query"
+          return 0
+        elif (( can_create == 1 )); then
+          wsm_cmd create "$query"
+          return 0
+        fi
+        ;;
+      $'\e')
+        if [[ -n "$query" ]]; then
+          query=""
+        else
+          return 0
+        fi
+        ;;
+      $'\177'|$'\010') [[ -n "$query" ]] && query="${query%?}" ;;
+      $'\e['*) ;;
+      [[:print:]]) query+="$key" ;;
+    esac
+  done
 }
 
 first_flow() {
   if [[ -z "$CURRENT_SESSION" ]]; then
-    printf '\nno current session for first\n'
+    tty_printf '\nno current session for first\n'
     pause
     return 1
   fi
@@ -327,7 +368,7 @@ first_flow() {
 
 last_flow() {
   if [[ -z "$CURRENT_SESSION" ]]; then
-    printf '\nno current session for last\n'
+    tty_printf '\nno current session for last\n'
     pause
     return 1
   fi
@@ -336,7 +377,7 @@ last_flow() {
 
 next_flow() {
   if [[ -z "$CURRENT_SESSION" ]]; then
-    printf '\nno current session for next\n'
+    tty_printf '\nno current session for next\n'
     pause
     return 1
   fi
@@ -345,7 +386,7 @@ next_flow() {
 
 prev_flow() {
   if [[ -z "$CURRENT_SESSION" ]]; then
-    printf '\nno current session for prev\n'
+    tty_printf '\nno current session for prev\n'
     pause
     return 1
   fi
@@ -354,7 +395,7 @@ prev_flow() {
 
 detach_flow() {
   if [[ -z "$CURRENT_SESSION" ]]; then
-    printf '\nno current session to detach\n'
+    tty_printf '\nno current session to detach\n'
     pause
     return 1
   fi
@@ -363,31 +404,18 @@ detach_flow() {
 
 list_flow() {
   render_header
-  printf '%s\n' 'LIST'
-  printf '%s\n\n' '----'
-  if ! list_ids; then
-    printf '%s\n' 'no sessions found'
+  tty_printf '%s\n' 'LIST'
+  tty_printf '%s\n\n' '----'
+  if ! list_ids > /dev/tty; then
+    tty_printf '%s\n' 'no sessions found'
   fi
-  printf '\n'
-  pause
-}
-
-current_flow() {
-  render_header
-  printf '%s\n' 'CURRENT'
-  printf '%s\n\n' '-------'
-  if [[ -n "$CURRENT_SESSION" ]]; then
-    printf '%s\n' "$CURRENT_SESSION"
-  else
-    printf 'no current session\n'
-  fi
-  printf '\n'
+  tty_printf '\n'
   pause
 }
 
 in_flow() {
   if [[ -z "$CURRENT_SESSION" ]]; then
-    printf '\nno current session for in\n'
+    tty_printf '\nno current session for in\n'
     pause
     return 1
   fi
@@ -396,7 +424,7 @@ in_flow() {
 
 out_flow() {
   if [[ -z "$CURRENT_SESSION" ]]; then
-    printf '\nno current session for out\n'
+    tty_printf '\nno current session for out\n'
     pause
     return 1
   fi
@@ -405,17 +433,8 @@ out_flow() {
 
 help_flow() {
   render_header
-  wsm_cmd help
-  printf '\n'
-  pause
-}
-
-root_flow() {
-  render_header
-  printf '%s\n' 'ROOT'
-  printf '%s\n\n' '----'
-  wsm_cmd root
-  printf '\n'
+  wsm_cmd help > /dev/tty
+  tty_printf '\n'
   pause
 }
 
@@ -425,16 +444,24 @@ main_loop() {
     refresh_context
     render_header
     render_menu
-        printf 'choice> '
+    tty_printf 'choice> '
     choice="$(read_key)" || exit 0
-    printf '\n'
+    tty_printf '\n'
 
     case "$choice" in
       $'\e')
         exit 0
         ;;
-      [Aa]) attach_flow; exit $? ;;
-      [Cc]) create_flow; exit $? ;;
+      [Aa])
+        attach_flow
+        rc=$?
+        (( rc != 0 )) && exit "$rc"
+        ;;
+      [Cc])
+        create_flow
+        rc=$?
+        (( rc != 0 )) && exit "$rc"
+        ;;
       [Ff]) first_flow; exit $? ;;
       [Ll]) last_flow; exit $? ;;
       [Nn]) next_flow; exit $? ;;
@@ -442,20 +469,13 @@ main_loop() {
       [Ii]) in_flow; exit $? ;;
       [Oo]) out_flow; exit $? ;;
       [Dd]) detach_flow; exit $? ;;
-      [Uu]) current_flow ;;
       [Ss]) list_flow ;;
-      [Rr]) root_flow ;;
       [HhMm]) help_flow ;;
       [Qq]) exit 0 ;;
       '') ;;
-      *)
-        printf '\nunknown choice: %s\n' "$choice"
-        pause
-        ;;
+      *) ;;
     esac
   done
 }
 
 main_loop
-
-
