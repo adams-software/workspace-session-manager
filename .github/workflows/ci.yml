@@ -1,0 +1,28 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v1
+        with:
+          version: 0.14.0
+
+      - name: Build
+        run: zig build
+
+      - name: Test
+        run: zig build test
+
+      - name: Shell syntax check
+        run: |
+          find dsm/scripts wsm/scripts scripts -type f \( -name '*.sh' -o -name 'dsm' -o -name 'wsm' -o -name 'wsm_menu' \) -print0 | \
+            xargs -0 -n1 bash -n

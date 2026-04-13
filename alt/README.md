@@ -1,8 +1,22 @@
 # alt
 
-`alt` is an experimental alt-screen / launcher-oriented tool in this repository.
+`alt` is a PTY switcher in this repository.
 
-It is currently a spike-level package: useful enough to keep in-repo, but not yet presented as a stable surface.
+Use it when you want to switch between a primary side and an alternate side behind a local hotkey.
+
+## Quick usage
+
+See the full command surface:
+
+```bash
+alt --help
+```
+
+Run a primary shell with a secondary shell behind the hotkey:
+
+```bash
+alt --run /bin/bash --signal-2 TERM -- vpty -- bash
+```
 
 ## What lives here
 
@@ -11,17 +25,11 @@ It is currently a spike-level package: useful enough to keep in-repo, but not ye
 
 ## Role in the repo
 
-`alt` is intentionally separate from the main `msr` and `vpty` paths so it can evolve without forcing premature structure on the more established packages.
+`alt` is an operator-facing PTY switcher layered on top of the main runtime and terminal stack.
 
 ## Current status
 
-This package is early.
-
-Expect:
-
-- behavior changes
-- code movement
-- possible redesign as its role becomes clearer
+This package is part of the intended tool suite and is still receiving UX and behavior refinement.
 
 ## Developer notes
 
@@ -36,9 +44,3 @@ The `alt` binary is emitted to:
 ```text
 zig-out/bin/alt
 ```
-
-## Open-source posture
-
-If this repo is published soon, `alt` should be described as experimental.
-
-That keeps expectations honest while still making the work visible.

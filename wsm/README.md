@@ -2,7 +2,33 @@
 
 `wsm` is the workspace session manager layer in this repository.
 
-It provides workspace-wide naming, lookup, and navigation for `msr` sessions across a directory tree.
+If you are using the suite as an operator, this is the best place to start.
+
+## Quick usage
+
+See the full command surface:
+
+```bash
+wsm --help
+```
+
+Create and attach to a workspace session:
+
+```bash
+wsm create -a api/dev -- bash
+```
+
+Reattach later:
+
+```bash
+wsm attach api/dev
+```
+
+Open the interactive menu:
+
+```bash
+wsm menu
+```
 
 ## What lives here
 
@@ -39,7 +65,3 @@ source shared/scripts/dev_env.sh
 ```
 
 That puts repo-local binaries and scripts on `PATH`.
-
-## Open-source posture
-
-If this repo is published, `wsm` should be described as the ergonomic workspace-level operator surface rather than a low-level runtime package.

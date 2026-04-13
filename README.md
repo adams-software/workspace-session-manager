@@ -1,37 +1,91 @@
-# msr
+# Workspace Session Manager
 
-`msr` is a small family of tools for creating, naming, navigating, and rendering interactive session-backed processes.
+Workspace Session Manager is a Linux-first tool suite for creating, naming, navigating, and rendering interactive session-backed processes.
 
-The repo is intentionally split into vertical packages that can evolve at different speeds without hiding how the stack fits together.
+If you just want to start using it, start with `wsm`.
+
+## Install
+
+Build a local distribution bundle:
+
+```bash
+./scripts/build_dist.sh
+```
+
+That produces:
+
+```text
+dist/linux-x86_64/
+dist/workspace-session-manager-linux-x86_64.tar.gz
+```
+
+Install from the unpacked bundle:
+
+```bash
+sh install.sh
+```
+
+By default this installs commands into `~/.local/bin`.
+
+## Quick usage
+
+Start with the workspace-level command:
+
+```bash
+wsm --help
+```
+
+Create and attach to a workspace session:
+
+```bash
+wsm create -a api/dev -- bash
+```
+
+Reattach later:
+
+```bash
+wsm attach api/dev
+```
+
+Open the workspace menu:
+
+```bash
+wsm menu
+```
+
+If you want the lower-level tools directly:
+
+```bash
+msr --help
+dsm --help
+vpty --help
+alt --help
+```
 
 ## Package map
 
-### `msr/`
-Core session runtime.
+### `wsm/`
+Workspace session manager.
 
-Responsible for:
-- creating sessions
-- attaching and detaching
-- status / wait / terminate operations
-- the core Zig runtime and CLI surface
+The main user-facing entrypoint for workspace-wide naming, lookup, and navigation.
 
 ### `dsm/`
 Directory session manager.
 
 Adds directory-local naming and lexical navigation on top of `msr`.
 
-### `wsm/`
-Workspace session manager.
+### `msr/`
+Core session runtime.
 
-Adds workspace-wide naming, lookup, and navigation across a directory tree.
+Responsible for creating sessions, attaching and detaching, and core status / wait / terminate operations.
 
 ### `vpty/`
 Terminal integration and rendering layer.
 
-Holds the PTY / terminal-state / rendering work needed for interactive interactive sessions.
+Holds the PTY / terminal-state / rendering work needed for interactive sessions.
 
 ### `alt/`
-Experimental PTY switcher.
+PTY switcher.
 
 Runs a primary side and an alternate side on separate PTYs behind a local hotkey.
 
@@ -45,20 +99,19 @@ Low-level PTY / stream / tty helpers shared by runtime-facing packages.
 
 A practical mental model is:
 
+- `wsm` is the main workspace-facing command
+- `dsm` handles local directory-scoped naming and navigation
 - `msr` is the core session runtime
-- `dsm` adds local naming and navigation
-- `wsm` adds workspace-wide naming and navigation
-- `vpty` makes interactive terminal sessions render well
-- `alt` is an experimental operator-facing switcher layered on top
+- `vpty` handles terminal modeling and redraw behavior
+- `alt` switches between PTY-backed sides with a configurable hotkey
 
-If you are trying to understand the repo quickly, start with:
+If you are trying to understand the repo in more depth, continue with:
 
-1. this root README
+1. `wsm/README.md`
 2. `msr/README.md`
 3. `dsm/README.md`
-4. `wsm/README.md`
-5. `vpty/README.md`
-6. `alt/README.md`
+4. `vpty/README.md`
+5. `alt/README.md`
 
 ## Current maturity
 
@@ -66,24 +119,19 @@ This repo is active engineering work, not a frozen product surface.
 
 A practical current read is:
 
-- `msr` — core runtime / conceptual center
-- `dsm` and `wsm` — operator convenience layers
-- `vpty` — implementation-heavy terminal subsystem under active refinement
-- `alt` — experimental but usable
+- `wsm` and `dsm` are the ergonomic operator-facing layers
+- `msr` is the runtime foundation
+- `vpty` is an implementation-heavy terminal subsystem under active refinement
+- `alt` is part of the intended tool suite and still evolving
 
 Expect some churn while the public surface settles.
 
-## Build
+## Build from source
 
-Build from the repo root:
+From the repo root:
 
 ```bash
 zig build
-```
-
-Run tests from the repo root:
-
-```bash
 zig build test
 ```
 
@@ -108,14 +156,3 @@ source shared/scripts/dev_env.sh
 ```
 
 That adds repo-local binaries and scripts to `PATH` for the current shell only.
-
-## Open-source posture
-
-The repo is being prepared for a cleaner public GitHub release.
-
-The current approach should be:
-
-- publish the real structure honestly
-- keep experimental areas clearly labeled
-- provide practical build/test/docs first
-- harden distribution and release automation later

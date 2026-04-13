@@ -1,8 +1,28 @@
 # vpty
 
-`vpty` is the virtual-terminal and rendering side of the repository.
+`vpty` is the virtual-terminal and rendering layer in this repository.
 
-It exists to make interactive session processes render and behave correctly when driven through the `msr` runtime.
+Use it when you want a terminal-aware wrapper around an interactive command.
+
+## Quick usage
+
+See the full command surface:
+
+```bash
+vpty --help
+```
+
+Run an interactive shell through `vpty`:
+
+```bash
+vpty -- bash
+```
+
+Run a TUI directly:
+
+```bash
+vpty -- nvim
+```
 
 ## What lives here
 
@@ -12,7 +32,7 @@ It exists to make interactive session processes render and behave correctly when
 
 ## Role in the repo
 
-`vpty` is a support package for interactive session UX.
+`vpty` is the terminal-heavy support package for interactive session UX.
 
 It is where terminal-specific complexity lives, including:
 
@@ -23,9 +43,7 @@ It is where terminal-specific complexity lives, including:
 
 ## Current status
 
-This package is actively evolving and is more experimental than the core `msr` runtime.
-
-In particular, terminal rendering behavior is still under active investigation and refinement.
+This package is still under active refinement, especially around terminal redraw and interaction behavior.
 
 ## Developer notes
 
@@ -41,12 +59,4 @@ The `vpty` binary is emitted to:
 zig-out/bin/vpty
 ```
 
-A number of the docs in `docs/specs/` are working specs and design notes rather than finished public docs.
-
-## Open-source posture
-
-If this repo is published, `vpty` should be framed as:
-
-- the terminal integration layer
-- an implementation-heavy package
-- an area where some rough edges and ongoing design work are expected
+A number of the docs in `docs/` are still closer to working notes than polished public docs.
