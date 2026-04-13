@@ -1,8 +1,8 @@
-# msr repo
+# msr
 
-This repository contains a small family of tools for creating, naming, navigating, and rendering interactive session-backed processes.
+`msr` is a small family of tools for creating, naming, navigating, and rendering interactive session-backed processes.
 
-It is organized as a set of vertical packages that live in one repo.
+The repo is intentionally split into vertical packages that can evolve at different speeds without hiding how the stack fits together.
 
 ## Package map
 
@@ -11,9 +11,9 @@ Core session runtime.
 
 Responsible for:
 - creating sessions
-- attaching/detaching
+- attaching and detaching
 - status / wait / terminate operations
-- core Zig implementation and CLI surface
+- the core Zig runtime and CLI surface
 
 ### `dsm/`
 Directory session manager.
@@ -28,27 +28,50 @@ Adds workspace-wide naming, lookup, and navigation across a directory tree.
 ### `vpty/`
 Terminal integration and rendering layer.
 
-Holds the PTY / terminal-state / rendering work needed for interactive sessions.
+Holds the PTY / terminal-state / rendering work needed for interactive interactive sessions.
 
 ### `alt/`
-Experimental alt-screen / launcher-oriented binary.
+Experimental PTY switcher.
 
-This package is intentionally more experimental than the main runtime path.
+Runs a primary side and an alternate side on separate PTYs behind a local hotkey.
 
 ### `shared/`
 Small cross-cutting package for truly shared code and scripts.
 
-Currently this is intentionally narrow.
+### `ptyio/`
+Low-level PTY / stream / tty helpers shared by runtime-facing packages.
 
-## Repo layout
+## How the pieces fit together
 
-Each package owns its own local structure where relevant:
+A practical mental model is:
 
-- `src/` — implementation
-- `scripts/` — operator/dev/smoke scripts
-- `docs/` — package-local docs and specs
+- `msr` is the core session runtime
+- `dsm` adds local naming and navigation
+- `wsm` adds workspace-wide naming and navigation
+- `vpty` makes interactive terminal sessions render well
+- `alt` is an experimental operator-facing switcher layered on top
 
-The repo uses a **vertical slice** layout rather than grouping everything by file type at the top level.
+If you are trying to understand the repo quickly, start with:
+
+1. this root README
+2. `msr/README.md`
+3. `dsm/README.md`
+4. `wsm/README.md`
+5. `vpty/README.md`
+6. `alt/README.md`
+
+## Current maturity
+
+This repo is active engineering work, not a frozen product surface.
+
+A practical current read is:
+
+- `msr` — core runtime / conceptual center
+- `dsm` and `wsm` — operator convenience layers
+- `vpty` — implementation-heavy terminal subsystem under active refinement
+- `alt` — experimental but usable
+
+Expect some churn while the public surface settles.
 
 ## Build
 
@@ -56,6 +79,12 @@ Build from the repo root:
 
 ```bash
 zig build
+```
+
+Run tests from the repo root:
+
+```bash
+zig build test
 ```
 
 Artifacts are emitted to:
@@ -78,29 +107,15 @@ To expose repo-local binaries and helper scripts in your shell:
 source shared/scripts/dev_env.sh
 ```
 
-That adds the repo-local binary/script paths to `PATH` for the current shell only.
+That adds repo-local binaries and scripts to `PATH` for the current shell only.
 
-## Current maturity
+## Open-source posture
 
-This repo is still under active development.
+The repo is being prepared for a cleaner public GitHub release.
 
-A practical way to think about current maturity is:
+The current approach should be:
 
-- `msr` — core runtime / conceptual center
-- `dsm`, `wsm` — operator convenience layers
-- `vpty` — active terminal/rendering subsystem
-- `alt` — experimental
-
-Expect some churn while the public surface settles.
-
-## Notes for open source
-
-This repo is being groomed toward a cleaner public GitHub release, but some areas are still closer to active engineering workspace than polished product docs.
-
-If you are exploring the repo for the first time, start with:
-
-- this root README
-- `msr/README.md`
-- `dsm/README.md`
-- `wsm/README.md`
-- `vpty/README.md`
+- publish the real structure honestly
+- keep experimental areas clearly labeled
+- provide practical build/test/docs first
+- harden distribution and release automation later

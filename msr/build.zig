@@ -109,21 +109,21 @@ pub fn build(b: *std.Build) void {
     attach_bridge_mod.addImport("wake_pipe", wake_pipe_mod);
 
     const argv_parse_mod = b.addModule("argv_parse", .{
-        .root_source_file = b.path("../msr1/src/argv_parse.zig"),
+        .root_source_file = b.path("../shared/src/cli/argv_parse.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
 
     const command_spec_mod = b.addModule("command_spec", .{
-        .root_source_file = b.path("../msr1/src/command_spec.zig"),
+        .root_source_file = b.path("../msr/src/cli/command_spec.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
 
     const cli_parse_mod = b.addModule("cli_parse", .{
-        .root_source_file = b.path("../msr1/src/cli_parse.zig"),
+        .root_source_file = b.path("../msr/src/cli/cli_parse.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
