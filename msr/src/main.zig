@@ -21,25 +21,25 @@ fn err(comptime fmt: []const u8, args: anytype) void {
 
 fn usageLineForKind(kind: cli_parse.CommandKind) []const u8 {
     return switch (kind) {
-        .help => "  msr2 help\n",
-        .current => "  msr2 current\n",
-        .create => "  msr2 create [-a|--attach] <path> [-- <cmd...>]\n",
-        .attach => "  msr2 attach [-f|--force] <path>\n",
-        .detach => "  msr2 detach\n",
-        .resize => "  msr2 resize [-f|--force] <path> <cols> <rows>\n",
-        .terminate => "  msr2 terminate [-f|--force] <path> [TERM|INT|KILL]\n",
-        .wait => "  msr2 wait <path>\n",
-        .status => "  msr2 status <path>\n",
-        .exists => "  msr2 exists <path>\n",
+        .help => "  msr help\n",
+        .current => "  msr current\n",
+        .create => "  msr create [-a|--attach] <path> [-- <cmd...>]\n",
+        .attach => "  msr attach [-f|--force] <path>\n",
+        .detach => "  msr detach\n",
+        .resize => "  msr resize [-f|--force] <path> <cols> <rows>\n",
+        .terminate => "  msr terminate [-f|--force] <path> [TERM|INT|KILL]\n",
+        .wait => "  msr wait <path>\n",
+        .status => "  msr status <path>\n",
+        .exists => "  msr exists <path>\n",
     };
 }
 
 fn usage() void {
     out(
         "NAME\n" ++
-            "  msr2 - minimal session runtime for persistent PTY-backed sessions\n\n" ++
+            "  msr - minimal session runtime for persistent PTY-backed sessions\n\n" ++
             "DESCRIPTION\n" ++
-            "  msr2 runs a command inside a persistent PTY-backed session identified by\n" ++
+            "  msr runs a command inside a persistent PTY-backed session identified by\n" ++
             "  a socket path. Sessions can be created, attached, detached, and\n" ++
             "  re-attached.\n\n" ++
             "  A current session can be selected with --session=<path> or\n" ++
@@ -72,8 +72,8 @@ fn usage() void {
             "  --session=<path> or --session <path> overrides MSR_SESSION\n\n" ++
             "NESTED MODE\n" ++
             "  When a current session is selected, only these commands change:\n" ++
-            "    msr2 a <target>   route attach through the current session owner\n" ++
-            "    msr2 d            detach the current session\n\n" ++
+            "    msr a <target>   route attach through the current session owner\n" ++
+            "    msr d            detach the current session\n\n" ++
             "  All other commands keep their normal explicit-argument behavior.\n",
         .{},
     );
@@ -81,7 +81,7 @@ fn usage() void {
 
 fn usageCreate() void { out("{s}", .{usageLineForKind(.create)}); }
 fn usageAttachDirect() void { out("{s}", .{usageLineForKind(.attach)}); }
-fn usageAttachNested() void { out("usage: msr2 a <target>\n", .{}); }
+fn usageAttachNested() void { out("usage: msr a <target>\n", .{}); }
 fn usageDetach() void { out("{s}", .{usageLineForKind(.detach)}); }
 fn usageCurrent() void { out("{s}", .{usageLineForKind(.current)}); }
 fn usageResize() void { out("{s}", .{usageLineForKind(.resize)}); }
