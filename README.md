@@ -6,6 +6,18 @@ If you just want to start using it, start with `wsm`.
 
 ## Install
 
+### from GitHub release
+
+Once release assets are published, the intended install path is:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/adams-software/workspace-session-manager/main/scripts/install-release.sh | sh
+```
+
+That downloads the latest Linux x86_64 release bundle and runs its installer.
+
+### from a local checkout
+
 Build a local distribution bundle:
 
 ```bash
