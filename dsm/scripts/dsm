@@ -29,6 +29,26 @@ ALT_BIN="$BIN_DIR/alt"
 err() { printf '%s\n' "$*" >&2; }
 out() { printf '%s\n' "$*"; }
 
+require_runtime_stack() {
+  local tmp status
+  tmp="$(mktemp "${TMPDIR:-/tmp}/dsm-runtime-check.XXXXXX")"
+  if ! "$VPTY_BIN" --help >/dev/null 2>"$tmp"; then
+    err "dsm: terminal runtime preflight failed"
+    if grep -q 'libvterm.so.0' "$tmp"; then
+      err "dsm: missing libvterm runtime library (install package: libvterm0 on Debian/Ubuntu/WSL)"
+    fi
+    sed 's/^/dsm: vpty: /' "$tmp" >&2 || true
+    rm -f "$tmp"
+    exit 1
+  fi
+  rm -f "$tmp"
+
+  if ! "$ALT_BIN" --help >/dev/null 2>&1; then
+    err "dsm: alternate PTY runtime is not runnable: $ALT_BIN"
+    exit 1
+  fi
+}
+
 usage() {
   cat <<'EOF2'
 NAME
@@ -172,6 +192,7 @@ create_session() {
   local sock="$1"
   shift || true
   local -a launch_stack
+  require_runtime_stack
   mapfile -t launch_stack < <(launch_stack_argv)
 
   if [[ $# -gt 0 ]]; then
