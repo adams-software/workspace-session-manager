@@ -277,7 +277,7 @@ attach_flow() {
       ''|$'\n'|$'\r')
         if (( ${#FILTER_MATCHES[@]} > 0 )); then
           wsm_cmd attach "${FILTER_MATCHES[$selection]}"
-          return 0
+          return 10
         fi
         ;;
       $'\e')
@@ -337,10 +337,10 @@ create_flow() {
       ''|$'\n'|$'\r')
         if [[ -n "$query" && $FILTER_EXACT_MATCH -eq 1 ]]; then
           wsm_cmd attach "$query"
-          return 0
+          return 10
         elif (( can_create == 1 )); then
           wsm_cmd create "$query"
-          return 0
+          return 10
         fi
         ;;
       $'\e')
@@ -455,12 +455,20 @@ main_loop() {
       [Aa])
         attach_flow
         rc=$?
-        (( rc != 0 )) && exit "$rc"
+        if (( rc == 10 )); then
+          exit 0
+        elif (( rc != 0 )); then
+          exit "$rc"
+        fi
         ;;
       [Cc])
         create_flow
         rc=$?
-        (( rc != 0 )) && exit "$rc"
+        if (( rc == 10 )); then
+          exit 0
+        elif (( rc != 0 )); then
+          exit "$rc"
+        fi
         ;;
       [Ff]) first_flow; exit $? ;;
       [Ll]) last_flow; exit $? ;;
