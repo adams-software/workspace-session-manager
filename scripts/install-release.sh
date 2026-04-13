@@ -4,7 +4,6 @@ set -eu
 REPO_SLUG=${REPO_SLUG:-adams-software/workspace-session-manager}
 VERSION=${VERSION:-latest}
 ASSET_NAME=${ASSET_NAME:-workspace-session-manager-linux-x86_64.tar.gz}
-AUTO_INSTALL_DEPS=${AUTO_INSTALL_DEPS:-1}
 
 TMPDIR_BASE=${TMPDIR:-/tmp}
 WORKDIR=$(mktemp -d "$TMPDIR_BASE/wsm-install.XXXXXX")
@@ -44,32 +43,13 @@ install_runtime_deps_if_possible() {
     return 0
   fi
 
-  if [ "$AUTO_INSTALL_DEPS" != "1" ]; then
-    warn "install-release.sh: libvterm.so.0 not found"
-    warn "install-release.sh: install package 'libvterm0' before using wsm/dsm/vpty on Debian/Ubuntu/WSL"
-    return 0
-  fi
-
+  warn "install-release.sh: missing runtime dependency libvterm.so.0"
   if need_cmd apt-get; then
-    if [ "$(id -u)" -eq 0 ]; then
-      note "install-release.sh: installing runtime dependency libvterm0 via apt-get"
-      apt-get update
-      apt-get install -y libvterm0
-      return 0
-    elif need_cmd sudo; then
-      note "install-release.sh: installing runtime dependency libvterm0 via sudo apt-get"
-      sudo apt-get update
-      sudo apt-get install -y libvterm0
-      return 0
-    else
-      warn "install-release.sh: libvterm.so.0 not found and sudo is unavailable"
-      warn "install-release.sh: please run: sudo apt-get update && sudo apt-get install -y libvterm0"
-      return 0
-    fi
+    warn "install-release.sh: on Debian/Ubuntu/WSL, run: sudo apt-get update && sudo apt-get install -y libvterm0"
+  else
+    warn "install-release.sh: install your distro's libvterm runtime package, then re-run this installer"
   fi
-
-  warn "install-release.sh: libvterm.so.0 not found"
-  warn "install-release.sh: install your distro's libvterm runtime package before using wsm/dsm/vpty"
+  exit 1
 }
 
 case "$VERSION" in

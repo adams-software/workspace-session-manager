@@ -37,8 +37,6 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 PREFIX=${PREFIX:-$HOME/.local}
 BIN_DEST=$PREFIX/bin
 COMP_DEST=$PREFIX/share/bash-completion/completions
-AUTO_INSTALL_DEPS=${AUTO_INSTALL_DEPS:-1}
-
 need_cmd() {
   command -v "$1" >/dev/null 2>&1
 }
@@ -70,32 +68,13 @@ install_runtime_deps_if_possible() {
     return 0
   fi
 
-  if [ "$AUTO_INSTALL_DEPS" != "1" ]; then
-    warn "install.sh: libvterm.so.0 not found"
-    warn "install.sh: install package 'libvterm0' before using wsm/dsm/vpty on Debian/Ubuntu/WSL"
-    return 0
-  fi
-
+  warn "install.sh: missing runtime dependency libvterm.so.0"
   if need_cmd apt-get; then
-    if [ "$(id -u)" -eq 0 ]; then
-      note "install.sh: installing runtime dependency libvterm0 via apt-get"
-      apt-get update
-      apt-get install -y libvterm0
-      return 0
-    elif need_cmd sudo; then
-      note "install.sh: installing runtime dependency libvterm0 via sudo apt-get"
-      sudo apt-get update
-      sudo apt-get install -y libvterm0
-      return 0
-    else
-      warn "install.sh: libvterm.so.0 not found and sudo is unavailable"
-      warn "install.sh: please run: sudo apt-get update && sudo apt-get install -y libvterm0"
-      return 0
-    fi
+    warn "install.sh: on Debian/Ubuntu/WSL, run: sudo apt-get update && sudo apt-get install -y libvterm0"
+  else
+    warn "install.sh: install your distro's libvterm runtime package, then re-run this installer"
   fi
-
-  warn "install.sh: libvterm.so.0 not found"
-  warn "install.sh: install your distro's libvterm runtime package before using wsm/dsm/vpty"
+  exit 1
 }
 
 install_runtime_deps_if_possible
