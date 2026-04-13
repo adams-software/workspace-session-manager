@@ -21,6 +21,11 @@ jobs:
         with:
           version: 0.14.0
 
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libvterm-dev
+
       - name: Build dist bundle
         run: ./scripts/build_dist.sh
 
