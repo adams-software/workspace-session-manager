@@ -37,44 +37,24 @@ fn usageLineForKind(kind: cli_parse.CommandKind) []const u8 {
 fn usage() void {
     out(
         "NAME\n" ++
-            "  msr - minimal session runtime for persistent PTY-backed sessions\n\n" ++
-            "DESCRIPTION\n" ++
-            "  msr runs a command inside a persistent PTY-backed session identified by\n" ++
-            "  a socket path. Sessions can be created, attached, detached, and\n" ++
-            "  re-attached.\n\n" ++
-            "  A current session can be selected with --session=<path> or\n" ++
-            "  MSR_SESSION. In that context, attach and detach operate on the\n" ++
-            "  current session owner. All other commands keep their normal\n" ++
-            "  explicit-argument behavior.\n\n" ++
-            "USAGE\n",
-        .{},
-    );
-    out("{s}", .{usageLineForKind(.create)});
-    out("{s}", .{usageLineForKind(.attach)});
-    out("{s}", .{usageLineForKind(.detach)});
-    out("{s}", .{usageLineForKind(.current)});
-    out("{s}", .{usageLineForKind(.resize)});
-    out("{s}", .{usageLineForKind(.terminate)});
-    out("{s}", .{usageLineForKind(.wait)});
-    out("{s}", .{usageLineForKind(.status)});
-    out("{s}", .{usageLineForKind(.exists)});
-
-    out("\nCOMMANDS\n", .{});
-    for (command_spec.commands) |cmd| {
-        if (cmd.id == .help) continue;
-        const line = command_spec.aliasSummary(std.heap.page_allocator, &cmd) catch continue;
-        defer std.heap.page_allocator.free(line);
-        out("{s}", .{line});
-    }
-
-    out(
-        "\nCURRENT SESSION\n" ++
-            "  --session=<path> or --session <path> overrides MSR_SESSION\n\n" ++
-            "NESTED MODE\n" ++
-            "  When a current session is selected, only these commands change:\n" ++
-            "    msr a <target>   route attach through the current session owner\n" ++
-            "    msr d            detach the current session\n\n" ++
-            "  All other commands keep their normal explicit-argument behavior.\n",
+            "  msr - minimal session runtime\n\n" ++
+            "USAGE\n" ++
+            "  [MSR_SESSION=<path>] msr [--session <path>] <command> [args]\n\n" ++
+            "COMMANDS\n" ++
+            "  create [-a|--attach] <path> [-- <cmd...>]  create a session\n" ++
+            "  attach [-f|--force] <path>                 attach to a session\n" ++
+            "  detach                                     detach the current session\n" ++
+            "  current                                    print the current session path\n" ++
+            "  resize [-f|--force] <path> <cols> <rows>   resize a session\n" ++
+            "  terminate [-f|--force] <path> [signal]     send TERM, INT, or KILL\n" ++
+            "  wait <path>                                wait for session exit\n" ++
+            "  status <path>                              print session status\n" ++
+            "  exists <path>                              test whether a session is reachable\n" ++
+            "  help                                       show this help\n\n" ++
+            "CONTEXT\n" ++
+            "  --session=<path> or --session <path> overrides MSR_SESSION.\n" ++
+            "  In current-session mode, attach and detach route through the current\n" ++
+            "  session owner; other commands keep explicit-argument behavior.\n",
         .{},
     );
 }
@@ -107,13 +87,8 @@ fn usageForCommandKind(kind: cli_parse.CommandKind) void {
 
 fn nestedUsage(current_session: []const u8) void {
     out(
-        "NESTED MODE\n" ++
-            "  current session: {s}\n\n" ++
-            "  In this context:\n" ++
-            "    a <target>      routes through the current session owner\n" ++
-            "    d               detaches the current session\n" ++
-            "    current         prints the current session path\n" ++
-            "    all other commands keep their normal explicit-argument behavior\n\n",
+        "SESSION\n" ++
+            "  {s}\n\n",
         .{current_session},
     );
     usage();

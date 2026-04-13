@@ -6,9 +6,10 @@ If you are using the suite as an operator, this is the best place to start.
 
 ## Quick usage
 
-See the full command surface:
+Set a workspace root first, then see the command surface:
 
 ```bash
+export WSM_ROOT=~/code
 wsm --help
 ```
 
@@ -29,6 +30,9 @@ Open the interactive menu:
 ```bash
 wsm menu
 ```
+
+`wsm` now expects an explicit workspace root via `WSM_ROOT` or `--root`.
+It should not silently treat the current directory as the workspace root.
 
 ## What lives here
 

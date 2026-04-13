@@ -12,6 +12,12 @@ See the full command surface:
 msr --help
 ```
 
+Or for an explicit current-session context:
+
+```bash
+MSR_SESSION=/tmp/demo.msr msr --help
+```
+
 Create and attach to a session:
 
 ```bash

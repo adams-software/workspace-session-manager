@@ -152,12 +152,18 @@ render_header() {
 render_menu() {
   printf '[a] attach\n'
   printf '[c] create\n'
+  printf '[f] first\n'
+  printf '[l] last\n'
   printf '[n] next\n'
   printf '[p] prev\n'
+  printf '[i] in\n'
+  printf '[o] out\n'
   printf '[d] detach\n'
-  printf '[s] status\n'
-  printf '[l] list\n'
-  printf '[r] refresh\n'
+  printf '[u] current\n'
+  printf '[s] list\n'
+  printf '[r] root / refresh\n'
+  printf '[h] help\n'
+  printf '[m] menu\n'
   printf '[q] quit\n'
   printf '\n'
 }
@@ -310,6 +316,24 @@ create_flow() {
   wsm_cmd create "$target"
 }
 
+first_flow() {
+  if [[ -z "$CURRENT_SESSION" ]]; then
+    printf '\nno current session for first\n'
+    pause
+    return 1
+  fi
+  wsm_cmd first
+}
+
+last_flow() {
+  if [[ -z "$CURRENT_SESSION" ]]; then
+    printf '\nno current session for last\n'
+    pause
+    return 1
+  fi
+  wsm_cmd last
+}
+
 next_flow() {
   if [[ -z "$CURRENT_SESSION" ]]; then
     printf '\nno current session for next\n'
@@ -337,25 +361,6 @@ detach_flow() {
   wsm_cmd detach
 }
 
-status_flow() {
-  render_header
-  printf 'STATUS\n'
-  printf '%s\n\n' '----'
-
-  if [[ -n "$CURRENT_SESSION" ]]; then
-    if status_out="$(wsm_cmd status 2>&1)"; then
-      printf '%s\n' "$status_out"
-    else
-      printf '%s\n' "$status_out"
-    fi
-  else
-    printf 'no current session\n'
-  fi
-
-  printf '\n'
-  pause
-}
-
 list_flow() {
   render_header
   printf '%s\n' 'LIST'
@@ -363,6 +368,53 @@ list_flow() {
   if ! list_ids; then
     printf '%s\n' 'no sessions found'
   fi
+  printf '\n'
+  pause
+}
+
+current_flow() {
+  render_header
+  printf '%s\n' 'CURRENT'
+  printf '%s\n\n' '-------'
+  if [[ -n "$CURRENT_SESSION" ]]; then
+    printf '%s\n' "$CURRENT_SESSION"
+  else
+    printf 'no current session\n'
+  fi
+  printf '\n'
+  pause
+}
+
+in_flow() {
+  if [[ -z "$CURRENT_SESSION" ]]; then
+    printf '\nno current session for in\n'
+    pause
+    return 1
+  fi
+  wsm_cmd in
+}
+
+out_flow() {
+  if [[ -z "$CURRENT_SESSION" ]]; then
+    printf '\nno current session for out\n'
+    pause
+    return 1
+  fi
+  wsm_cmd out
+}
+
+help_flow() {
+  render_header
+  wsm_cmd help
+  printf '\n'
+  pause
+}
+
+root_flow() {
+  render_header
+  printf '%s\n' 'ROOT'
+  printf '%s\n\n' '----'
+  wsm_cmd root
   printf '\n'
   pause
 }
@@ -383,12 +435,17 @@ main_loop() {
         ;;
       [Aa]) attach_flow; exit $? ;;
       [Cc]) create_flow; exit $? ;;
+      [Ff]) first_flow; exit $? ;;
+      [Ll]) last_flow; exit $? ;;
       [Nn]) next_flow; exit $? ;;
       [Pp]) prev_flow; exit $? ;;
+      [Ii]) in_flow; exit $? ;;
+      [Oo]) out_flow; exit $? ;;
       [Dd]) detach_flow; exit $? ;;
-      [Ss]) status_flow ;;
-      [Ll]) list_flow ;;
-      [Rr]) ;;
+      [Uu]) current_flow ;;
+      [Ss]) list_flow ;;
+      [Rr]) root_flow ;;
+      [HhMm]) help_flow ;;
       [Qq]) exit 0 ;;
       '') ;;
       *)

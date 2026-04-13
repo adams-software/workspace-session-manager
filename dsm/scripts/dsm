@@ -16,6 +16,9 @@ SCRIPT_DIR="$(resolve_source_path)"
 REPO_ROOT="${MSR_REPO_ROOT:-$(cd -- "$SCRIPT_DIR/../.." && pwd)}"
 BIN_DIR="${MSR_BIN_DIR:-$REPO_ROOT/zig-out/bin}"
 MSR_BIN="$BIN_DIR/msr"
+VPTY_BIN="$BIN_DIR/vpty"
+ALT_BIN="$BIN_DIR/alt"
+WSM_MENU_BIN="$REPO_ROOT/wsm/scripts/wsm_menu"
 
 err() { printf '%s\n' "$*" >&2; }
 out() { printf '%s\n' "$*"; }
@@ -23,63 +26,38 @@ out() { printf '%s\n' "$*"; }
 usage() {
   cat <<'EOF2'
 NAME
-  dsm - directory session manager for ergonomic local msr session names
-
-DESCRIPTION
-  dsm wraps msr for multi-session use within a single directory.
-  It mirrors msr commands where practical, but uses literal session
-  names instead of socket paths.
-
-  Session names resolve to:
-    <directory>/<name>.msr
-
-  The effective directory is resolved from:
-    1. --cwd <path>
-    2. MSR_SESSION directory when inside a session
-    3. shell cwd
+  dsm - directory session manager
 
 USAGE
-  dsm create [-a|--attach] <name> [-- <cmd...>]
-  dsm attach <name>
-  dsm detach
-  dsm current
-  dsm first
-  dsm last
-  dsm prev
-  dsm next
-  dsm terminate [name] [TERM|INT|KILL|-f|--force]
-  dsm wait [name]
-  dsm status [name]
-  dsm exists [name]
-  dsm list
+  [MSR_SESSION=<path>] dsm [--cwd <path>] <command> [args]
 
 COMMANDS
-  c, create     create a session
-  a, attach     attach to a session by name; auto-force on direct attach; create+attach if missing
-  d, detach     detach the current session
-  current       print the current session name
-  f, first      attach to the first session in lexical order
-  l, last       attach to the last session in lexical order
-  p, prev       attach to the previous session in lexical order (wraps)
-  n, next       attach to the next session in lexical order (wraps)
-  terminate     send a signal to a session
-  wait          wait for session exit
-  status        print session state
-  exists        test whether a session socket is reachable
-  ls, list      list session names
+  c, create [-a|--attach] <name> [-- <cmd...>]  create a named local session
+  a, attach <name>                              attach to a named local session
+  d, detach                                     detach the current session
+  current                                       print the current session name
+  f, first | l, last | p, prev | n, next        lexical navigation within the directory
+  terminate [name] [signal]                     send TERM, INT, or KILL to a session
+  wait [name]                                   wait for session exit
+  s, status [name]                              print session status
+  e, exists [name]                              test whether a session is reachable
+  ls, list                                      list session names
+  help                                          show this help
 
-CURRENT SESSION
-  MSR_SESSION selects the current session context.
-  In that context, omitted [name] arguments resolve to the current session.
+DIRECTORY
+  dsm resolves names as <directory>/<name>.msr
 
-NESTED MODE
-  When a current session is selected, only these commands change:
-    dsm a <target>   attach to another named session from the current session
-    dsm d            detach the current session
-    dsm p            attach to the previous session in lexical order (wraps)
-    dsm n            attach to the next session in lexical order (wraps)
+  The effective directory comes from:
+    1. --cwd <path>
+    2. the current MSR_SESSION directory
+    3. the shell current directory
 
-  All other commands keep their normal explicit-argument behavior.
+CONTEXT
+  If MSR_SESSION is set, omitted [name] arguments resolve to the current session.
+  In-session navigation commands like attach/detach/prev/next operate in nested mode.
+
+HELP
+  Run `dsm` or `dsm --help` for this screen.
 EOF2
 }
 
@@ -87,16 +65,11 @@ nested_usage() {
   local current_name="$1"
   local current_sock="$2"
   cat <<EOF2
-NESTED MODE
-  current session: $current_sock
+SESSION
+  $current_name
 
-  In this context:
-    a <target> routes through the current session owner
-    d detaches the current session
-    current prints the current session name
-    p/prev attaches to the previous lexical session (wraps)
-    n/next attaches to the next lexical session (wraps)
-    all other commands keep their normal explicit-argument behavior
+SOCKET
+  $current_sock
 
 EOF2
   usage
@@ -179,6 +152,29 @@ require_current_context() {
   }
 }
 
+launch_stack_argv() {
+  local -a argv
+  argv=("$ALT_BIN")
+  if [[ -n "${WSM_MENU_KEY:-}" ]]; then
+    argv+=(--key "$WSM_MENU_KEY")
+  fi
+  argv+=(--run "$WSM_MENU_BIN" --signal-2 TERM -- "$VPTY_BIN" --)
+  printf '%s\n' "${argv[@]}"
+}
+
+create_session() {
+  local sock="$1"
+  shift || true
+  local -a launch_stack
+  mapfile -t launch_stack < <(launch_stack_argv)
+
+  if [[ $# -gt 0 ]]; then
+    env WSM_ROOT="${WSM_ROOT:-}" "$MSR_BIN" create -a "$sock" -- "${launch_stack[@]}" "$@"
+  else
+    env WSM_ROOT="${WSM_ROOT:-}" "$MSR_BIN" create -a "$sock" -- "${launch_stack[@]}" "$SHELL" -i
+  fi
+}
+
 attach_name() {
   local name="$1"
   local sock nested=0
@@ -193,7 +189,7 @@ attach_name() {
       "$MSR_BIN" attach "$sock" --force
     fi
   else
-    env WSM_ROOT="${WSM_ROOT:-}" "$MSR_BIN" create -a "$sock"
+    create_session "$sock"
   fi
 }
 
@@ -281,23 +277,22 @@ case "$cmd" in
     name="$(require_name "${1:-}")"
     shift || true
     [[ "$name" != *"/"* ]] || { err "dsm: session name must not contain '/'"; exit 1; }
+    sock="$(sock_for "$name")"
+
+    if [[ $attach_now -ne 1 ]]; then
+      err "dsm: create currently requires -a|--attach so the managed stack starts attached"
+      exit 1
+    fi
+
     if [[ ${1:-} == -- ]]; then
       shift || true
       if [[ $# -lt 1 ]]; then
         err "dsm: expected command after --"
         exit 1
       fi
-      if [[ $attach_now -eq 1 ]]; then
-        env WSM_ROOT="${WSM_ROOT:-}" "$MSR_BIN" create -a "$(sock_for "$name")" -- "$@"
-      else
-        env WSM_ROOT="${WSM_ROOT:-}" "$MSR_BIN" create "$(sock_for "$name")" -- "$@"
-      fi
+      create_session "$sock" "$@"
     else
-      if [[ $attach_now -eq 1 ]]; then
-        env WSM_ROOT="${WSM_ROOT:-}" "$MSR_BIN" create -a "$(sock_for "$name")"
-      else
-        env WSM_ROOT="${WSM_ROOT:-}" "$MSR_BIN" create "$(sock_for "$name")"
-      fi
+      create_session "$sock"
     fi
     ;;
 
@@ -349,7 +344,12 @@ case "$cmd" in
   terminate)
     name="$(require_name "${1:-}")"
     if [[ $# -ge 1 && "$1" != --* ]]; then shift; fi
-    sig="${1:-}"
+    case "${1:-}" in
+      "") sig="" ;;
+      TERM|INT|KILL) sig="$1" ;;
+      -f|--force) sig="KILL" ;;
+      *) err "dsm: terminate only accepts TERM, INT, KILL, or --force"; exit 1 ;;
+    esac
     if [[ -n "$sig" ]]; then
       "$MSR_BIN" terminate "$(sock_for "$name")" "$sig"
     else

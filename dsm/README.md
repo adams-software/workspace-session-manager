@@ -12,6 +12,12 @@ See the full command surface:
 dsm --help
 ```
 
+Or with an explicit directory override:
+
+```bash
+dsm --cwd ~/code/my-project --help
+```
+
 Create and attach to a named local session:
 
 ```bash
