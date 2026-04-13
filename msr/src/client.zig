@@ -102,7 +102,7 @@ fn waitReadable(fd: c_int, timeout_ms: i32) Error!void {
         if (pr > 0) break;
         if (pr == 0) return Error.Timeout;
 
-        const e = std.c.errno(-1);
+        const e = std.posix.errno(-1);
         if (e == .INTR) continue;
         return Error.IoError;
     }

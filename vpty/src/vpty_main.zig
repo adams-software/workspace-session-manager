@@ -331,7 +331,7 @@ fn pumpUntilExit(session_host: *host.SessionHost, shared_model: *SharedTerminalM
 
         const pr = c.poll(&pfds, 4, 10);
         if (pr < 0) {
-            const e = std.c.errno(-1);
+            const e = std.posix.errno(-1);
             if (e == .INTR) continue;
             return error.IoError;
         }
@@ -461,22 +461,19 @@ const SignalHandlers = struct {
     }
 };
 
-fn parseChildArgv(allocator: std.mem.Allocator, init: std.process.Init) !std.ArrayList([]const u8) {
-    var args_it = std.process.Args.Iterator.init(init.minimal.args);
+fn parseChildArgv(allocator: std.mem.Allocator, argv: []const []const u8) !std.ArrayList([]const u8) {
     var argv_list = std.ArrayList([]const u8){};
     errdefer argv_list.deinit(allocator);
-    while (args_it.next()) |arg| {
-        try argv_list.append(allocator, arg);
-    }
-    const argv = argv_list.items;
+    try argv_list.appendSlice(allocator, argv);
+    const args = argv_list.items;
 
-    if (argv.len < 3) {
+    if (args.len < 3) {
         usage();
         return error.InvalidArgs;
     }
 
     var sep_idx: ?usize = null;
-    for (argv[1..], 1..) |arg, i| {
+    for (args[1..], 1..) |arg, i| {
         if (std.mem.eql(u8, arg, "--")) {
             sep_idx = i;
             break;
@@ -487,7 +484,7 @@ fn parseChildArgv(allocator: std.mem.Allocator, init: std.process.Init) !std.Arr
         usage();
         return error.InvalidArgs;
     };
-    if (cmd_start + 1 >= argv.len) {
+    if (cmd_start + 1 >= args.len) {
         err("vpty: missing command after --\n", .{});
         usage();
         return error.InvalidArgs;
@@ -495,24 +492,24 @@ fn parseChildArgv(allocator: std.mem.Allocator, init: std.process.Init) !std.Arr
 
     var result = std.ArrayList([]const u8){};
     errdefer result.deinit(allocator);
-    try result.appendSlice(allocator, argv[(cmd_start + 1)..]);
+    try result.appendSlice(allocator, args[(cmd_start + 1)..]);
     argv_list.deinit(allocator);
     return result;
 }
 
-pub fn main(init: std.process.Init) !u8 {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main() !u8 {
+    const allocator = std.heap.smp_allocator;
+    const argv = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, argv);
 
-    var child_argv_list = parseChildArgv(allocator, init) catch |parse_err| switch (parse_err) {
+    var child_argv_list = parseChildArgv(allocator, argv) catch |parse_err| switch (parse_err) {
         error.InvalidArgs => return 1,
         else => return parse_err,
     };
     defer child_argv_list.deinit(allocator);
 
     var runtime: VptyRuntime = undefined;
-    try runtime.init(allocator, init.io, child_argv_list.items);
+    try runtime.init(allocator, .{}, child_argv_list.items);
     defer runtime.deinit();
     return runtime.run();
 }

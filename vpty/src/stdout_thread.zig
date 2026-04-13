@@ -2,7 +2,6 @@ const std = @import("std");
 const actor_mailboxes = @import("actor_mailboxes");
 const StdoutBuffer = @import("stdout_actor").StdoutBuffer;
 const WakePipe = @import("wake_pipe").WakePipe;
-const Io = std.Io;
 const c = @cImport({
     @cInclude("poll.h");
 });
@@ -24,20 +23,18 @@ const SharedState = struct {
 
 pub const StdoutThread = struct {
     allocator: std.mem.Allocator,
-    io: Io,
     buffer: StdoutBuffer,
     control_queue: actor_mailboxes.MutexQueue(OwnedControlChunk),
-    render_mutex: Io.Mutex = .init,
+    render_mutex: std.Thread.Mutex = .{},
     pending_render_publish: ?OwnedRenderPublish = null,
     shared: SharedState = .{},
     thread: ?std.Thread = null,
     shutdown_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     wake_pipe: WakePipe = .{},
 
-    pub fn init(allocator: std.mem.Allocator, io: Io) StdoutThread {
+    pub fn init(allocator: std.mem.Allocator, io: anytype) StdoutThread {
         return .{
             .allocator = allocator,
-            .io = io,
             .buffer = StdoutBuffer.init(allocator),
             .control_queue = actor_mailboxes.MutexQueue(OwnedControlChunk).init(allocator, io),
         };
@@ -78,8 +75,8 @@ pub const StdoutThread = struct {
 
     pub fn publishRenderCandidate(self: *StdoutThread, publish: actor_mailboxes.RenderPublish) !void {
         const owned = try self.allocator.dupe(u8, publish.bytes);
-        self.render_mutex.lockUncancelable(self.io);
-        defer self.render_mutex.unlock(self.io);
+        self.render_mutex.lock();
+        defer self.render_mutex.unlock();
 
         if (self.pending_render_publish) |previous| {
             _ = self.shared.pending_bytes.fetchSub(previous.bytes.len, .seq_cst);
@@ -155,10 +152,10 @@ pub const StdoutThread = struct {
             };
         }
 
-        self.render_mutex.lockUncancelable(self.io);
+        self.render_mutex.lock();
         const publish = self.pending_render_publish;
         self.pending_render_publish = null;
-        self.render_mutex.unlock(self.io);
+        self.render_mutex.unlock();
 
         if (publish) |owned| {
             const before = self.buffer.pendingBytes();

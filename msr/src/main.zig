@@ -320,13 +320,10 @@ fn runHost(path: []const u8, child_argv: []const []const u8) !u8 {
     return 0;
 }
 
-pub fn main(init: std.process.Init) !u8 {
-    var it = std.process.Args.Iterator.init(init.minimal.args);
-    var argv_list = std.ArrayList([]const u8){};
-    defer argv_list.deinit(init.gpa);
-
-    while (it.next()) |a| try argv_list.append(init.gpa, a);
-    const argv = argv_list.items;
+pub fn main() !u8 {
+    const allocator = std.heap.smp_allocator;
+    const argv = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, argv);
 
     if (argv.len >= 2 and std.mem.eql(u8, argv[1], "_host")) {
         if (argv.len < 4) {
@@ -344,7 +341,7 @@ pub fn main(init: std.process.Init) !u8 {
         return try runHost(path, argv[4..]);
     }
 
-    const parsed = try cli_parse.parseArgv(init.gpa, if (argv.len > 1) argv[1..] else &.{});
+    const parsed = try cli_parse.parseArgv(allocator, if (argv.len > 1) argv[1..] else &.{});
     switch (parsed) {
         .fail => |failure| {
             const raw_current_session = blk: {
@@ -430,7 +427,7 @@ pub fn main(init: std.process.Init) !u8 {
         },
         .ok => |ok| {
             var owned_ok = ok;
-            defer owned_ok.deinit(init.gpa);
+            defer owned_ok.deinit(allocator);
 
             const current_session = owned_ok.current_session;
             switch (owned_ok.command) {

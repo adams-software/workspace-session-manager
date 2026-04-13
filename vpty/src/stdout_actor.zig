@@ -187,7 +187,7 @@ pub const StdoutBuffer = struct {
         if (n > 0) return .{ .written = @intCast(n) };
         if (n == 0) return error.UnexpectedEof;
 
-        const e = std.c.errno(-1);
+        const e = std.posix.errno(-1);
         if (e == .INTR) return writeSome(bytes);
         if (e == .AGAIN) return .would_block;
         return error.IoError;

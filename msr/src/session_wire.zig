@@ -239,7 +239,7 @@ fn writeAll(fd: c_int, bytes: []const u8) !void {
     while (off < bytes.len) {
         const n = c.write(fd, bytes.ptr + off, bytes.len - off);
         if (n < 0) {
-            const e = std.c.errno(-1);
+            const e = std.posix.errno(-1);
             if (e == .INTR or e == .AGAIN) continue;
             return Error.WriteFailed;
         }
@@ -253,7 +253,7 @@ fn readExact(fd: c_int, dst: []u8) !void {
     while (off < dst.len) {
         const n = c.read(fd, dst.ptr + off, dst.len - off);
         if (n < 0) {
-            const e = std.c.errno(-1);
+            const e = std.posix.errno(-1);
             if (e == .INTR or e == .AGAIN) continue;
             return Error.ReadFailed;
         }

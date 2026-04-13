@@ -149,7 +149,7 @@ pub const PtyChildHost = struct {
         while (off < bytes.len) {
             const n = c.write(fd, bytes.ptr + off, bytes.len - off);
             if (n < 0) {
-                const e = std.c.errno(-1);
+                const e = std.posix.errno(-1);
                 if (e == .INTR or e == .AGAIN) continue;
                 return Error.IoError;
             }
@@ -302,7 +302,7 @@ pub const PtyChildHost = struct {
                 while (true) {
                     const got = c.waitpid(pid, &wait_status, 0);
                     if (got >= 0) break;
-                    const e = std.c.errno(-1);
+                    const e = std.posix.errno(-1);
                     if (e == .INTR) continue;
                     break :blk Error.InvalidArgs;
                 }

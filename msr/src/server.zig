@@ -135,7 +135,7 @@ pub const SessionServer = struct {
             if (pr > 0) break;
             if (pr == 0) return false;
 
-            const e = std.c.errno(-1);
+            const e = std.posix.errno(-1);
             if (e == .INTR) continue;
             return Error.IoError;
         }
@@ -198,7 +198,7 @@ pub const SessionServer = struct {
         const rc = c.connect(fd, @as(*const c.struct_sockaddr, @ptrCast(&addr)), @intCast(@sizeOf(c.struct_sockaddr_un)));
         if (rc == 0) return false;
 
-        const e = std.c.errno(-1);
+        const e = std.posix.errno(-1);
         if (e == .CONNREFUSED or e == .NOENT) return true;
         if (e == .ACCES) return Error.PermissionDenied;
         return false;
@@ -217,7 +217,7 @@ pub const SessionServer = struct {
         if (try isStaleSocket(path)) unlinkBestEffort(path);
 
         if (c.bind(fd, @as(*const c.struct_sockaddr, @ptrCast(&addr)), @intCast(@sizeOf(c.struct_sockaddr_un))) != 0) {
-            const e = std.c.errno(-1);
+            const e = std.posix.errno(-1);
             _ = c.close(fd);
             return switch (e) {
                 .ADDRINUSE => Error.AlreadyExists,
@@ -227,7 +227,7 @@ pub const SessionServer = struct {
         }
 
         if (c.listen(fd, 16) != 0) {
-            const e = std.c.errno(-1);
+            const e = std.posix.errno(-1);
             _ = c.close(fd);
             unlinkBestEffort(path);
             return switch (e) {

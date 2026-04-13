@@ -51,7 +51,7 @@ pub fn readIntoQueue(
         }
         if (n == 0) return .eof;
 
-        const e = std.c.errno(-1);
+        const e = std.posix.errno(-1);
         if (e == .INTR) continue;
         if (e == .AGAIN) return .would_block;
         return error.IoError;
@@ -76,7 +76,7 @@ pub fn writeFromQueue(
         }
         if (n == 0) return .would_block;
 
-        const e = std.c.errno(-1);
+        const e = std.posix.errno(-1);
         if (e == .INTR) continue;
         if (e == .AGAIN) return .would_block;
         return error.IoError;

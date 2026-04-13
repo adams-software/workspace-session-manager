@@ -308,7 +308,7 @@ pub fn runAttachBridge(
         while (true) {
             const pr = c.poll(&pfds, pfds.len, -1);
             if (pr >= 0) break;
-            const e = std.c.errno(-1);
+            const e = std.posix.errno(-1);
             if (e == .INTR) continue;
             return error.IoError;
         }

@@ -4,26 +4,25 @@ const Renderer = @import("vpty_render").Renderer;
 const TerminalModel = @import("terminal_model").TerminalModel;
 const StdoutThread = @import("stdout_thread").StdoutThread;
 const WakePipe = @import("wake_pipe").WakePipe;
-const Io = std.Io;
 const c = @cImport({
     @cInclude("poll.h");
 });
 
 pub const SharedTerminalModel = struct {
-    io: Io,
-    mutex: Io.Mutex = .init,
+    mutex: std.Thread.Mutex = .{},
     model: TerminalModel,
 
-    pub fn init(io: Io, model: TerminalModel) SharedTerminalModel {
-        return .{ .io = io, .model = model };
+    pub fn init(io: anytype, model: TerminalModel) SharedTerminalModel {
+        _ = io;
+        return .{ .model = model };
     }
 
     pub fn lock(self: *SharedTerminalModel) void {
-        self.mutex.lockUncancelable(self.io);
+        self.mutex.lock();
     }
 
     pub fn unlock(self: *SharedTerminalModel) void {
-        self.mutex.unlock(self.io);
+        self.mutex.unlock();
     }
 };
 
@@ -35,7 +34,7 @@ pub const RenderThread = struct {
     };
 
     const PendingRequests = struct {
-        mutex: Io.Mutex = .init,
+        mutex: std.Thread.Mutex = .{},
         batch: PendingBatch = .{},
     };
 
@@ -78,23 +77,23 @@ pub const RenderThread = struct {
     }
 
     pub fn publishModelChanged(self: *RenderThread, changed: actor_mailboxes.ModelChanged) void {
-        self.pending.mutex.lockUncancelable(self.shared_model.io);
+        self.pending.mutex.lock();
         self.pending.batch.latest_model_changed = changed;
-        self.pending.mutex.unlock(self.shared_model.io);
+        self.pending.mutex.unlock();
         self.wake();
     }
 
     pub fn reset(self: *RenderThread) void {
-        self.pending.mutex.lockUncancelable(self.shared_model.io);
+        self.pending.mutex.lock();
         self.pending.batch.reset_requested = true;
-        self.pending.mutex.unlock(self.shared_model.io);
+        self.pending.mutex.unlock();
         self.wake();
     }
 
     pub fn shutdownActor(self: *RenderThread) void {
-        self.pending.mutex.lockUncancelable(self.shared_model.io);
+        self.pending.mutex.lock();
         self.pending.batch.shutdown_requested = true;
-        self.pending.mutex.unlock(self.shared_model.io);
+        self.pending.mutex.unlock();
         self.wake();
     }
 
@@ -113,8 +112,8 @@ pub const RenderThread = struct {
     }
 
     fn takePendingRequests(self: *RenderThread) PendingBatch {
-        self.pending.mutex.lockUncancelable(self.shared_model.io);
-        defer self.pending.mutex.unlock(self.shared_model.io);
+        self.pending.mutex.lock();
+        defer self.pending.mutex.unlock();
 
         const pending = self.pending.batch;
         self.pending.batch = .{};

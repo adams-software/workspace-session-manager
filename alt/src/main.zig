@@ -182,15 +182,13 @@ const Config = struct {
     debug_keys: bool,
     primary_argv: []const []const u8,
 
-    fn parse(allocator: Allocator, args_src: std.process.Args) !Config {
-        var args_it = std.process.Args.Iterator.init(args_src);
-
+    fn parse(allocator: Allocator, args_src: []const []const u8) !Config {
         var args = std.ArrayList([]const u8){};
         defer {
             for (args.items) |arg| allocator.free(arg);
             args.deinit(allocator);
         }
-        while (args_it.next()) |arg| {
+        for (args_src) |arg| {
             try args.append(allocator, try allocator.dupe(u8, arg));
         }
 
@@ -355,7 +353,7 @@ fn writeAll(fd: c_int, bytes: []const u8) !void {
     while (offset < bytes.len) {
         const rc = c.write(fd, bytes.ptr + offset, bytes.len - offset);
         if (rc < 0) {
-            const err = std.c.errno(rc);
+            const err = std.posix.errno(rc);
             switch (err) {
                 .INTR => continue,
                 .AGAIN => {
@@ -367,7 +365,7 @@ fn writeAll(fd: c_int, bytes: []const u8) !void {
                     while (true) {
                         const prc = c.poll(&pfd, 1, -1);
                         if (prc < 0) {
-                            if (std.c.errno(prc) == .INTR) continue;
+                            if (std.posix.errno(prc) == .INTR) continue;
                             return Error.PollFailed;
                         }
                         break;
@@ -530,7 +528,7 @@ fn queueInput(allocator: Allocator, tty_fd: c_int, queue: *ByteQueue, hotkey: Ke
     const rc = c.read(tty_fd, &buf, buf.len);
     if (rc == 0) return .{};
     if (rc < 0) {
-        const err = std.c.errno(rc);
+        const err = std.posix.errno(rc);
         if (err == .INTR or err == .AGAIN) return .{};
         return std.posix.unexpectedErrno(err);
     }
@@ -718,7 +716,7 @@ fn passthroughLoop(allocator: Allocator, term: *TerminalState, cfg: Config, prim
 
         const rc = c.poll(&pollfds, pollfds.len, 250);
         if (rc < 0) {
-            if (std.c.errno(rc) == .INTR) continue;
+            if (std.posix.errno(rc) == .INTR) continue;
             return Error.PollFailed;
         }
         if (rc == 0) continue;
@@ -907,20 +905,16 @@ test "switch-away signal leaves refreshed session state authoritative" {
     try std.testing.expectEqual(pty_host.HostState.running, side.currentState());
 }
 
-pub fn main(init: std.process.Init) !void {
-    var args_it = std.process.Args.Iterator.init(init.minimal.args);
-    var argc: usize = 0;
-    while (args_it.next()) |_| argc += 1;
-    if (argc <= 1) {
+pub fn main() !void {
+    const allocator = std.heap.smp_allocator;
+    const argv = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, argv);
+    if (argv.len <= 1) {
         usage();
         return;
     }
 
-    var gpa_state = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa_state.deinit();
-    const gpa = gpa_state.allocator();
-
-    var cfg = Config.parse(gpa, init.minimal.args) catch |err| switch (err) {
+    var cfg = Config.parse(allocator, argv) catch |err| switch (err) {
         Error.InvalidArgs => {
             usage();
             return err;
@@ -933,6 +927,7 @@ pub fn main(init: std.process.Init) !void {
     };
     defer cfg.deinit();
 
+    const gpa = allocator;
     const key = try KeyBinding.parse(cfg.key_spec);
 
     var term = try TerminalState.init();

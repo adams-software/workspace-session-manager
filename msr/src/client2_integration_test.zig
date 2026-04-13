@@ -111,7 +111,7 @@ fn waitReadable(fd: c_int, timeout_ms: i32) !void {
         if (pr > 0) break;
         if (pr == 0) return error.Timeout;
 
-        const e = std.c.errno(-1);
+        const e = std.posix.errno(-1);
         if (e == .INTR) continue;
         return error.IoError;
     }
@@ -535,7 +535,7 @@ test "client attachment readMessage sees owner request frame" {
 //                 while (off < want) {
 //                     const n = c.write(fd, buf[off..want].ptr, want - off);
 //                     if (n < 0) {
-//                         const e = std.c.errno(-1);
+//                         const e = std.posix.errno(-1);
 //                         if (e == .INTR) continue;
 //                         return;
 //                     }
