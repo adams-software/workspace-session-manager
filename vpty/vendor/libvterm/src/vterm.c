@@ -135,6 +135,16 @@ void vterm_set_utf8(VTerm *vt, int is_utf8)
   vt->mode.utf8 = is_utf8;
 }
 
+VTermGraphemeMode vterm_get_grapheme_mode(const VTerm *vt)
+{
+  return vt->mode.grapheme_mode ? VTERM_GRAPHEME_MODE_UNICODE : VTERM_GRAPHEME_MODE_LEGACY;
+}
+
+void vterm_set_grapheme_mode(VTerm *vt, VTermGraphemeMode mode)
+{
+  vt->mode.grapheme_mode = (mode == VTERM_GRAPHEME_MODE_UNICODE);
+}
+
 void vterm_output_set_callback(VTerm *vt, VTermOutputCallback *func, void *user)
 {
   vt->outfunc = func;

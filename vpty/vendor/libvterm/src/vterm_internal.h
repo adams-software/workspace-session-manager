@@ -107,6 +107,8 @@ struct VTermState
   int combine_width; // The width of the glyph above
   VTermPos combine_pos;   // Position before movement
 
+  int grapheme_state;
+
   struct {
     unsigned int keypad:1;
     unsigned int cursor:1;
@@ -186,6 +188,7 @@ struct VTerm
   struct {
     unsigned int utf8:1;
     unsigned int ctrl8bit:1;
+    unsigned int grapheme_mode:1;
   } mode;
 
   struct {
@@ -295,5 +298,7 @@ VTermEncoding *vterm_lookup_encoding(VTermEncodingType type, char designation);
 
 int vterm_unicode_width(uint32_t codepoint);
 int vterm_unicode_is_combining(uint32_t codepoint);
+int vterm_unicode_is_emoji(uint32_t codepoint);
+int vterm_unicode_is_zero_width_marker(uint32_t codepoint);
 
 #endif

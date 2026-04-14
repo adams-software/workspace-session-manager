@@ -182,11 +182,15 @@ pub const Renderer = struct {
             self.moveCursor(@intCast(row_idx), 0);
 
             var col: usize = 0;
-            while (col < line.cells.len) : (col += 1) {
+            while (col < line.cells.len) {
                 const cell = line.cells[col];
-                if (cell.width == 0) continue;
+                if (cell.width == 0) {
+                    col += 1;
+                    continue;
+                }
                 emitHyperlinkTransition(self, snapshot, cell.hyperlink, &style_state.active_hyperlink);
                 emitCell(self, cell, &style_state);
+                col += @max(@as(usize, 1), @as(usize, cell.width));
             }
 
             emitHyperlinkTransition(self, snapshot, 0, &style_state.active_hyperlink);
@@ -210,22 +214,9 @@ fn encodeCodepoints(buf: *[32]u8, cell: host.HostScreenCell) []const u8 {
     while (i < cell.chars_len and i < cell.chars.len) : (i += 1) {
         const cp = cell.chars[i];
         if (cp == 0) break;
+        if (!isValidUnicodeScalar(cp)) continue;
 
-        if (!isValidUnicodeScalar(cp)) {
-            if (len < buf.len) {
-                buf[len] = '?';
-                len += 1;
-            }
-            continue;
-        }
-
-        const written = std.unicode.utf8Encode(@as(u21, @intCast(cp)), buf[len..]) catch {
-            if (len < buf.len) {
-                buf[len] = '?';
-                len += 1;
-            }
-            continue;
-        };
+        const written = std.unicode.utf8Encode(@as(u21, @intCast(cp)), buf[len..]) catch continue;
         len += written;
     }
 
@@ -308,10 +299,13 @@ fn emitCell(renderer: *Renderer, cell: host.HostScreenCell, style_state: *StyleS
 
     var buf: [32]u8 = undefined;
     const text = encodeCodepoints(&buf, cell);
-    if (text.len == 0) {
-        renderer.writeBytes(" ");
-    } else {
+    if (text.len != 0) {
         renderer.writeBytes(text);
+        return;
+    }
+
+    if (cell.width == 1) {
+        renderer.writeBytes(" ");
     }
 }
 

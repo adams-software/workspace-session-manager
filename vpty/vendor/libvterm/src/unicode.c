@@ -299,8 +299,48 @@ static const struct interval fullwidth[] = {
 #include "fullwidth.inc"
 };
 
+static int is_regional_indicator(uint32_t codepoint)
+{
+  return codepoint >= 0x1F1E6 && codepoint <= 0x1F1FF;
+}
+
+INTERNAL int vterm_unicode_is_zero_width_marker(uint32_t codepoint)
+{
+  return codepoint == 0x200d ||
+         codepoint == 0x200c ||
+         (codepoint >= 0xfe00 && codepoint <= 0xfe0f) ||
+         (codepoint >= 0xe0100 && codepoint <= 0xe01ef) ||
+         (codepoint >= 0xe0020 && codepoint <= 0xe007f);
+}
+
+INTERNAL int vterm_unicode_is_emoji(uint32_t codepoint)
+{
+  if(is_regional_indicator(codepoint))
+    return 1;
+
+  if(codepoint == 0x00a9 || codepoint == 0x00ae ||
+     codepoint == 0x203c || codepoint == 0x2049 ||
+     codepoint == 0x2122 || codepoint == 0x2139 ||
+     codepoint == 0x3030 || codepoint == 0x303d ||
+     codepoint == 0x3297 || codepoint == 0x3299)
+    return 1;
+
+  if((codepoint >= 0x2194 && codepoint <= 0x21aa) ||
+     (codepoint >= 0x231a && codepoint <= 0x23ff) ||
+     (codepoint >= 0x2460 && codepoint <= 0x27bf) ||
+     (codepoint >= 0x2934 && codepoint <= 0x2935) ||
+     (codepoint >= 0x2b05 && codepoint <= 0x2b55) ||
+     (codepoint >= 0x1f004 && codepoint <= 0x1faff))
+    return 1;
+
+  return 0;
+}
+
 INTERNAL int vterm_unicode_width(uint32_t codepoint)
 {
+  if(vterm_unicode_is_zero_width_marker(codepoint))
+    return 0;
+
   if(bisearch(codepoint, fullwidth, sizeof(fullwidth) / sizeof(fullwidth[0]) - 1))
     return 2;
 

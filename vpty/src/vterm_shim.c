@@ -182,7 +182,7 @@ static msr_vterm_color convert_color(VTermColor color) {
   return out;
 }
 
-msr_vterm_handle *msr_vterm_new(int rows, int cols) {
+msr_vterm_handle *msr_vterm_new(int rows, int cols, int grapheme_mode) {
   msr_vterm_handle *h = (msr_vterm_handle *)calloc(1, sizeof(msr_vterm_handle));
   if (!h) return NULL;
 
@@ -193,6 +193,7 @@ msr_vterm_handle *msr_vterm_new(int rows, int cols) {
   }
 
   vterm_set_utf8(h->vt, 1);
+  vterm_set_grapheme_mode(h->vt, grapheme_mode ? VTERM_GRAPHEME_MODE_UNICODE : VTERM_GRAPHEME_MODE_LEGACY);
 
   h->screen = vterm_obtain_screen(h->vt);
   h->state = vterm_obtain_state(h->vt);
@@ -250,10 +251,6 @@ void msr_vterm_get_cursor(msr_vterm_handle *handle, int *row, int *col, int *vis
 int msr_vterm_get_alt_screen(msr_vterm_handle *handle) {
   if (!handle) return 0;
   return handle->alt_screen;
-}
-
-void msr_vterm_force_full_damage(msr_vterm_handle *handle) {
-  (void)handle;
 }
 
 void msr_vterm_get_cell(msr_vterm_handle *handle, int row, int col, msr_vterm_cell *out) {

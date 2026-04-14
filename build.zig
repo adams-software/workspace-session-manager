@@ -3,9 +3,11 @@ const std = @import("std");
 fn addVendoredLibvterm(module: *std.Build.Module, b: *std.Build) void {
     module.addIncludePath(b.path("vpty/vendor/libvterm/include"));
     module.addIncludePath(b.path("vpty/vendor/libvterm/src"));
+    module.addIncludePath(b.path("vpty/vendor/utf8proc"));
     module.addIncludePath(b.path("vpty/src"));
     module.addCSourceFile(.{ .file = b.path("vpty/src/vterm_shim.c") });
     module.addCSourceFiles(.{ .files = &.{
+        "vpty/vendor/utf8proc/utf8proc.c",
         "vpty/vendor/libvterm/src/encoding.c",
         "vpty/vendor/libvterm/src/keyboard.c",
         "vpty/vendor/libvterm/src/mouse.c",

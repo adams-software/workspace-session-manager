@@ -20,6 +20,7 @@ const RenderThread = render_thread_mod.RenderThread;
 const SharedTerminalModel = render_thread_mod.SharedTerminalModel;
 const WakePipe = @import("wake_pipe").WakePipe;
 const ModelSize = terminal_model_mod.ModelSize;
+const GraphemeMode = terminal_model_mod.GraphemeMode;
 
 const INPUT_READ_CHUNK = 4096;
 const OUTPUT_READ_CHUNK = 4096;
@@ -136,6 +137,14 @@ fn usage() void {
             "  Runs a child process on an inner PTY.\n",
         .{},
     );
+}
+
+fn graphemeModeFromEnv() GraphemeMode {
+    const raw = std.process.getEnvVarOwned(std.heap.page_allocator, "VPTY_GRAPHEME_MODE") catch return .legacy;
+    defer std.heap.page_allocator.free(raw);
+
+    if (std.ascii.eqlIgnoreCase(raw, "unicode")) return .unicode;
+    return .legacy;
 }
 
 fn signalNumber(name: []const u8) u8 {
@@ -376,7 +385,7 @@ const VptyRuntime = struct {
         });
         errdefer session_host.deinit();
 
-        var shared_model = SharedTerminalModel.init(io, try TerminalModel.init(size.rows, size.cols));
+        var shared_model = SharedTerminalModel.init(io, try TerminalModel.initWithMode(size.rows, size.cols, graphemeModeFromEnv()));
         errdefer shared_model.model.deinit();
 
         self.* = .{

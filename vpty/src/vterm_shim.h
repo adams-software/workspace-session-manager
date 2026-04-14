@@ -63,13 +63,12 @@ typedef struct {
   msr_vterm_cell_attrs attrs;
 } msr_vterm_cell;
 
-msr_vterm_handle *msr_vterm_new(int rows, int cols);
+msr_vterm_handle *msr_vterm_new(int rows, int cols, int grapheme_mode);
 void msr_vterm_free(msr_vterm_handle *handle);
 void msr_vterm_set_size(msr_vterm_handle *handle, int rows, int cols);
 void msr_vterm_feed(msr_vterm_handle *handle, const char *bytes, size_t len);
 void msr_vterm_get_cursor(msr_vterm_handle *handle, int *row, int *col, int *visible);
 int msr_vterm_get_alt_screen(msr_vterm_handle *handle);
-void msr_vterm_force_full_damage(msr_vterm_handle *handle);
 void msr_vterm_get_cell(msr_vterm_handle *handle, int row, int col, msr_vterm_cell *out);
 int msr_vterm_row_is_eol(msr_vterm_handle *handle, int row);
 const char *msr_vterm_get_hyperlink_uri(msr_vterm_handle *handle, uint32_t hyperlink_handle, size_t *len);

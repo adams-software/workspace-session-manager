@@ -1,5 +1,7 @@
 #include "vterm_internal.h"
 
+#include "utf8proc.h"
+
 #include <stdio.h>
 #include <string.h>
 
@@ -26,6 +28,172 @@ static void putglyph(VTermState *state, const uint32_t chars[], int width, VTerm
       return;
 
   DEBUG_LOG("libvterm: Unhandled putglyph U+%04x at (%d,%d)\n", chars[0], pos.col, pos.row);
+}
+
+static int glyph_cluster_width_legacy(const uint32_t chars[], int len)
+{
+  int width = 0;
+  int base_width = 1;
+  int seen_printable = 0;
+  int printable_count = 0;
+  int has_zwj = 0;
+  int has_vs16 = 0;
+  int has_fe0e = 0;
+  int regional_indicator_count = 0;
+
+  for(int i = 0; i < len; i++) {
+    uint32_t cp = chars[i];
+
+    if(cp == 0x200d)
+      has_zwj = 1;
+    else if(cp == 0xfe0f)
+      has_vs16 = 1;
+    else if(cp == 0xfe0e)
+      has_fe0e = 1;
+
+    if(vterm_unicode_is_zero_width_marker(cp))
+      continue;
+
+    if(cp >= 0x1f1e6 && cp <= 0x1f1ff)
+      regional_indicator_count++;
+
+    int this_width = vterm_unicode_width(cp);
+    if(this_width < 0)
+      this_width = 1;
+
+    width += this_width;
+
+    if(this_width > 0) {
+      seen_printable = 1;
+      printable_count++;
+      if(this_width > base_width)
+        base_width = this_width;
+    }
+  }
+
+  if(!seen_printable)
+    return 0;
+
+  if(has_fe0e && printable_count == 1)
+    return 1;
+  if(has_zwj)
+    return 2;
+  if(regional_indicator_count == 2)
+    return 2;
+  if(has_vs16 && printable_count == 1)
+    return 2;
+
+  if(width <= 0)
+    return 1;
+  if(width > 2)
+    return 2;
+
+  return width > base_width ? base_width : width;
+}
+
+static int glyph_cluster_width_unicode(const uint32_t chars[], int len)
+{
+  int printable_count = 0;
+  int has_zwj = 0;
+  int has_vs16 = 0;
+  int has_fe0e = 0;
+  int regional_indicator_count = 0;
+  int max_base_width = 1;
+
+  for(int i = 0; i < len; i++) {
+    uint32_t cp = chars[i];
+
+    if(cp == 0x200d)
+      has_zwj = 1;
+    else if(cp == 0xfe0f)
+      has_vs16 = 1;
+    else if(cp == 0xfe0e)
+      has_fe0e = 1;
+
+    if(vterm_unicode_is_zero_width_marker(cp))
+      continue;
+
+    if(cp >= 0x1f1e6 && cp <= 0x1f1ff)
+      regional_indicator_count++;
+
+    int this_width = vterm_unicode_width(cp);
+    if(this_width < 0)
+      this_width = 1;
+
+    if(this_width > 0) {
+      printable_count++;
+      if(this_width > max_base_width)
+        max_base_width = this_width;
+    }
+  }
+
+  if(printable_count == 0)
+    return 0;
+
+  if(has_fe0e && printable_count == 1)
+    return 1;
+
+  if(has_zwj)
+    return 2;
+
+  if(regional_indicator_count == 2)
+    return 2;
+
+  if(has_vs16 && printable_count == 1)
+    return 2;
+
+  return max_base_width;
+}
+
+static int glyph_cluster_width_for_mode(VTermState *state, const uint32_t chars[], int len)
+{
+  if(vterm_get_grapheme_mode(state->vt) == VTERM_GRAPHEME_MODE_UNICODE)
+    return glyph_cluster_width_unicode(chars, len);
+
+  return glyph_cluster_width_legacy(chars, len);
+}
+
+static int legacy_should_extend_cluster(const uint32_t codepoints[], int glyph_starts, int glyph_ends)
+{
+  uint32_t next = codepoints[glyph_ends];
+
+  if(vterm_unicode_is_combining(next) || vterm_unicode_is_zero_width_marker(next))
+    return 1;
+
+  uint32_t prev = codepoints[glyph_ends - 1];
+  if(prev == 0x200d)
+    return 1;
+
+  int regional_indicators = 0;
+  for(int i = glyph_starts; i < glyph_ends; i++) {
+    uint32_t cp = codepoints[i];
+    if(cp >= 0x1f1e6 && cp <= 0x1f1ff)
+      regional_indicators++;
+  }
+
+  if(regional_indicators == 1 && next >= 0x1f1e6 && next <= 0x1f1ff)
+    return 1;
+
+  return 0;
+}
+
+
+static int state_should_extend_cluster(
+    VTermState *state,
+    utf8proc_int32_t *grapheme_state,
+    const uint32_t codepoints[],
+    int glyph_starts,
+    int glyph_ends)
+{
+  if(vterm_get_grapheme_mode(state->vt) == VTERM_GRAPHEME_MODE_LEGACY)
+    return legacy_should_extend_cluster(codepoints, glyph_starts, glyph_ends);
+
+  utf8proc_bool should_break = utf8proc_grapheme_break_stateful(
+      (utf8proc_int32_t)codepoints[glyph_ends - 1],
+      (utf8proc_int32_t)codepoints[glyph_ends],
+      grapheme_state);
+
+  return should_break ? 0 : 1;
 }
 
 static void updatecursor(VTermState *state, VTermPos *oldpos, int cancel_phantom)
@@ -329,10 +497,11 @@ static int on_text(const char bytes[], size_t len, void *user)
     state->gsingle_set = 0;
 
   int i = 0;
+  utf8proc_int32_t grapheme_state = state->grapheme_state;
 
   /* This is a combining char. that needs to be merged with the previous
    * glyph output */
-  if(vterm_unicode_is_combining(codepoints[i])) {
+  if(vterm_get_grapheme_mode(state->vt) == VTERM_GRAPHEME_MODE_LEGACY && vterm_unicode_is_combining(codepoints[i])) {
     /* See if the cursor has moved since */
     if(state->pos.row == state->combine_pos.row && state->pos.col == state->combine_pos.col + state->combine_width) {
 #ifdef DEBUG_GLYPH_COMBINE
@@ -378,30 +547,36 @@ static int on_text(const char bytes[], size_t len, void *user)
     int glyph_ends;
     for(glyph_ends = i + 1;
         (glyph_ends < npoints) && (glyph_ends < glyph_starts + VTERM_MAX_CHARS_PER_CELL);
-        glyph_ends++)
-      if(!vterm_unicode_is_combining(codepoints[glyph_ends]))
+        glyph_ends++) {
+      if(!state_should_extend_cluster(state, &grapheme_state, codepoints, glyph_starts, glyph_ends))
         break;
-
-    int width = 0;
+    }
 
     uint32_t chars[VTERM_MAX_CHARS_PER_CELL + 1];
 
     for( ; i < glyph_ends; i++) {
       chars[i - glyph_starts] = codepoints[i];
-      int this_width = vterm_unicode_width(codepoints[i]);
-#ifdef DEBUG
-      if(this_width < 0) {
-        fprintf(stderr, "Text with negative-width codepoint U+%04x\n", codepoints[i]);
-        abort();
-      }
-#endif
-      width += this_width;
     }
 
-    while(i < npoints && vterm_unicode_is_combining(codepoints[i]))
-      i++;
+    if(vterm_get_grapheme_mode(state->vt) == VTERM_GRAPHEME_MODE_LEGACY) {
+      while(i < npoints &&
+          (vterm_unicode_is_combining(codepoints[i]) ||
+           vterm_unicode_is_zero_width_marker(codepoints[i])))
+        i++;
+    }
 
     chars[glyph_ends - glyph_starts] = 0;
+    int width = glyph_cluster_width_for_mode(state, chars, glyph_ends - glyph_starts);
+#ifdef DEBUG
+    fprintf(stderr, "cluster mode=%s width=%d pos=(%d,%d) cps=",
+        vterm_get_grapheme_mode(state->vt) == VTERM_GRAPHEME_MODE_UNICODE ? "unicode" : "legacy",
+        width,
+        state->pos.row,
+        state->pos.col);
+    for(int dbg_i = 0; dbg_i < glyph_ends - glyph_starts; dbg_i++)
+      fprintf(stderr, "U+%04X ", chars[dbg_i]);
+    fprintf(stderr, "\n");
+#endif
     i--;
 
 #ifdef DEBUG_GLYPH_COMBINE
@@ -460,6 +635,7 @@ static int on_text(const char bytes[], size_t len, void *user)
     }
   }
 
+  state->grapheme_state = grapheme_state;
   updatecursor(state, &oldpos, 0);
 
 #ifdef DEBUG
@@ -2099,6 +2275,7 @@ VTermState *vterm_obtain_state(VTerm *vt)
 
 void vterm_state_reset(VTermState *state, int hard)
 {
+  state->grapheme_state = 0;
   state->scrollregion_top = 0;
   state->scrollregion_bottom = -1;
   state->scrollregion_left = 0;

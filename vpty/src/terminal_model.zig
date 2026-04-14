@@ -4,6 +4,7 @@ const VTermAdapter = @import("terminal_state_vterm").VTermAdapter;
 const screen_types = @import("vterm_screen_types");
 
 pub const HostScreenSnapshot = screen_types.HostScreenSnapshot;
+pub const GraphemeMode = VTermAdapter.GraphemeMode;
 
 pub const ModelUpdate = struct {
     version: u64,
@@ -20,8 +21,12 @@ pub const TerminalModel = struct {
     version: u64 = 0,
 
     pub fn init(rows: u16, cols: u16) !TerminalModel {
+        return initWithMode(rows, cols, .legacy);
+    }
+
+    pub fn initWithMode(rows: u16, cols: u16, mode: VTermAdapter.GraphemeMode) !TerminalModel {
         return .{
-            .adapter = try VTermAdapter.init(rows, cols),
+            .adapter = try VTermAdapter.initWithMode(rows, cols, mode),
         };
     }
 
@@ -39,7 +44,6 @@ pub const TerminalModel = struct {
 
     pub fn resize(self: *TerminalModel, rows: u16, cols: u16) ModelUpdate {
         self.adapter.resize(rows, cols);
-        self.adapter.forceFullDamage();
         self.version += 1;
         return .{ .version = self.version };
     }
@@ -62,6 +66,6 @@ pub const TerminalModel = struct {
     }
 
     pub fn forceFullDamage(self: *TerminalModel) void {
-        self.adapter.forceFullDamage();
+        _ = self;
     }
 };

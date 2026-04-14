@@ -20,13 +20,22 @@ fn convertColor(raw: c.msr_vterm_color, is_fg: bool) screen_types.HostColor {
 pub const VTermAdapter = struct {
     handle: ?*c.msr_vterm_handle,
 
+    pub const GraphemeMode = enum(c_int) {
+        legacy = 0,
+        unicode = 1,
+    };
+
     pub const Size = struct {
         rows: u16,
         cols: u16,
     };
 
     pub fn init(rows: u16, cols: u16) !VTermAdapter {
-        const handle = c.msr_vterm_new(@intCast(rows), @intCast(cols)) orelse return error.OutOfMemory;
+        return initWithMode(rows, cols, .legacy);
+    }
+
+    pub fn initWithMode(rows: u16, cols: u16, mode: GraphemeMode) !VTermAdapter {
+        const handle = c.msr_vterm_new(@intCast(rows), @intCast(cols), @intFromEnum(mode)) orelse return error.OutOfMemory;
         return .{
             .handle = handle,
         };
@@ -43,10 +52,6 @@ pub const VTermAdapter = struct {
         if (self.handle) |handle| {
             c.msr_vterm_feed(handle, bytes.ptr, bytes.len);
         }
-    }
-
-    pub fn forceFullDamage(self: *VTermAdapter) void {
-        if (self.handle) |h| c.msr_vterm_force_full_damage(h);
     }
 
     pub fn resize(self: *VTermAdapter, rows: u16, cols: u16) void {
@@ -84,7 +89,6 @@ pub const VTermAdapter = struct {
             }
             hyperlinks.deinit(allocator);
         }
-
 
         for (0..@intCast(rows)) |r| {
             const row_cells = try allocator.alloc(screen_types.HostScreenCell, @intCast(cols));
@@ -245,4 +249,148 @@ test "BEL-terminated OSC 8 hyperlinks are captured" {
     try std.testing.expectEqualStrings("https://example.com", snapshot.hyperlinks[0].uri);
     try std.testing.expectEqual(@as(u32, 1), snapshot.lines[0].cells[0].hyperlink);
     try std.testing.expectEqual(@as(u32, 1), snapshot.lines[0].cells[1].hyperlink);
+}
+
+test "emoji variation selector cluster stays width 2 and advances cursor once" {
+    var adapter = try VTermAdapter.init(2, 12);
+    defer adapter.deinit();
+
+    adapter.feed("\xe2\xad\x95\xef\xb8\x8f!");
+
+    var snapshot = try adapter.snapshot(std.testing.allocator);
+    defer screen_types.freeScreenSnapshot(std.testing.allocator, &snapshot);
+
+    try std.testing.expectEqual(@as(u8, 2), snapshot.lines[0].cells[0].width);
+    try std.testing.expectEqual(@as(u32, 0x2b55), snapshot.lines[0].cells[0].chars[0]);
+    try std.testing.expectEqual(@as(u32, 0xfe0f), snapshot.lines[0].cells[0].chars[1]);
+    try std.testing.expectEqual(@as(u32, '!'), snapshot.lines[0].cells[2].chars[0]);
+    try std.testing.expectEqual(@as(u16, 3), snapshot.cursor_col);
+}
+
+test "single emoji codepoint stays width 2 and advances cursor once" {
+    var adapter = try VTermAdapter.init(2, 12);
+    defer adapter.deinit();
+
+    adapter.feed("\xf0\x9f\xa5\x93!");
+
+    var snapshot = try adapter.snapshot(std.testing.allocator);
+    defer screen_types.freeScreenSnapshot(std.testing.allocator, &snapshot);
+
+    try std.testing.expectEqual(@as(u8, 2), snapshot.lines[0].cells[0].width);
+    try std.testing.expectEqual(@as(u32, 0x1f953), snapshot.lines[0].cells[0].chars[0]);
+    try std.testing.expectEqual(@as(u32, '!'), snapshot.lines[0].cells[2].chars[0]);
+    try std.testing.expectEqual(@as(u16, 3), snapshot.cursor_col);
+}
+
+test "zwj emoji cluster stays width 2 and does not over-advance cursor" {
+    var adapter = try VTermAdapter.init(2, 20);
+    defer adapter.deinit();
+
+    adapter.feed("\xf0\x9f\x91\xa9\xe2\x80\x8d\xf0\x9f\x92\xbb!");
+
+    var snapshot = try adapter.snapshot(std.testing.allocator);
+    defer screen_types.freeScreenSnapshot(std.testing.allocator, &snapshot);
+
+    try std.testing.expectEqual(@as(u8, 2), snapshot.lines[0].cells[0].width);
+    try std.testing.expectEqual(@as(u16, 3), snapshot.cursor_col);
+}
+
+test "variation-selector emoji wraps at right edge without pulling next line backward" {
+    var adapter = try VTermAdapter.init(3, 4);
+    defer adapter.deinit();
+
+    adapter.feed("ab\xe2\xad\x95\xef\xb8\x8fc");
+
+    var snapshot = try adapter.snapshot(std.testing.allocator);
+    defer screen_types.freeScreenSnapshot(std.testing.allocator, &snapshot);
+
+    try std.testing.expectEqual(@as(u32, 'a'), snapshot.lines[0].cells[0].chars[0]);
+    try std.testing.expectEqual(@as(u32, 'b'), snapshot.lines[0].cells[1].chars[0]);
+    try std.testing.expectEqual(@as(u8, 2), snapshot.lines[0].cells[2].width);
+    try std.testing.expectEqual(@as(u32, 0x2b55), snapshot.lines[0].cells[2].chars[0]);
+    try std.testing.expectEqual(@as(u32, 0xfe0f), snapshot.lines[0].cells[2].chars[1]);
+    try std.testing.expectEqual(@as(u32, 'c'), snapshot.lines[1].cells[0].chars[0]);
+    try std.testing.expectEqual(@as(u16, 1), snapshot.cursor_row);
+    try std.testing.expectEqual(@as(u16, 1), snapshot.cursor_col);
+}
+
+test "regional-indicator pair wraps at right edge without pulling next line backward" {
+    var adapter = try VTermAdapter.init(3, 4);
+    defer adapter.deinit();
+
+    adapter.feed("ab\xf0\x9f\x87\xba\xf0\x9f\x87\xb8c");
+
+    var snapshot = try adapter.snapshot(std.testing.allocator);
+    defer screen_types.freeScreenSnapshot(std.testing.allocator, &snapshot);
+
+    try std.testing.expectEqual(@as(u32, 'a'), snapshot.lines[0].cells[0].chars[0]);
+    try std.testing.expectEqual(@as(u32, 'b'), snapshot.lines[0].cells[1].chars[0]);
+    try std.testing.expectEqual(@as(u8, 2), snapshot.lines[0].cells[2].width);
+    try std.testing.expectEqual(@as(u32, 0x1f1fa), snapshot.lines[0].cells[2].chars[0]);
+    try std.testing.expectEqual(@as(u32, 0x1f1f8), snapshot.lines[0].cells[2].chars[1]);
+    try std.testing.expectEqual(@as(u32, 'c'), snapshot.lines[1].cells[0].chars[0]);
+    try std.testing.expectEqual(@as(u16, 1), snapshot.cursor_row);
+    try std.testing.expectEqual(@as(u16, 1), snapshot.cursor_col);
+}
+
+test "zwj emoji wraps at right edge without pulling next line backward" {
+    var adapter = try VTermAdapter.init(3, 4);
+    defer adapter.deinit();
+
+    adapter.feed("ab\xf0\x9f\x91\xa9\xe2\x80\x8d\xf0\x9f\x92\xbbc");
+
+    var snapshot = try adapter.snapshot(std.testing.allocator);
+    defer screen_types.freeScreenSnapshot(std.testing.allocator, &snapshot);
+
+    try std.testing.expectEqual(@as(u32, 'a'), snapshot.lines[0].cells[0].chars[0]);
+    try std.testing.expectEqual(@as(u32, 'b'), snapshot.lines[0].cells[1].chars[0]);
+    try std.testing.expectEqual(@as(u8, 2), snapshot.lines[0].cells[2].width);
+    try std.testing.expectEqual(@as(u32, 0x1f469), snapshot.lines[0].cells[2].chars[0]);
+    try std.testing.expectEqual(@as(u32, 0x200d), snapshot.lines[0].cells[2].chars[1]);
+    try std.testing.expectEqual(@as(u32, 0x1f4bb), snapshot.lines[0].cells[2].chars[2]);
+    try std.testing.expectEqual(@as(u32, 'c'), snapshot.lines[1].cells[0].chars[0]);
+    try std.testing.expectEqual(@as(u16, 1), snapshot.cursor_row);
+    try std.testing.expectEqual(@as(u16, 1), snapshot.cursor_col);
+}
+
+test "legacy mode keeps regional indicators together" {
+    var adapter = try VTermAdapter.initWithMode(2, 8, .legacy);
+    defer adapter.deinit();
+
+    adapter.feed("\xf0\x9f\x87\xba\xf0\x9f\x87\xb8!");
+
+    var snapshot = try adapter.snapshot(std.testing.allocator);
+    defer screen_types.freeScreenSnapshot(std.testing.allocator, &snapshot);
+
+    try std.testing.expectEqual(@as(u32, 0x1f1fa), snapshot.lines[0].cells[0].chars[0]);
+    try std.testing.expectEqual(@as(u32, 0x1f1f8), snapshot.lines[0].cells[0].chars[1]);
+    try std.testing.expectEqual(@as(u32, '!'), snapshot.lines[0].cells[2].chars[0]);
+}
+
+test "unicode mode keeps regional indicators together" {
+    var adapter = try VTermAdapter.initWithMode(2, 8, .unicode);
+    defer adapter.deinit();
+
+    adapter.feed("\xf0\x9f\x87\xba\xf0\x9f\x87\xb8!");
+
+    var snapshot = try adapter.snapshot(std.testing.allocator);
+    defer screen_types.freeScreenSnapshot(std.testing.allocator, &snapshot);
+
+    try std.testing.expectEqual(@as(u32, 0x1f1fa), snapshot.lines[0].cells[0].chars[0]);
+    try std.testing.expectEqual(@as(u32, 0x1f1f8), snapshot.lines[0].cells[0].chars[1]);
+    try std.testing.expectEqual(@as(u32, '!'), snapshot.lines[0].cells[2].chars[0]);
+}
+
+test "unicode mode keeps combining mark attached to previous base" {
+    var adapter = try VTermAdapter.initWithMode(2, 8, .unicode);
+    defer adapter.deinit();
+
+    adapter.feed("e\xcc\x81!");
+
+    var snapshot = try adapter.snapshot(std.testing.allocator);
+    defer screen_types.freeScreenSnapshot(std.testing.allocator, &snapshot);
+
+    try std.testing.expectEqual(@as(u32, 'e'), snapshot.lines[0].cells[0].chars[0]);
+    try std.testing.expectEqual(@as(u32, 0x0301), snapshot.lines[0].cells[0].chars[1]);
+    try std.testing.expectEqual(@as(u32, '!'), snapshot.lines[0].cells[1].chars[0]);
 }

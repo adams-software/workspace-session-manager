@@ -27,6 +27,11 @@ typedef struct VTerm VTerm;
 typedef struct VTermState VTermState;
 typedef struct VTermScreen VTermScreen;
 
+typedef enum {
+  VTERM_GRAPHEME_MODE_LEGACY = 0,
+  VTERM_GRAPHEME_MODE_UNICODE = 1,
+} VTermGraphemeMode;
+
 typedef struct {
   int row;
   int col;
@@ -350,6 +355,8 @@ void vterm_set_size(VTerm *vt, int rows, int cols);
 
 int  vterm_get_utf8(const VTerm *vt);
 void vterm_set_utf8(VTerm *vt, int is_utf8);
+VTermGraphemeMode vterm_get_grapheme_mode(const VTerm *vt);
+void vterm_set_grapheme_mode(VTerm *vt, VTermGraphemeMode mode);
 
 size_t vterm_input_write(VTerm *vt, const char *bytes, size_t len);
 
