@@ -25,6 +25,14 @@ tty_printf() { printf "$@" > /dev/tty; }
 err() { tty_printf '%s\n' "$*"; }
 out() { tty_printf '%s\n' "$*"; }
 
+menu_key_value() {
+  if [[ -n "${WSM_MENU_KEY:-}" ]]; then
+    printf '%s\n' "$WSM_MENU_KEY"
+  else
+    printf '%s\n' 'ctrl-g'
+  fi
+}
+
 ROOT_OVERRIDE=""
 
 if [[ $# -ge 1 && "$1" == --root=* ]]; then
@@ -187,6 +195,7 @@ render_header() {
   else
     tty_printf 'current: none\n'
   fi
+  tty_printf 'hotkey: %s\n' "$(menu_key_value)"
   tty_printf '\n'
 }
 

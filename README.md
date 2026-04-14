@@ -73,7 +73,7 @@ wsm create api/dev -- npm run dev
 Open the workspace menu:
 
 ```bash
-wsm menu
+wsm menu or hotkey ctrl-g
 ```
 
 Detach from the current session:
