@@ -9,13 +9,27 @@
 extern "C" {
 #endif
 
+typedef struct msr_vterm_hyperlink_record {
+  char *params;
+  size_t params_len;
+  char *uri;
+  size_t uri_len;
+} msr_vterm_hyperlink_record;
+
 typedef struct {
   VTerm *vt;
+  VTermState *state;
   VTermScreen *screen;
   int rows;
   int cols;
   int cursor_visible;
   int alt_screen;
+  char *osc8_buf;
+  size_t osc8_buf_len;
+  size_t osc8_buf_cap;
+  msr_vterm_hyperlink_record *hyperlinks;
+  size_t hyperlinks_len;
+  size_t hyperlinks_cap;
 } msr_vterm_handle;
 
 typedef struct {
@@ -43,6 +57,7 @@ typedef struct {
   uint32_t chars[VTERM_MAX_CHARS_PER_CELL];
   uint8_t chars_len;
   uint8_t width;
+  uint32_t hyperlink_handle;
   msr_vterm_color fg;
   msr_vterm_color bg;
   msr_vterm_cell_attrs attrs;
@@ -57,6 +72,8 @@ int msr_vterm_get_alt_screen(msr_vterm_handle *handle);
 void msr_vterm_force_full_damage(msr_vterm_handle *handle);
 void msr_vterm_get_cell(msr_vterm_handle *handle, int row, int col, msr_vterm_cell *out);
 int msr_vterm_row_is_eol(msr_vterm_handle *handle, int row);
+const char *msr_vterm_get_hyperlink_uri(msr_vterm_handle *handle, uint32_t hyperlink_handle, size_t *len);
+const char *msr_vterm_get_hyperlink_params(msr_vterm_handle *handle, uint32_t hyperlink_handle, size_t *len);
 
 #ifdef __cplusplus
 }

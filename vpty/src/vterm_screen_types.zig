@@ -25,10 +25,16 @@ pub const HostCellAttrs = struct {
     font: u8 = 0,
 };
 
+pub const HostHyperlink = struct {
+    params: []const u8,
+    uri: []const u8,
+};
+
 pub const HostScreenCell = struct {
     chars: [6]u32 = [_]u32{0} ** 6,
     chars_len: u8 = 0,
     width: u8 = 1,
+    hyperlink: u32 = 0,
     fg: HostColor = .{},
     bg: HostColor = .{},
     attrs: HostCellAttrs = .{},
@@ -48,6 +54,7 @@ pub const HostScreenSnapshot = struct {
     alt_screen: bool,
     title: ?[]const u8 = null,
     seq: u64,
+    hyperlinks: []HostHyperlink = &.{},
     lines: []HostScreenLine,
 };
 
@@ -57,4 +64,9 @@ pub fn freeScreenSnapshot(allocator: std.mem.Allocator, snapshot: *HostScreenSna
     }
     allocator.free(snapshot.lines);
     if (snapshot.title) |title| allocator.free(title);
+    for (snapshot.hyperlinks) |link| {
+        allocator.free(link.params);
+        allocator.free(link.uri);
+    }
+    if (snapshot.hyperlinks.len > 0) allocator.free(snapshot.hyperlinks);
 }

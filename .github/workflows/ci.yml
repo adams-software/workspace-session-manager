@@ -16,11 +16,6 @@ jobs:
         with:
           version: 0.15.2
 
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libvterm-dev
-
       - name: Build
         run: zig build
 

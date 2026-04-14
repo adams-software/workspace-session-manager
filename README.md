@@ -16,7 +16,7 @@ curl -fsSL https://raw.githubusercontent.com/adams-software/workspace-session-ma
 
 That downloads the latest Linux x86_64 release bundle and runs its installer.
 
-On Debian/Ubuntu/WSL, `vpty` needs the `libvterm0` runtime package. If it is missing, the installer will stop and tell you exactly what to install before retrying.
+`vpty` now vendors its libvterm dependency inside the repo and release build, so no separate system `libvterm0` runtime package is required.
 
 ### from a local checkout
 
@@ -41,7 +41,7 @@ sh install.sh
 
 By default this installs commands into `~/.local/bin`.
 
-Runtime note: `vpty` needs the system libvterm runtime library. On Debian/Ubuntu/WSL that package is usually `libvterm0`.
+Runtime note: `vpty` uses the vendored libvterm copy under `vpty/vendor/libvterm`, including the local OSC 8 support patch.
 
 ## Quick usage
 

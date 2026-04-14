@@ -69,12 +69,20 @@ pub const VTermAdapter = struct {
         const cols = handle.cols;
 
         var lines = try allocator.alloc(screen_types.HostScreenLine, @intCast(rows));
+        var hyperlink_map = std.AutoHashMap(u32, u32).init(allocator);
+        defer hyperlink_map.deinit();
+        var hyperlinks = std.ArrayList(screen_types.HostHyperlink){};
         var initialized_rows: usize = 0;
         errdefer {
             for (lines[0..initialized_rows]) |line| {
                 allocator.free(line.cells);
             }
             allocator.free(lines);
+            for (hyperlinks.items) |link| {
+                allocator.free(link.params);
+                allocator.free(link.uri);
+            }
+            hyperlinks.deinit(allocator);
         }
 
 
@@ -100,6 +108,7 @@ pub const VTermAdapter = struct {
                     .chars = chars,
                     .chars_len = raw.chars_len,
                     .width = raw.width,
+                    .hyperlink = 0,
                     .fg = convertColor(raw.fg, true),
                     .bg = convertColor(raw.bg, false),
                     .attrs = .{
@@ -113,6 +122,29 @@ pub const VTermAdapter = struct {
                         .font = raw.attrs.font,
                     },
                 };
+
+                if (raw.hyperlink_handle != 0) {
+                    const gop = try hyperlink_map.getOrPut(raw.hyperlink_handle);
+                    if (!gop.found_existing) {
+                        var params_len: usize = 0;
+                        const params_ptr = c.msr_vterm_get_hyperlink_params(handle, raw.hyperlink_handle, &params_len) orelse {
+                            _ = hyperlink_map.remove(raw.hyperlink_handle);
+                            continue;
+                        };
+                        var uri_len: usize = 0;
+                        const uri_ptr = c.msr_vterm_get_hyperlink_uri(handle, raw.hyperlink_handle, &uri_len) orelse {
+                            _ = hyperlink_map.remove(raw.hyperlink_handle);
+                            continue;
+                        };
+                        const params = try allocator.dupe(u8, params_ptr[0..params_len]);
+                        errdefer allocator.free(params);
+                        const uri = try allocator.dupe(u8, uri_ptr[0..uri_len]);
+                        errdefer allocator.free(uri);
+                        try hyperlinks.append(allocator, .{ .params = params, .uri = uri });
+                        gop.value_ptr.* = @intCast(hyperlinks.items.len);
+                    }
+                    row_cells[col_idx].hyperlink = gop.value_ptr.*;
+                }
             }
         }
 
@@ -130,7 +162,87 @@ pub const VTermAdapter = struct {
             .alt_screen = c.msr_vterm_get_alt_screen(handle) != 0,
             .title = null,
             .seq = 0,
+            .hyperlinks = try hyperlinks.toOwnedSlice(allocator),
             .lines = lines,
         };
     }
 };
+
+test "OSC 8 hyperlinks are captured as snapshot-local metadata" {
+    var adapter = try VTermAdapter.init(4, 12);
+    defer adapter.deinit();
+
+    adapter.feed("\x1b]8;;https://example.com\x1b\\hi\x1b]8;;\x1b\\!");
+
+    var snapshot = try adapter.snapshot(std.testing.allocator);
+    defer screen_types.freeScreenSnapshot(std.testing.allocator, &snapshot);
+
+    try std.testing.expectEqual(@as(usize, 1), snapshot.hyperlinks.len);
+    try std.testing.expectEqualStrings("", snapshot.hyperlinks[0].params);
+    try std.testing.expectEqualStrings("https://example.com", snapshot.hyperlinks[0].uri);
+    try std.testing.expectEqual(@as(u32, 1), snapshot.lines[0].cells[0].hyperlink);
+    try std.testing.expectEqual(@as(u32, 1), snapshot.lines[0].cells[1].hyperlink);
+    try std.testing.expectEqual(@as(u32, 0), snapshot.lines[0].cells[2].hyperlink);
+}
+
+test "OSC 8 preserves params and distinguishes same uri with different params" {
+    var adapter = try VTermAdapter.init(2, 16);
+    defer adapter.deinit();
+
+    adapter.feed("\x1b]8;id=1;https://example.com\x1b\\a\x1b]8;;\x1b\\\x1b]8;id=2;https://example.com\x1b\\b\x1b]8;;\x1b\\");
+
+    var snapshot = try adapter.snapshot(std.testing.allocator);
+    defer screen_types.freeScreenSnapshot(std.testing.allocator, &snapshot);
+
+    try std.testing.expectEqual(@as(usize, 2), snapshot.hyperlinks.len);
+    try std.testing.expectEqualStrings("id=1", snapshot.hyperlinks[0].params);
+    try std.testing.expectEqualStrings("https://example.com", snapshot.hyperlinks[0].uri);
+    try std.testing.expectEqualStrings("id=2", snapshot.hyperlinks[1].params);
+    try std.testing.expectEqualStrings("https://example.com", snapshot.hyperlinks[1].uri);
+    try std.testing.expectEqual(@as(u32, 1), snapshot.lines[0].cells[0].hyperlink);
+    try std.testing.expectEqual(@as(u32, 2), snapshot.lines[0].cells[1].hyperlink);
+}
+
+test "malformed OSC 8 is ignored without leaking hyperlink metadata" {
+    var adapter = try VTermAdapter.init(2, 12);
+    defer adapter.deinit();
+
+    adapter.feed("\x1b]8broken\x1b\\ok");
+
+    var snapshot = try adapter.snapshot(std.testing.allocator);
+    defer screen_types.freeScreenSnapshot(std.testing.allocator, &snapshot);
+
+    try std.testing.expectEqual(@as(usize, 0), snapshot.hyperlinks.len);
+    try std.testing.expectEqual(@as(u32, 0), snapshot.lines[0].cells[0].hyperlink);
+    try std.testing.expectEqual(@as(u32, 0), snapshot.lines[0].cells[1].hyperlink);
+}
+
+test "malformed OSC 8 after valid open leaves current hyperlink active" {
+    var adapter = try VTermAdapter.init(2, 16);
+    defer adapter.deinit();
+
+    adapter.feed("\x1b]8;;https://example.com\x1b\\a\x1b]8broken\x1b\\b\x1b]8;;\x1b\\");
+
+    var snapshot = try adapter.snapshot(std.testing.allocator);
+    defer screen_types.freeScreenSnapshot(std.testing.allocator, &snapshot);
+
+    try std.testing.expectEqual(@as(usize, 1), snapshot.hyperlinks.len);
+    try std.testing.expectEqualStrings("https://example.com", snapshot.hyperlinks[0].uri);
+    try std.testing.expectEqual(@as(u32, 1), snapshot.lines[0].cells[0].hyperlink);
+    try std.testing.expectEqual(@as(u32, 1), snapshot.lines[0].cells[1].hyperlink);
+}
+
+test "BEL-terminated OSC 8 hyperlinks are captured" {
+    var adapter = try VTermAdapter.init(2, 12);
+    defer adapter.deinit();
+
+    adapter.feed("\x1b]8;;https://example.com\x07hi\x1b]8;;\x07");
+
+    var snapshot = try adapter.snapshot(std.testing.allocator);
+    defer screen_types.freeScreenSnapshot(std.testing.allocator, &snapshot);
+
+    try std.testing.expectEqual(@as(usize, 1), snapshot.hyperlinks.len);
+    try std.testing.expectEqualStrings("https://example.com", snapshot.hyperlinks[0].uri);
+    try std.testing.expectEqual(@as(u32, 1), snapshot.lines[0].cells[0].hyperlink);
+    try std.testing.expectEqual(@as(u32, 1), snapshot.lines[0].cells[1].hyperlink);
+}

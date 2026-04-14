@@ -2,9 +2,13 @@ const std = @import("std");
 const actor_mailboxes = @import("actor_mailboxes");
 
 // Routes terminal output by semantic effect: ordinary screen/model bytes stay on the
-// virtual path, while selected outer-terminal control sequences (for example OSC 52,
-// bracketed paste mode, focus reporting, and mouse-reporting setup) are forwarded to
-// the real terminal control channel instead of being swallowed into screen rendering.
+// virtual path, while selected outer-terminal control sequences are handled specially.
+//
+// Current policy:
+// - OSC 52 is forwarded to the real terminal control channel
+// - OSC 8 stays in screen/model bytes so vterm can own hyperlink state
+// - selected terminal-mode CSI toggles are forwarded to the real terminal
+// - other OSC/CSI content remains in screen bytes unless explicitly peeled off here
 
 const State = enum {
     idle,
@@ -18,6 +22,8 @@ const State = enum {
     osc_maybe_st_52,
     osc_maybe_st_other,
 };
+
+const max_osc_bytes = 8192;
 
 pub const FeedResult = struct {
     emitted_osc52: bool = false,
@@ -73,6 +79,7 @@ pub const SideEffectForwarder = struct {
     }
 
     fn appendOsc(self: *SideEffectForwarder, b: u8) !void {
+        if (self.osc_buf.items.len >= max_osc_bytes) return error.OscTooLong;
         try self.osc_buf.append(self.allocator, b);
     }
 
@@ -174,7 +181,10 @@ pub const SideEffectForwarder = struct {
                 },
 
                 .osc => {
-                    try self.appendOsc(b);
+                    self.appendOsc(b) catch {
+                        self.resetOsc();
+                        continue;
+                    };
                     if (b == '5') {
                         self.state = .osc_seen_5;
                     } else {
@@ -183,7 +193,10 @@ pub const SideEffectForwarder = struct {
                 },
 
                 .osc_seen_5 => {
-                    try self.appendOsc(b);
+                    self.appendOsc(b) catch {
+                        self.resetOsc();
+                        continue;
+                    };
                     if (b == '2') {
                         self.state = .osc_seen_52;
                     } else {
@@ -192,7 +205,10 @@ pub const SideEffectForwarder = struct {
                 },
 
                 .osc_seen_52 => {
-                    try self.appendOsc(b);
+                    self.appendOsc(b) catch {
+                        self.resetOsc();
+                        continue;
+                    };
                     if (b == ';') {
                         self.state = .osc_52_body;
                     } else {
@@ -201,7 +217,10 @@ pub const SideEffectForwarder = struct {
                 },
 
                 .osc_52_body => {
-                    try self.appendOsc(b);
+                    self.appendOsc(b) catch {
+                        self.resetOsc();
+                        continue;
+                    };
 
                     if (b == 0x07) {
                         try self.flushOsc52(stdout_actor);
@@ -213,9 +232,13 @@ pub const SideEffectForwarder = struct {
                 },
 
                 .osc_other_body => {
-                    try self.appendOsc(b);
+                    self.appendOsc(b) catch {
+                        self.resetOsc();
+                        continue;
+                    };
 
                     if (b == 0x07) {
+                        try self.appendScreenSlice(self.osc_buf.items);
                         self.resetOsc();
                     } else if (b == 0x1b) {
                         self.state = .osc_maybe_st_other;
@@ -223,7 +246,10 @@ pub const SideEffectForwarder = struct {
                 },
 
                 .osc_maybe_st_52 => {
-                    try self.appendOsc(b);
+                    self.appendOsc(b) catch {
+                        self.resetOsc();
+                        continue;
+                    };
 
                     if (b == '\\') {
                         try self.flushOsc52(stdout_actor);
@@ -235,9 +261,13 @@ pub const SideEffectForwarder = struct {
                 },
 
                 .osc_maybe_st_other => {
-                    try self.appendOsc(b);
+                    self.appendOsc(b) catch {
+                        self.resetOsc();
+                        continue;
+                    };
 
                     if (b == '\\') {
+                        try self.appendScreenSlice(self.osc_buf.items);
                         self.resetOsc();
                     } else {
                         self.state = .osc_other_body;
@@ -373,5 +403,36 @@ test "ordinary CSI screen control stays in screen bytes" {
     const result = try forwarder.feed(&stdout_actor, input);
 
     try std.testing.expectEqualStrings("a\x1b[2Jb", result.screen_bytes);
+    try std.testing.expectEqual(@as(usize, 0), stdout_actor.controls.items.len);
+}
+
+test "OSC 8 stays in screen bytes while OSC 52 still bypasses" {
+    var forwarder = SideEffectForwarder.init(std.testing.allocator);
+    defer forwarder.deinit();
+
+    var stdout_actor = TestStdoutActor.init(std.testing.allocator);
+    defer stdout_actor.deinit();
+
+    const input = "a\x1b]8;id=1;https://example.com\x1b\\b\x1b]52;c;Zm9v\x07c\x1b]8;;\x1b\\d";
+    const result = try forwarder.feed(&stdout_actor, input);
+
+    try std.testing.expectEqualStrings("a\x1b]8;id=1;https://example.com\x1b\\bc\x1b]8;;\x1b\\d", result.screen_bytes);
+    try std.testing.expectEqual(@as(usize, 1), stdout_actor.controls.items.len);
+    try std.testing.expectEqualStrings("\x1b]52;c;Zm9v\x07", stdout_actor.controls.items[0]);
+}
+
+test "split chunk OSC 8 is emitted only after completion" {
+    var forwarder = SideEffectForwarder.init(std.testing.allocator);
+    defer forwarder.deinit();
+
+    var stdout_actor = TestStdoutActor.init(std.testing.allocator);
+    defer stdout_actor.deinit();
+
+    const first = try forwarder.feed(&stdout_actor, "x\x1b]8;id=1;https://example");
+    try std.testing.expectEqualStrings("x", first.screen_bytes);
+    try std.testing.expectEqual(@as(usize, 0), stdout_actor.controls.items.len);
+
+    const second = try forwarder.feed(&stdout_actor, ".com\x1b\\y");
+    try std.testing.expectEqualStrings("\x1b]8;id=1;https://example.com\x1b\\y", second.screen_bytes);
     try std.testing.expectEqual(@as(usize, 0), stdout_actor.controls.items.len);
 }

@@ -1,5 +1,23 @@
 const std = @import("std");
 
+fn addVendoredLibvterm(module: *std.Build.Module, b: *std.Build) void {
+    module.addIncludePath(b.path("vpty/vendor/libvterm/include"));
+    module.addIncludePath(b.path("vpty/vendor/libvterm/src"));
+    module.addIncludePath(b.path("vpty/src"));
+    module.addCSourceFile(.{ .file = b.path("vpty/src/vterm_shim.c") });
+    module.addCSourceFiles(.{ .files = &.{
+        "vpty/vendor/libvterm/src/encoding.c",
+        "vpty/vendor/libvterm/src/keyboard.c",
+        "vpty/vendor/libvterm/src/mouse.c",
+        "vpty/vendor/libvterm/src/parser.c",
+        "vpty/vendor/libvterm/src/pen.c",
+        "vpty/vendor/libvterm/src/screen.c",
+        "vpty/vendor/libvterm/src/state.c",
+        "vpty/vendor/libvterm/src/unicode.c",
+        "vpty/vendor/libvterm/src/vterm.c",
+    } });
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -18,10 +36,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
-    terminal_state_vterm_mod.addIncludePath(.{ .cwd_relative = "/usr/include" });
-    terminal_state_vterm_mod.addIncludePath(b.path("vpty/src"));
-    terminal_state_vterm_mod.addCSourceFile(.{ .file = b.path("vpty/src/vterm_shim.c") });
-    terminal_state_vterm_mod.linkSystemLibrary("vterm", .{});
+    addVendoredLibvterm(terminal_state_vterm_mod, b);
     terminal_state_vterm_mod.addImport("vterm_screen_types", vterm_screen_types_mod);
 
     const byte_queue_mod = b.addModule("byte_queue", .{
@@ -411,10 +426,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
-    terminal_state_vterm_test_root.addIncludePath(.{ .cwd_relative = "/usr/include" });
-    terminal_state_vterm_test_root.addIncludePath(b.path("vpty/src"));
-    terminal_state_vterm_test_root.addCSourceFile(.{ .file = b.path("vpty/src/vterm_shim.c") });
-    terminal_state_vterm_test_root.linkSystemLibrary("vterm", .{});
+    addVendoredLibvterm(terminal_state_vterm_test_root, b);
+    terminal_state_vterm_test_root.addImport("vterm_screen_types", vterm_screen_types_mod);
     const terminal_state_vterm_tests = b.addTest(.{
         .root_module = terminal_state_vterm_test_root,
     });

@@ -125,6 +125,7 @@ pub const Renderer = struct {
     pub fn shutdown(self: *Renderer, version: u64) void {
         self.render_buf.clearRetainingCapacity();
 
+        self.writeBytes("\x1b]8;;\x1b\\");
         if (self.output_state.alt_screen) {
             self.writeBytes("\x1b[?1049l");
         }
@@ -182,11 +183,17 @@ pub const Renderer = struct {
 
             var col: usize = 0;
             while (col < line.cells.len) : (col += 1) {
-                emitCell(self, line.cells[col], &style_state);
+                const cell = line.cells[col];
+                if (cell.width == 0) continue;
+                emitHyperlinkTransition(self, snapshot, cell.hyperlink, &style_state.active_hyperlink);
+                emitCell(self, cell, &style_state);
             }
 
+            emitHyperlinkTransition(self, snapshot, 0, &style_state.active_hyperlink);
             self.eraseToEndOfLine();
         }
+
+        emitHyperlinkTransition(self, snapshot, 0, &style_state.active_hyperlink);
     }
 };
 
@@ -229,6 +236,7 @@ const StyleState = struct {
     fg: host.HostColor = .{},
     bg: host.HostColor = .{},
     attrs: host.HostCellAttrs = .{},
+    active_hyperlink: u32 = 0,
 
     fn reset(self: *StyleState, renderer: *Renderer) void {
         renderer.resetStyle();
@@ -260,6 +268,25 @@ const StyleState = struct {
     }
 };
 
+fn emitHyperlinkTransition(renderer: *Renderer, snapshot: *const host.HostScreenSnapshot, target: u32, current: *u32) void {
+    if (current.* == target) return;
+
+    if (current.* != 0) renderer.writeBytes("\x1b]8;;\x1b\\");
+
+    if (target != 0 and target <= snapshot.hyperlinks.len) {
+        const link = snapshot.hyperlinks[target - 1];
+        renderer.writeBytes("\x1b]8;");
+        renderer.writeBytes(link.params);
+        renderer.writeBytes(";");
+        renderer.writeBytes(link.uri);
+        renderer.writeBytes("\x1b\\");
+        current.* = target;
+        return;
+    }
+
+    current.* = 0;
+}
+
 fn colorEq(a: host.HostColor, b: host.HostColor) bool {
     return a.kind == b.kind and
         a.palette_index == b.palette_index and
@@ -277,8 +304,6 @@ fn emitColor(renderer: *Renderer, base: u8, color: host.HostColor) void {
 }
 
 fn emitCell(renderer: *Renderer, cell: host.HostScreenCell, style_state: *StyleState) void {
-    if (cell.width == 0) return;
-
     style_state.diffAndEmit(renderer, cell);
 
     var buf: [32]u8 = undefined;
@@ -288,4 +313,66 @@ fn emitCell(renderer: *Renderer, cell: host.HostScreenCell, style_state: *StyleS
     } else {
         renderer.writeBytes(text);
     }
+}
+
+test "hyperlink transitions open once per run and close on change/end" {
+    var renderer = Renderer{ .stdout_thread = undefined };
+    renderer.ensureBufferCapacity();
+    defer renderer.deinit();
+
+    const links = [_]host.HostHyperlink{
+        .{ .params = "id=1", .uri = "https://a.test" },
+        .{ .params = "id=2", .uri = "https://b.test" },
+    };
+
+    var current: u32 = 0;
+    emitHyperlinkTransition(&renderer, &.{
+        .rows = 0,
+        .cols = 0,
+        .cursor_row = 0,
+        .cursor_col = 0,
+        .cursor_visible = false,
+        .alt_screen = false,
+        .seq = 0,
+        .hyperlinks = links[0..],
+        .lines = &.{},
+    }, 1, &current);
+    emitHyperlinkTransition(&renderer, &.{
+        .rows = 0,
+        .cols = 0,
+        .cursor_row = 0,
+        .cursor_col = 0,
+        .cursor_visible = false,
+        .alt_screen = false,
+        .seq = 0,
+        .hyperlinks = links[0..],
+        .lines = &.{},
+    }, 1, &current);
+    emitHyperlinkTransition(&renderer, &.{
+        .rows = 0,
+        .cols = 0,
+        .cursor_row = 0,
+        .cursor_col = 0,
+        .cursor_visible = false,
+        .alt_screen = false,
+        .seq = 0,
+        .hyperlinks = links[0..],
+        .lines = &.{},
+    }, 2, &current);
+    emitHyperlinkTransition(&renderer, &.{
+        .rows = 0,
+        .cols = 0,
+        .cursor_row = 0,
+        .cursor_col = 0,
+        .cursor_visible = false,
+        .alt_screen = false,
+        .seq = 0,
+        .hyperlinks = links[0..],
+        .lines = &.{},
+    }, 0, &current);
+
+    try std.testing.expectEqualStrings(
+        "\x1b]8;id=1;https://a.test\x1b\\\x1b]8;;\x1b\\\x1b]8;id=2;https://b.test\x1b\\\x1b]8;;\x1b\\",
+        renderer.render_buf.items,
+    );
 }

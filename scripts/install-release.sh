@@ -24,33 +24,6 @@ warn() {
   printf '%s\n' "$*" >&2
 }
 
-have_libvterm() {
-  if need_cmd ldconfig && ldconfig -p 2>/dev/null | grep -q 'libvterm\.so\.0'; then
-    return 0
-  fi
-  for p in \
-    /lib/x86_64-linux-gnu/libvterm.so.0 \
-    /usr/lib/x86_64-linux-gnu/libvterm.so.0 \
-    /lib64/libvterm.so.0 \
-    /usr/lib64/libvterm.so.0; do
-    [ -e "$p" ] && return 0
-  done
-  return 1
-}
-
-install_runtime_deps_if_possible() {
-  if have_libvterm; then
-    return 0
-  fi
-
-  warn "install-release.sh: missing runtime dependency libvterm.so.0"
-  if need_cmd apt-get; then
-    warn "install-release.sh: on Debian/Ubuntu/WSL, run: sudo apt-get update && sudo apt-get install -y libvterm0"
-  else
-    warn "install-release.sh: install your distro's libvterm runtime package, then re-run this installer"
-  fi
-  exit 1
-}
 
 case "$VERSION" in
   latest)
@@ -62,8 +35,6 @@ case "$VERSION" in
 esac
 
 ARCHIVE="$WORKDIR/$ASSET_NAME"
-
-install_runtime_deps_if_possible
 
 if command -v curl >/dev/null 2>&1; then
   curl -fsSL "$URL" -o "$ARCHIVE"

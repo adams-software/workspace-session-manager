@@ -58,12 +58,7 @@ After unpacking the tarball:
 sh install.sh
 ```
 
-On Debian/Ubuntu/WSL, the installer will try to install `libvterm0` automatically. If it cannot, install it manually:
-
-```bash
-sudo apt-get update
-sudo apt-get install -y libvterm0
-```
+No separate `libvterm0` runtime package is required. `vpty` vendors libvterm as part of the project build and release bundle.
 
 By default this installs to:
 
@@ -109,8 +104,7 @@ wsm attach api/dev
 
 Run `vpty` directly:
 
-Note: if `vpty` fails with `libvterm.so.0: cannot open shared object file`, install the libvterm runtime package first, usually `libvterm0` on Debian/Ubuntu/WSL.
-
+`vpty` uses the vendored libvterm build, so you should not need a separate system `libvterm.so.0` runtime library.
 
 ```bash
 vpty -- bash

@@ -4,6 +4,7 @@ const screen_types = @import("vterm_screen_types");
 
 pub const HostColor = screen_types.HostColor;
 pub const HostCellAttrs = screen_types.HostCellAttrs;
+pub const HostHyperlink = screen_types.HostHyperlink;
 pub const HostScreenCell = screen_types.HostScreenCell;
 pub const HostScreenLine = screen_types.HostScreenLine;
 pub const HostScreenSnapshot = screen_types.HostScreenSnapshot;
