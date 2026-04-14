@@ -394,24 +394,23 @@ create_flow() {
     render_header
     tty_printf 'CREATE\n'
     tty_printf '%s\n\n' '----'
-    tty_printf 'type a canonical target. enter creates it when no exact match exists.\n'
-    tty_printf 'matches are shown for context only. esc goes back.\n\n'
+    tty_printf 'type a canonical target. enter creates it when the target is new.\n'
+    tty_printf 'existing names are blocked here. esc goes back.\n\n'
     tty_printf 'target> %s\n\n' "$query"
     render_match_list 0 0
     if (( can_create == 1 )); then
       tty_printf '\n  create -> %s\n' "$query"
     elif [[ -n "$invalid_hint" ]]; then
       tty_printf '\n  %s\n' "$invalid_hint"
+    elif [[ -n "$query" && $FILTER_EXACT_MATCH -eq 1 ]]; then
+      tty_printf '\n  session already exists: %s\n' "$query"
     fi
     tty_printf '\n'
 
     key="$(read_key)" || return 0
     case "$key" in
       ''|$'\n'|$'\r')
-        if [[ -n "$query" && $FILTER_EXACT_MATCH -eq 1 ]]; then
-          wsm_cmd attach "$query"
-          return 10
-        elif (( can_create == 1 )); then
+        if (( can_create == 1 )); then
           wsm_cmd create "$query"
           return 10
         fi
