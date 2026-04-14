@@ -30,6 +30,16 @@ VPTY_BIN="${VPTY_BIN:-$BIN_DIR/vpty}"
 err() { printf '%s\n' "$*" >&2; }
 out() { printf '%s\n' "$*"; }
 
+menu_key_value() {
+  if [[ -n "$MENU_KEY_OVERRIDE" ]]; then
+    printf '%s\n' "$MENU_KEY_OVERRIDE"
+  elif [[ -n "${WSM_MENU_KEY:-}" ]]; then
+    printf '%s\n' "$WSM_MENU_KEY"
+  else
+    printf '%s\n' 'ctrl-g'
+  fi
+}
+
 usage_body() {
   cat <<'EOU'
 NAME
@@ -82,6 +92,9 @@ usage() {
 WORKSPACE:
   $WSM_ROOT_RESOLVED
 
+MENU KEY:
+  $(menu_key_value)
+
 EOF
 }
 
@@ -98,6 +111,9 @@ EOF
 
 SESSION:
   $current_id
+
+MENU KEY:
+  $(menu_key_value)
 
 EOF2
 }

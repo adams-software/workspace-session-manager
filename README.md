@@ -45,11 +45,26 @@ Runtime note: `vpty` needs the system libvterm runtime library. On Debian/Ubuntu
 
 ## Quick usage
 
-Set up a workspace root first:
+Set up a workspace root and optional menu hotkey in your shell environment:
+
+### bash
 
 ```bash
 mkdir -p ~/sessions
-export WSM_ROOT=~/sessions
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+echo 'export WSM_ROOT="$HOME/sessions"' >> ~/.bashrc
+echo 'export WSM_MENU_KEY="ctrl-g"' >> ~/.bashrc
+source ~/.bashrc
+```
+
+### zsh
+
+```bash
+mkdir -p ~/sessions
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
+echo 'export WSM_ROOT="$HOME/sessions"' >> ~/.zshrc
+echo 'export WSM_MENU_KEY="ctrl-g"' >> ~/.zshrc
+source ~/.zshrc
 ```
 
 Then run `wsm` by itself to see the command surface:
@@ -70,7 +85,7 @@ If you want a specific command instead of your default shell:
 wsm create api/dev -- npm run dev
 ```
 
-Open the workspace menu:
+Open the workspace menu (hotkey ctrl-g):
 
 ```bash
 wsm menu
