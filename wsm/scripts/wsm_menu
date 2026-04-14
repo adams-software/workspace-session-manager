@@ -13,8 +13,13 @@ resolve_source_path() {
 }
 
 SCRIPT_DIR="$(resolve_source_path)"
-REPO_ROOT="${MSR_REPO_ROOT:-$(cd -- "$SCRIPT_DIR/../.." && pwd)}"
-WSM_BIN="$REPO_ROOT/wsm/scripts/wsm"
+if [[ -x "$SCRIPT_DIR/wsm" ]]; then
+  WSM_BIN="${WSM_BIN:-$SCRIPT_DIR/wsm}"
+  REPO_ROOT="${MSR_REPO_ROOT:-}"
+else
+  REPO_ROOT="${MSR_REPO_ROOT:-$(cd -- "$SCRIPT_DIR/../.." && pwd)}"
+  WSM_BIN="${WSM_BIN:-$REPO_ROOT/wsm/scripts/wsm}"
+fi
 
 tty_printf() { printf "$@" > /dev/tty; }
 err() { tty_printf '%s\n' "$*"; }

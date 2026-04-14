@@ -331,9 +331,11 @@ create_canonical() {
 
   if [[ $# -gt 1 ]]; then
     shift
-    "$MSR_BIN" create -a "$sock" -- "${launch_stack[@]}" "$@"
+    env WSM_ROOT="$WSM_ROOT_RESOLVED" WSM_MENU_KEY="${MENU_KEY_OVERRIDE:-${WSM_MENU_KEY:-}}" \
+      "$MSR_BIN" create -a "$sock" -- "${launch_stack[@]}" "$@"
   else
-    "$MSR_BIN" create -a "$sock" -- "${launch_stack[@]}" "$SHELL" -i
+    env WSM_ROOT="$WSM_ROOT_RESOLVED" WSM_MENU_KEY="${MENU_KEY_OVERRIDE:-${WSM_MENU_KEY:-}}" \
+      "$MSR_BIN" create -a "$sock" -- "${launch_stack[@]}" "$SHELL" -i
   fi
 }
 
