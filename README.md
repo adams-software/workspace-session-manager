@@ -45,22 +45,29 @@ Runtime note: `vpty` needs the system libvterm runtime library. On Debian/Ubuntu
 
 ## Quick usage
 
-Start with the workspace-level command:
+Set up a workspace root first:
 
 ```bash
-wsm --help
+mkdir -p ~/sessions
+export WSM_ROOT=~/sessions
+```
+
+Then run `wsm` by itself to see the command surface:
+
+```bash
+wsm
 ```
 
 Create and attach to a workspace session:
 
 ```bash
-wsm create -a api/dev -- bash
+wsm create test
 ```
 
-Reattach later:
+If you want a specific command instead of your default shell:
 
 ```bash
-wsm attach api/dev
+wsm create api/dev -- npm run dev
 ```
 
 Open the workspace menu:
@@ -69,20 +76,32 @@ Open the workspace menu:
 wsm menu
 ```
 
+Detach from the current session:
+
+```bash
+wsm detach
+```
+
+Reattach later:
+
+```bash
+wsm attach test
+```
+
 The menu hotkey uses the same key-spec format as `alt`. The default is `ctrl-g`.
 Override it per command with `--menu-key <spec>` or via `WSM_MENU_KEY`.
 
 ```bash
-wsm --menu-key ctrl-g create -a api/dev -- bash
-WSM_MENU_KEY=ctrl-g wsm create -a api/dev -- bash
+wsm --menu-key ctrl-g create test
+WSM_MENU_KEY=ctrl-g wsm create test
 ```
 
 If you want the lower-level tools directly:
 
 ```bash
-msr --help
-vpty --help
-alt --help
+msr
+vpty
+alt
 ```
 
 ## Package map
