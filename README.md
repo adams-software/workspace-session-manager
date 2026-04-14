@@ -16,7 +16,7 @@ curl -fsSL https://raw.githubusercontent.com/adams-software/workspace-session-ma
 
 That downloads the latest Linux x86_64 release bundle and runs its installer.
 
-On Debian/Ubuntu/WSL, the installer will also try to install the `libvterm0` runtime dependency automatically. If auto-install is not possible, it will print the exact package hint.
+On Debian/Ubuntu/WSL, `vpty` needs the `libvterm0` runtime package. If it is missing, the installer will stop and tell you exactly what to install before retrying.
 
 ### from a local checkout
 
@@ -69,11 +69,18 @@ Open the workspace menu:
 wsm menu
 ```
 
+The menu hotkey uses the same key-spec format as `alt`. The default is `ctrl-g`.
+Override it per command with `--menu-key <spec>` or via `WSM_MENU_KEY`.
+
+```bash
+wsm --menu-key ctrl-g create -a api/dev -- bash
+WSM_MENU_KEY=ctrl-g wsm create -a api/dev -- bash
+```
+
 If you want the lower-level tools directly:
 
 ```bash
 msr --help
-dsm --help
 vpty --help
 alt --help
 ```
@@ -84,11 +91,6 @@ alt --help
 Workspace session manager.
 
 The main user-facing entrypoint for workspace-wide naming, lookup, and navigation.
-
-### `dsm/`
-Directory session manager.
-
-Adds directory-local naming and lexical navigation on top of `msr`.
 
 ### `msr/`
 Core session runtime.
@@ -116,7 +118,6 @@ Low-level PTY / stream / tty helpers shared by runtime-facing packages.
 A practical mental model is:
 
 - `wsm` is the main workspace-facing command
-- `dsm` handles local directory-scoped naming and navigation
 - `msr` is the core session runtime
 - `vpty` handles terminal modeling and redraw behavior
 - `alt` switches between PTY-backed sides with a configurable hotkey
@@ -125,9 +126,8 @@ If you are trying to understand the repo in more depth, continue with:
 
 1. `wsm/README.md`
 2. `msr/README.md`
-3. `dsm/README.md`
-4. `vpty/README.md`
-5. `alt/README.md`
+3. `vpty/README.md`
+4. `alt/README.md`
 
 ## Current maturity
 
@@ -135,7 +135,7 @@ This repo is active engineering work, not a frozen product surface.
 
 A practical current read is:
 
-- `wsm` and `dsm` are the ergonomic operator-facing layers
+- `wsm` is the ergonomic operator-facing layer
 - `msr` is the runtime foundation
 - `vpty` is an implementation-heavy terminal subsystem under active refinement
 - `alt` is part of the intended tool suite and still evolving

@@ -18,6 +18,13 @@ Run a primary shell with a secondary shell behind the hotkey:
 alt --run /bin/bash --signal-2 TERM -- vpty -- bash
 ```
 
+The hotkey spec is controlled by `--key <spec>` or `ALT_KEY=<spec>`. The default is `ctrl-g`.
+
+```bash
+alt --key ctrl-g --run /bin/bash --signal-2 TERM -- vpty -- bash
+ALT_KEY=ctrl-g alt --run /bin/bash --signal-2 TERM -- vpty -- bash
+```
+
 ## What lives here
 
 - `src/` — the Zig implementation for the `alt` binary

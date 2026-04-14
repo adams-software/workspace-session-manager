@@ -25,7 +25,6 @@ Main binaries:
 
 User-facing scripts:
 
-- `dsm/scripts/dsm`
 - `wsm/scripts/wsm`
 - `wsm/scripts/wsm_menu`
 
@@ -73,7 +72,6 @@ By default this installs to:
 
 The installed completion files use command-name autoload filenames:
 
-- `dsm`
 - `wsm`
 
 You can override the install prefix:
@@ -95,16 +93,6 @@ In another shell, you can inspect or reattach:
 ```bash
 msr status /tmp/demo.msr
 msr attach /tmp/demo.msr
-```
-
-## First session with dsm
-
-Use directory-local naming:
-
-```bash
-dsm create -a demo -- bash
-dsm status demo
-dsm attach demo
 ```
 
 ## First session with wsm
@@ -141,5 +129,5 @@ This is still an actively evolving tool suite.
 A practical current read is:
 
 - `msr` is the core runtime
-- `dsm` and `wsm` are operator-facing naming/navigation layers
+- `wsm` is the operator-facing naming/navigation layer
 - `vpty` and `alt` are still under active terminal UX refinement

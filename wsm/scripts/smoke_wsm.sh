@@ -59,7 +59,7 @@ printf 'exists_ctx=[%s]\n' "$EXISTS_CTX_OUT"
 [[ "$EXISTS_CTX_OUT" == 'true' ]]
 "$WSM" --root="$TMP" terminate pathdb/api/build TERM >/dev/null
 
-printf '=== wsm local nav delegates to dsm ===\n'
+printf '=== wsm local nav errors are native ===\n'
 set +e
 NOCTX="$("$WSM" prev 2>&1)"
 NOCTX_RC=$?
@@ -74,7 +74,7 @@ set -e
 printf 'prev-fail rc=%s out=[%s]\n' "$PREV_FAIL_RC" "$PREV_FAIL_OUT"
 [[ $PREV_FAIL_RC -ne 0 ]]
 printf '%s
-' "$PREV_FAIL_OUT" | grep -q 'dsm: no previous session'
+' "$PREV_FAIL_OUT" | grep -q 'wsm: no previous session in current directory'
 set +e
 NEXT_FAIL_OUT="$(MSR_SESSION="$TMP/pathdb/api/shell.msr" WSM_ROOT="$TMP" "$WSM" next 2>&1)"
 NEXT_FAIL_RC=$?
@@ -82,7 +82,7 @@ set -e
 printf 'next-fail rc=%s out=[%s]\n' "$NEXT_FAIL_RC" "$NEXT_FAIL_OUT"
 [[ $NEXT_FAIL_RC -ne 0 ]]
 printf '%s
-' "$NEXT_FAIL_OUT" | grep -q 'dsm: no next session'
+' "$NEXT_FAIL_OUT" | grep -q 'wsm: no next session in current directory'
 set +e
 PREV_OK_OUT="$(MSR_SESSION="$TMP/pathdb/api/shell.msr" WSM_ROOT="$TMP" "$WSM" prev 2>&1)"
 PREV_OK_RC=$?

@@ -21,7 +21,6 @@ If you have one, describe the rough UX or API shape.
 Which layer seems most relevant?
 
 - [ ] msr
-- [ ] dsm
 - [ ] wsm
 - [ ] vpty
 - [ ] alt

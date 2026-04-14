@@ -31,6 +31,14 @@ Open the interactive menu:
 wsm menu
 ```
 
+The menu hotkey uses the same key-spec format as `alt`. The default is `ctrl-g`.
+You can override it with `--menu-key <spec>` or `WSM_MENU_KEY=<spec>`.
+
+```bash
+wsm --menu-key ctrl-g create -a api/dev -- bash
+WSM_MENU_KEY=ctrl-g wsm create -a api/dev -- bash
+```
+
 `wsm` now expects an explicit workspace root via `WSM_ROOT` or `--root`.
 It should not silently treat the current directory as the workspace root.
 
@@ -41,12 +49,11 @@ It should not silently treat the current directory as the workspace root.
 
 ## Role in the repo
 
-`wsm` sits above `dsm` and `msr`.
+`wsm` sits above `msr`.
 
 Conceptually:
 
 - `msr` manages raw session sockets/processes
-- `dsm` manages session names within a directory
 - `wsm` manages canonical session ids across a workspace tree
 
 ## Current status

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Source this file to expose repo-local msr/dsm/wsm entrypoints in your shell
+# Source this file to expose repo-local msr/wsm entrypoints in your shell
 # without making permanent changes.
 #
 # Usage:
@@ -29,7 +29,6 @@ SCRIPT_DIR="$(resolve_source_path)"
 REPO_DIR="${MSR_REPO_ROOT:-$(cd -- "$SCRIPT_DIR/../.." && pwd)}"
 BIN_DIR="${MSR_BIN_DIR:-$REPO_DIR/zig-out/bin}"
 MSR_SCRIPTS_DIR="$REPO_DIR/msr/scripts"
-DSM_SCRIPTS_DIR="$REPO_DIR/dsm/scripts"
 WSM_SCRIPTS_DIR="$REPO_DIR/wsm/scripts"
 
 if [[ "${1-}" == "--build" ]]; then
@@ -51,7 +50,6 @@ path_prepend() {
 
 path_prepend "$BIN_DIR"
 path_prepend "$MSR_SCRIPTS_DIR"
-path_prepend "$DSM_SCRIPTS_DIR"
 path_prepend "$WSM_SCRIPTS_DIR"
 export PATH
 export MSR_REPO_DIR="$REPO_DIR"
@@ -60,10 +58,6 @@ export MSR_BIN_DIR="$BIN_DIR"
 
 # Best-effort bash completions.
 if [[ -n "${BASH_VERSION-}" ]]; then
-  if [[ -r "$DSM_SCRIPTS_DIR/dsm_completion.bash" ]]; then
-    # shellcheck disable=SC1091
-    source "$DSM_SCRIPTS_DIR/dsm_completion.bash"
-  fi
   if [[ -r "$WSM_SCRIPTS_DIR/wsm_completion.bash" ]]; then
     # shellcheck disable=SC1091
     source "$WSM_SCRIPTS_DIR/wsm_completion.bash"
@@ -76,16 +70,13 @@ Loaded repo-local MSR dev environment.
 Repo:    $REPO_DIR
 PATH+:   $BIN_DIR
          $MSR_SCRIPTS_DIR
-         $DSM_SCRIPTS_DIR
          $WSM_SCRIPTS_DIR
 
 Commands now resolved from this repo:
 - msr
-- dsm
 - wsm
 
 Bash completions loaded if available for:
-- dsm
 - wsm
 
 This shell only; no permanent changes were made.

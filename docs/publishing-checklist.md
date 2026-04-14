@@ -19,7 +19,7 @@ A practical checklist for getting this repo into a clean public GitHub state.
 
 ## Docs
 
-- [ ] Root README explains how `msr`, `dsm`, `wsm`, `vpty`, and `alt` fit together
+- [ ] Root README explains how `msr`, `wsm`, `vpty`, and `alt` fit together
 - [ ] Each package README answers what it is, why it exists, and how stable it is
 - [ ] A short quickstart exists for the main runtime path
 - [ ] Known rough edges are documented honestly

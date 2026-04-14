@@ -25,7 +25,6 @@ What happened instead?
 Which layer seems involved?
 
 - [ ] msr
-- [ ] dsm
 - [ ] wsm
 - [ ] vpty
 - [ ] alt

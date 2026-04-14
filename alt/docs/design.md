@@ -165,7 +165,7 @@ It should **not**:
 * infer workspace root
 * infer canonical session ids
 * inject domain-specific environment variables
-* understand `msr`, `dsm`, or `wsm` semantics
+* understand `msr` or `wsm` semantics
 
 It may infer only what is necessary for its own operation, such as the child argv, alternate executable, configured hotkey, and optional switch-away signals.
 

@@ -203,18 +203,34 @@ render_menu() {
 
 filter_matches() {
   local query="$1"
-  local id
+  local id base
+  local -a exact_ids=() exact_bases=() prefix_ids=() prefix_bases=()
   FILTER_MATCHES=()
   FILTER_EXACT_MATCH=0
 
   for id in "${ALL_IDS[@]}"; do
-    if [[ -z "$query" || "$id" == "$query"* ]]; then
-      FILTER_MATCHES+=("$id")
-    fi
+    base="${id##*/}"
+
     if [[ -n "$query" && "$id" == "$query" ]]; then
+      exact_ids+=("$id")
       FILTER_EXACT_MATCH=1
+      continue
+    fi
+    if [[ -n "$query" && "$base" == "$query" ]]; then
+      exact_bases+=("$id")
+      continue
+    fi
+    if [[ -z "$query" || "$id" == "$query"* ]]; then
+      prefix_ids+=("$id")
+      continue
+    fi
+    if [[ "$base" == "$query"* ]]; then
+      prefix_bases+=("$id")
+      continue
     fi
   done
+
+  FILTER_MATCHES=("${exact_ids[@]}" "${exact_bases[@]}" "${prefix_ids[@]}" "${prefix_bases[@]}")
 }
 
 render_match_list() {
@@ -248,6 +264,51 @@ render_match_list() {
   fi
 }
 
+common_prefix() {
+  local prefix="$1"
+  shift || true
+  local candidate i max
+
+  for candidate in "$@"; do
+    max=${#prefix}
+    if (( ${#candidate} < max )); then
+      max=${#candidate}
+    fi
+    for ((i=0; i<max; i++)); do
+      [[ "${prefix:i:1}" == "${candidate:i:1}" ]] || {
+        prefix="${prefix:0:i}"
+        break
+      }
+    done
+    if (( i == max )); then
+      prefix="${prefix:0:max}"
+    fi
+  done
+
+  printf '%s' "$prefix"
+}
+
+apply_tab_completion() {
+  local query="$1"
+  local id
+  local -a candidates=()
+
+  [[ -n "$query" ]] || return 1
+
+  for id in "${ALL_IDS[@]}"; do
+    [[ "$id" == "$query"* ]] || continue
+    candidates+=("$id")
+  done
+
+  (( ${#candidates[@]} > 0 )) || return 1
+
+  local completion
+  completion="$(common_prefix "${candidates[0]}" "${candidates[@]:1}")"
+  [[ -n "$completion" && "$completion" != "$query" ]] || return 1
+
+  printf '%s' "$completion"
+}
+
 attach_flow() {
   local query=""
   local selection=0
@@ -266,7 +327,7 @@ attach_flow() {
     render_header
     tty_printf 'ATTACH\n'
     tty_printf '%s\n\n' '----'
-    tty_printf 'type a canonical prefix. enter attaches selection.\n'
+    tty_printf 'type a session id or basename prefix. enter attaches selection.\n'
     tty_printf 'up/down changes selection. esc goes back.\n\n'
     tty_printf 'search> %s\n\n' "$query"
     render_match_list "$selection" 1
@@ -291,6 +352,13 @@ attach_flow() {
       $'\e[A') (( ${#FILTER_MATCHES[@]} > 0 && selection > 0 )) && selection=$((selection - 1)) ;;
       $'\e[B') (( ${#FILTER_MATCHES[@]} > 0 && selection + 1 < ${#FILTER_MATCHES[@]} && selection + 1 < 10 )) && selection=$((selection + 1)) ;;
       $'\177'|$'\010') [[ -n "$query" ]] && query="${query%?}" && selection=0 ;;
+      $'\t')
+        completed="$(apply_tab_completion "$query" || true)"
+        if [[ -n "$completed" ]]; then
+          query="$completed"
+          selection=0
+        fi
+        ;;
       $'\e['*) ;;
       [[:print:]]) query+="$key"; selection=0 ;;
     esac

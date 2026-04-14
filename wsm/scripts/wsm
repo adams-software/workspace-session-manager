@@ -15,17 +15,17 @@ resolve_source_path() {
 SCRIPT_DIR="$(resolve_source_path)"
 if [[ -x "$SCRIPT_DIR/msr" ]]; then
   BIN_DIR="$SCRIPT_DIR"
-  DSM_BIN="${DSM_BIN:-$SCRIPT_DIR/dsm}"
   MSR_BIN="${MSR_BIN:-$SCRIPT_DIR/msr}"
   WSM_MENU_BIN="${WSM_MENU_BIN:-$SCRIPT_DIR/wsm_menu}"
   REPO_ROOT="${MSR_REPO_ROOT:-}"
 else
   REPO_ROOT="${MSR_REPO_ROOT:-$(cd -- "$SCRIPT_DIR/../.." && pwd)}"
   BIN_DIR="${MSR_BIN_DIR:-$REPO_ROOT/zig-out/bin}"
-  DSM_BIN="${DSM_BIN:-$REPO_ROOT/dsm/scripts/dsm}"
   MSR_BIN="${MSR_BIN:-$BIN_DIR/msr}"
   WSM_MENU_BIN="${WSM_MENU_BIN:-$REPO_ROOT/wsm/scripts/wsm_menu}"
 fi
+ALT_BIN="${ALT_BIN:-$BIN_DIR/alt}"
+VPTY_BIN="${VPTY_BIN:-$BIN_DIR/vpty}"
 
 err() { printf '%s\n' "$*" >&2; }
 out() { printf '%s\n' "$*"; }
@@ -36,7 +36,7 @@ NAME
   wsm - workspace session manager
 
 USAGE
-  [WSM_ROOT=<path>] wsm [--root <path>] <command> [args]
+  [WSM_ROOT=<path>] [WSM_MENU_KEY=<spec>] wsm [--root <path>] [--menu-key <spec>] <command> [args]
 
 COMMANDS
   [c]reate <target> [-- <cmd...>]        create and attach to a workspace session
@@ -56,6 +56,11 @@ COMMANDS
 ROOT
   wsm requires an explicit workspace root via --root <path> or WSM_ROOT.
   It does not silently fall back to the current directory.
+
+MENU KEY
+  wsm passes the menu hotkey through to alt using alt's key-spec format.
+  Default: ctrl-g
+  Override with --menu-key <spec> or WSM_MENU_KEY.
 
 RESOLUTION
   Queries resolve in this order:
@@ -272,53 +277,64 @@ resolve_query() {
   return 1
 }
 
+launch_stack_argv() {
+  local -a argv
+  argv=("$ALT_BIN")
+  if [[ -n "${MENU_KEY_OVERRIDE:-}" ]]; then
+    argv+=(--key "$MENU_KEY_OVERRIDE")
+  elif [[ -n "${WSM_MENU_KEY:-}" ]]; then
+    argv+=(--key "$WSM_MENU_KEY")
+  fi
+  argv+=(--run "$WSM_MENU_BIN" --signal-2 TERM -- "$VPTY_BIN" --)
+  printf '%s\n' "${argv[@]}"
+}
+
 attach_canonical() {
   local id="$1"
-  "$DSM_BIN" --cwd "$(dirname -- "$(sock_for_canonical "$id")")" attach "$(basename -- "$id")"
+  local sock
+  sock="$(sock_for_canonical "$id")"
+  if [[ -n "${MSR_SESSION:-}" ]]; then
+    "$MSR_BIN" attach "$sock"
+  else
+    "$MSR_BIN" attach "$sock" --force
+  fi
 }
 
 status_canonical() {
   local id="$1"
-  "$DSM_BIN" --cwd "$(dirname -- "$(sock_for_canonical "$id")")" status "$(basename -- "$id")"
+  "$MSR_BIN" status "$(sock_for_canonical "$id")"
 }
 
 exists_canonical() {
   local id="$1"
-  "$DSM_BIN" --cwd "$(dirname -- "$(sock_for_canonical "$id")")" exists "$(basename -- "$id")"
+  "$MSR_BIN" exists "$(sock_for_canonical "$id")"
 }
 
 terminate_canonical() {
   local id="$1"
   local sig="${2:-}"
   if [[ -n "$sig" ]]; then
-    "$DSM_BIN" --cwd "$(dirname -- "$(sock_for_canonical "$id")")" terminate "$(basename -- "$id")" "$sig"
+    "$MSR_BIN" terminate "$(sock_for_canonical "$id")" "$sig"
   else
-    "$DSM_BIN" --cwd "$(dirname -- "$(sock_for_canonical "$id")")" terminate "$(basename -- "$id")"
+    "$MSR_BIN" terminate "$(sock_for_canonical "$id")"
   fi
 }
 
 create_canonical() {
   local id="$1"
-  local dir name
-  dir="$(dirname -- "$(sock_for_canonical "$id")")"
-  name="$(basename -- "$id")"
+  local sock dir
+  local -a launch_stack
+  sock="$(sock_for_canonical "$id")"
+  dir="$(dirname -- "$sock")"
   mkdir -p "$dir"
+  mapfile -t launch_stack < <(launch_stack_argv)
 
   if [[ $# -gt 1 ]]; then
     shift
-    env WSM_ROOT="$WSM_ROOT_RESOLVED" WSM_MENU_KEY="$MENU_KEY_OVERRIDE" \
-      "$DSM_BIN" --cwd "$dir" create -a "$name" -- "$@"
+    "$MSR_BIN" create -a "$sock" -- "${launch_stack[@]}" "$@"
   else
-    env WSM_ROOT="$WSM_ROOT_RESOLVED" WSM_MENU_KEY="$MENU_KEY_OVERRIDE" \
-      "$DSM_BIN" --cwd "$dir" create -a "$name"
+    "$MSR_BIN" create -a "$sock" -- "${launch_stack[@]}" "$SHELL" -i
   fi
-}
-
-local_nav_delegate() {
-  local op="$1"
-  local node_dir
-  node_dir="$(current_node_dir)"
-  "$DSM_BIN" --cwd "$node_dir" "$op"
 }
 
 parent_id_of() {
@@ -482,7 +498,7 @@ case "$cmd" in
     ;;
 
   d|detach)
-    local_nav_delegate detach
+    "$MSR_BIN" detach
     ;;
 
   current|u)

@@ -29,5 +29,5 @@ jobs:
 
       - name: Shell syntax check
         run: |
-          find dsm/scripts wsm/scripts scripts -type f \( -name '*.sh' -o -name 'dsm' -o -name 'wsm' -o -name 'wsm_menu' \) -print0 | \
+          find wsm/scripts scripts -type f \( -name '*.sh' -o -name 'wsm' -o -name 'wsm_menu' \) -print0 | \
             xargs -0 -n1 bash -n

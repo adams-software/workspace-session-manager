@@ -36,7 +36,6 @@ Typical local checks:
 ```bash
 zig build
 zig build test
-bash -n dsm/scripts/dsm
 bash -n wsm/scripts/wsm
 bash -n wsm/scripts/wsm_menu
 bash -n scripts/build_dist.sh
@@ -59,7 +58,7 @@ Please include when possible:
 - command(s) run
 - expected behavior
 - actual behavior
-- whether the issue reproduces under `msr`, `vpty`, `alt`, `dsm`, or `wsm`
+- whether the issue reproduces under `msr`, `vpty`, `alt`, or `wsm`
 - terminal/environment details if they seem relevant
 
 ## Discussion

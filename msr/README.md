@@ -46,8 +46,7 @@ msr status /tmp/demo.msr
 
 This package is the foundation that the higher-level tools build on:
 
-- `dsm` provides directory-scoped naming and navigation on top of `msr`
-- `wsm` provides workspace-scoped naming and navigation on top of `dsm` + `msr`
+- `wsm` provides workspace-scoped naming and navigation on top of `msr`
 - `vpty` provides terminal-side machinery used for interactive sessions
 
 ## Current status
