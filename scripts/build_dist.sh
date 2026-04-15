@@ -24,6 +24,7 @@ install -m 0755 "$REPO_ROOT/zig-out/bin/vpty" "$BIN_DIR/vpty"
 install -m 0755 "$REPO_ROOT/zig-out/bin/alt" "$BIN_DIR/alt"
 install -m 0755 "$REPO_ROOT/wsm/scripts/wsm" "$BIN_DIR/wsm"
 install -m 0755 "$REPO_ROOT/wsm/scripts/wsm_menu" "$BIN_DIR/wsm_menu"
+install -m 0755 "$REPO_ROOT/wsm/scripts/wsm_menu_alt" "$BIN_DIR/wsm_menu_alt"
 
 install -m 0644 "$REPO_ROOT/wsm/scripts/wsm_completion.bash" "$COMPLETIONS_DIR/wsm"
 

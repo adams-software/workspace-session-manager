@@ -17,12 +17,14 @@ if [[ -x "$SCRIPT_DIR/msr" ]]; then
   BIN_DIR="$SCRIPT_DIR"
   MSR_BIN="${MSR_BIN:-$SCRIPT_DIR/msr}"
   WSM_MENU_BIN="${WSM_MENU_BIN:-$SCRIPT_DIR/wsm_menu}"
+  WSM_MENU_ALT_BIN="${WSM_MENU_ALT_BIN:-$SCRIPT_DIR/wsm_menu_alt}"
   REPO_ROOT="${MSR_REPO_ROOT:-}"
 else
   REPO_ROOT="${MSR_REPO_ROOT:-$(cd -- "$SCRIPT_DIR/../.." && pwd)}"
   BIN_DIR="${MSR_BIN_DIR:-$REPO_ROOT/zig-out/bin}"
   MSR_BIN="${MSR_BIN:-$BIN_DIR/msr}"
   WSM_MENU_BIN="${WSM_MENU_BIN:-$REPO_ROOT/wsm/scripts/wsm_menu}"
+  WSM_MENU_ALT_BIN="${WSM_MENU_ALT_BIN:-$REPO_ROOT/wsm/scripts/wsm_menu_alt}"
 fi
 ALT_BIN="${ALT_BIN:-$BIN_DIR/alt}"
 VPTY_BIN="${VPTY_BIN:-$BIN_DIR/vpty}"
@@ -49,10 +51,10 @@ USAGE
   [WSM_ROOT=<path>] [WSM_MENU_KEY=<spec>] wsm [--root <path>] [--menu-key <spec>] <command> [args]
 
 COMMANDS
-  [c]reate <target> [-- <cmd...>]        create and attach to a workspace session
+  [c]reate [--log] <target> [-- <cmd...>] create and attach to a workspace session
   [a]ttach <target-or-query>             attach to a resolved workspace session
   [d]etach                               detach the current session
-  c[u]rrent                              print the current canonical workspace id
+  lo[g] [target-or-query]                view transcript for a session
   [e]xists [target-or-query]             test whether a session is reachable
   [t]erminate [target-or-query] [signal] send TERM, INT, or KILL to a session
   [f]irst | [l]ast | [p]rev | [n]ext     navigate sessions within the current directory
@@ -218,6 +220,42 @@ sock_for_canonical() {
   printf '%s/%s.msr\n' "$WSM_ROOT_RESOLVED" "$id"
 }
 
+typescript_for_sock() {
+  local sock="$1"
+  printf '%s\n' "${sock%.msr}.typescript"
+}
+
+shell_join_argv() {
+  local out=""
+  local arg
+  for arg in "$@"; do
+    if [[ -n "$out" ]]; then
+      out+=" "
+    fi
+    printf -v out '%s%q' "$out" "$arg"
+  done
+  printf '%s\n' "$out"
+}
+
+script_wrapped_child_argv() {
+  local log_file="$1"
+  shift || true
+  local cmd_string
+  local wrapped
+
+  command -v script >/dev/null 2>&1 || {
+    err "wsm: script not found"
+    exit 1
+  }
+
+  cmd_string="$(shell_join_argv "$@")"
+  printf -v wrapped 'exec script -qef %q -c %q' "$log_file" "$cmd_string"
+
+  printf '%s\n' bash
+  printf '%s\n' -lc
+  printf '%s\n' "$wrapped"
+}
+
 canonical_id_is_valid() {
   local id="$1"
   [[ -n "$id" ]] || return 1
@@ -301,7 +339,7 @@ launch_stack_argv() {
   elif [[ -n "${WSM_MENU_KEY:-}" ]]; then
     argv+=(--key "$WSM_MENU_KEY")
   fi
-  argv+=(--run "$WSM_MENU_BIN" --signal-2 TERM -- "$VPTY_BIN" --)
+  argv+=(--run "$WSM_MENU_ALT_BIN" --signal-2 TERM -- "$VPTY_BIN" --)
   printf '%s\n' "${argv[@]}"
 }
 
@@ -338,21 +376,50 @@ terminate_canonical() {
 
 create_canonical() {
   local id="$1"
-  local sock dir
+  local enable_log="${2:-0}"
+  local sock dir log_file
   local -a launch_stack
+  local -a child_argv
+
   sock="$(sock_for_canonical "$id")"
   dir="$(dirname -- "$sock")"
   mkdir -p "$dir"
   mapfile -t launch_stack < <(launch_stack_argv)
 
-  if [[ $# -gt 1 ]]; then
-    shift
-    env WSM_ROOT="$WSM_ROOT_RESOLVED" WSM_MENU_KEY="${MENU_KEY_OVERRIDE:-${WSM_MENU_KEY:-}}" \
-      "$MSR_BIN" create -a "$sock" -- "${launch_stack[@]}" "$@"
+  if [[ $# -gt 2 ]]; then
+    shift 2
+    child_argv=("$@")
   else
-    env WSM_ROOT="$WSM_ROOT_RESOLVED" WSM_MENU_KEY="${MENU_KEY_OVERRIDE:-${WSM_MENU_KEY:-}}" \
-      "$MSR_BIN" create -a "$sock" -- "${launch_stack[@]}" "$SHELL" -i
+    child_argv=("$SHELL" -i)
   fi
+
+  if [[ "$enable_log" == 1 ]]; then
+    log_file="$(typescript_for_sock "$sock")"
+    mapfile -t child_argv < <(script_wrapped_child_argv "$log_file" "${child_argv[@]}")
+  fi
+
+  env WSM_ROOT="$WSM_ROOT_RESOLVED" WSM_MENU_KEY="${MENU_KEY_OVERRIDE:-${WSM_MENU_KEY:-}}" \
+    "$MSR_BIN" create -a "$sock" -- "${launch_stack[@]}" "${child_argv[@]}"
+}
+
+replay_canonical() {
+  local id="$1"
+  local sock log_file
+  sock="$(sock_for_canonical "$id")"
+  log_file="$(typescript_for_sock "$sock")"
+
+  if [[ -n "${MSR_SESSION:-}" && "${WSM_ALT_SECONDARY:-0}" != 1 ]]; then
+    err "wsm: log viewing is not allowed from inside an attached session"
+    err "detach first, or open the menu and use [g]"
+    exit 1
+  fi
+
+  [[ -f "$log_file" ]] || {
+    err "wsm: no transcript for session: $id"
+    exit 1
+  }
+
+  exec bash -lc 'stty sane; clear; cat "$1"; printf "\n\n-- end of transcript --\n"; printf "[enter] close... "; IFS= read -r _; exit 0' _ "$log_file"
 }
 
 parent_id_of() {
@@ -378,6 +445,14 @@ dir_session_names() {
   local dir="$1"
   find "$dir" -maxdepth 1 \( -type s -o -type f \) -name '*.msr' -printf '%f\n' 2>/dev/null | \
     sed 's/\.msr$//' | LC_ALL=C sort
+}
+
+require_log_view_context() {
+  if [[ -n "${MSR_SESSION:-}" && "${WSM_ALT_SECONDARY:-0}" != 1 ]]; then
+    err "wsm: log viewing is not allowed from inside an attached session"
+    err "detach first, or open the menu and use [g]"
+    exit 1
+  fi
 }
 
 resolve_nav_target() {
@@ -483,6 +558,13 @@ case "$cmd" in
     ;;
 
   c|create)
+    create_log=0
+
+    if [[ ${1:-} == --log ]]; then
+      create_log=1
+      shift || true
+    fi
+
     [[ $# -ge 1 ]] || { err "wsm: create requires <target>"; exit 1; }
     target="$1"
     canonical_id_is_valid "$target" || { err "wsm: invalid canonical target: $target"; exit 1; }
@@ -490,9 +572,9 @@ case "$cmd" in
 
     if [[ ${1:-} == -- ]]; then
       shift || true
-      create_canonical "$target" "$@"
+      create_canonical "$target" "$create_log" "$@"
     else
-      create_canonical "$target"
+      create_canonical "$target" "$create_log"
     fi
     ;;
 
@@ -612,6 +694,29 @@ case "$cmd" in
         fi
         ;;
     esac
+    ;;
+   g|log)
+    require_log_view_context
+    if [[ $# -ge 1 ]]; then
+      query="$1"
+      set +e
+      resolved="$(resolve_query "$query")"
+      rc=$?
+      set -e
+      if [[ $rc -eq 0 ]]; then
+        replay_canonical "$resolved"
+      elif [[ $rc -eq 2 ]]; then
+        err "wsm: ambiguous query: $query"
+        printf '%s\n' "$resolved"
+        exit 1
+      else
+        err "wsm: no match for query: $query"
+        exit 1
+      fi
+    else
+      cid="$(resolve_current_id)" || { err "wsm: no target and no current WSM context"; exit 1; }
+      replay_canonical "$cid"
+    fi
     ;;
 
   resolve)

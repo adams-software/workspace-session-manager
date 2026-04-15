@@ -111,7 +111,7 @@ prompt_line() {
 }
 
 wait_back() {
-  tty_printf '\n[enter/esc] back... '
+  tty_printf '\nesc to go back... '
   while true; do
     local key
     key="$(read_key)" || return 0
@@ -222,6 +222,7 @@ render_menu() {
   tty_printf '[a] attach: search and switch to a different session within workspace\n'
   tty_printf '[c] create: create new session within workspace and immediately attach\n'
   tty_printf '[d] detach: detach from current session\n'
+  tty_printf '[g] log: view history for current session\n'
   tty_printf '[s] list: list all sessions within workspace\n'
   tty_printf '[h] help: prints wsm manual\n\n'
   render_nav_line 'f' 'first' 'first' 'Jump to first session'
@@ -654,6 +655,15 @@ prev_flow() {
   wsm_cmd prev
 }
 
+log_flow() {
+  if [[ -z "$CURRENT_SESSION" ]]; then
+    tty_printf '\nno current session for log\n'
+    pause
+    return 1
+  fi
+  wsm_cmd log "$CURRENT_SESSION"
+}
+
 detach_flow() {
   if [[ -z "$CURRENT_SESSION" ]]; then
     tty_printf '\nno current session to detach\n'
@@ -738,6 +748,7 @@ main_loop() {
       [Ii]) in_flow; exit $? ;;
       [Oo]) out_flow; exit $? ;;
       [Dd]) detach_flow; exit $? ;;
+      [Gg]) log_flow; exit $? ;;
       [Ss]) list_flow ;;
       [HhMm]) help_flow ;;
       [Qq]) exit 0 ;;

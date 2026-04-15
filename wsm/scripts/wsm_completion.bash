@@ -2,7 +2,7 @@ _wsm_complete() {
   local cur prev words cword
   _init_completion -n : || return
 
-  local long_commands="create attach detach current status exists terminate first last prev next list root menu"
+  local long_commands="create attach detach current status exists terminate first last prev next list root menu log"
   local global_flags="--root"
 
   __wsm_ids() {
