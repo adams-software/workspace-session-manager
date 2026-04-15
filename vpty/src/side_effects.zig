@@ -25,7 +25,7 @@ const State = enum {
     osc_discard_maybe_st_52,
 };
 
-const max_osc_bytes = 1024 * 1024;
+const max_osc_bytes = 1024 * 1024 * 1024;
 
 pub const FeedResult = struct {
     emitted_osc52: bool = false,
