@@ -173,45 +173,64 @@ preview_nav() {
   printf '%s\n' "$target"
 }
 
+# render_nav_line() {
+#   local key="$1"
+#   local label="$2"
+#   local op="$3"
+#   local desc="$4"
+#   local target
+#   if target="$(preview_nav "$op")"; then
+#     tty_printf '[%s] %s: %s -> %s\n' "$key" "$label" "$desc" "$target"
+#   else
+#     tty_printf '[%s] %s: %s\n' "$key" "$label" "$desc"
+#   fi
+# }
+#
 render_nav_line() {
   local key="$1"
   local label="$2"
   local op="$3"
+  local desc="$4"
   local target
+
   if target="$(preview_nav "$op")"; then
-    tty_printf '[%s] %s -> %s\n' "$key" "$label" "$target"
-  else
-    tty_printf '[%s] %s\n' "$key" "$label"
+    # Skip if no target or target matches CURRENT_SESSION
+    if [[ -z "$target" || "$target" == "$CURRENT_SESSION" ]]; then
+      return
+    fi
+
+    tty_printf '[%s] %s: %s -> %s\n' "$key" "$label" "$desc" "$target"
   fi
 }
+
 
 render_header() {
   clear_screen
   tty_printf 'WSM MENU\n'
   tty_printf '========\n\n'
-  tty_printf 'root: %s\n' "$CURRENT_ROOT"
+  tty_printf 'workspace root: %s\n' "$CURRENT_ROOT"
   if [[ -n "$CURRENT_SESSION" ]]; then
-    tty_printf 'current: %s\n' "$CURRENT_SESSION"
+    tty_printf 'current session: %s\n' "$CURRENT_SESSION"
   else
-    tty_printf 'current: none\n'
+    tty_printf 'current session: none\n'
   fi
   tty_printf 'hotkey: %s\n' "$(menu_key_value)"
   tty_printf '\n'
 }
 
 render_menu() {
-  tty_printf '[a] attach\n'
-  tty_printf '[c] create\n'
-  render_nav_line 'f' 'first' 'first'
-  render_nav_line 'l' 'last' 'last'
-  render_nav_line 'n' 'next' 'next'
-  render_nav_line 'p' 'prev' 'prev'
-  render_nav_line 'i' 'in' 'in'
-  render_nav_line 'o' 'out' 'out'
-  tty_printf '[d] detach\n'
-  tty_printf '[s] list\n'
-  tty_printf '[h] help\n'
-  tty_printf '[q] quit\n'
+  tty_printf '[a] attach: search and switch to a different session within workspace\n'
+  tty_printf '[c] create: create new session within workspace and immediately attach\n'
+  tty_printf '[d] detach: detach from current session\n'
+  tty_printf '[s] list: list all sessions within workspace\n'
+  tty_printf '[h] help: prints wsm manual\n\n'
+  render_nav_line 'f' 'first' 'first' 'Jump to first session'
+  render_nav_line 'l' 'last' 'last' 'Jump to last session'
+  render_nav_line 'n' 'next' 'next' 'Jump to next session'
+  render_nav_line 'p' 'prev' 'prev' 'Jump to previous session'
+  render_nav_line 'i' 'in' 'in' 'Jump child session'
+  render_nav_line 'o' 'out' 'out' 'Jump parent session'
+  tty_printf '\n[esc] exit this menu\n'
   tty_printf '\n'
 }
 
@@ -331,6 +350,21 @@ attach_flow() {
 
   while true; do
     filter_matches "$query"
+
+    # Lift CURRENT_SESSION to top when query is empty
+    if [[ -z "$query" && -n "$CURRENT_SESSION" ]]; then
+      local new=()
+      for id in "${FILTER_MATCHES[@]}"; do
+        [[ "$id" == "$CURRENT_SESSION" ]] || new+=("$id")
+      done
+
+      if printf '%s\n' "${ALL_IDS[@]}" | grep -qx "$CURRENT_SESSION"; then
+        FILTER_MATCHES=("$CURRENT_SESSION" "${new[@]}")
+      else
+        FILTER_MATCHES=("${new[@]}")
+      fi
+    fi
+
     if (( ${#FILTER_MATCHES[@]} == 0 )); then
       selection=0
     else
@@ -341,11 +375,17 @@ attach_flow() {
     render_header
     tty_printf 'ATTACH\n'
     tty_printf '%s\n\n' '----'
-    tty_printf 'type a session id or basename prefix. enter attaches selection.\n'
-    tty_printf 'up/down changes selection. esc goes back.\n\n'
-    tty_printf 'search> %s\n\n' "$query"
+    tty_printf 'Type session name to narrow search. Enter attaches selection.\n'
+    tty_printf 'Arrow up/down changes selection. Esc goes back.\n'
+    tty_printf 'Tab to auto complete search query.\n\n'
+    tty_printf 'Sessions:\n'
+
+    # --- Move match list ABOVE the prompt ---
     render_match_list "$selection" 1
     tty_printf '\n'
+
+    # --- Print search prompt LAST so cursor stays here ---
+    tty_printf 'search> %s' "$query"
 
     key="$(read_key)" || return 0
     case "$key" in
@@ -379,6 +419,81 @@ attach_flow() {
   done
 }
 
+# attach_flow() {
+#   local query=""
+#   local selection=0
+#   local key
+#   mapfile -t ALL_IDS < <(list_ids)
+#
+#   while true; do
+#     filter_matches "$query"
+#
+#     # --- NEW BEHAVIOR: lift CURRENT_SESSION to top when query is empty ---
+#     if [[ -z "$query" && -n "$CURRENT_SESSION" ]]; then
+#       # Remove CURRENT_SESSION from the list if present
+#       local new=()
+#       for id in "${FILTER_MATCHES[@]}"; do
+#         [[ "$id" == "$CURRENT_SESSION" ]] || new+=("$id")
+#       done
+#
+#       # Prepend CURRENT_SESSION if it exists in ALL_IDS
+#       if printf '%s\n' "${ALL_IDS[@]}" | grep -qx "$CURRENT_SESSION"; then
+#         FILTER_MATCHES=("$CURRENT_SESSION" "${new[@]}")
+#       else
+#         FILTER_MATCHES=("${new[@]}")
+#       fi
+#     fi
+#     # ---------------------------------------------------------------------
+#
+#     if (( ${#FILTER_MATCHES[@]} == 0 )); then
+#       selection=0
+#     else
+#       (( selection >= ${#FILTER_MATCHES[@]} )) && selection=$((${#FILTER_MATCHES[@]} - 1))
+#       (( selection < 0 )) && selection=0
+#     fi
+#
+#     render_header
+#     tty_printf 'ATTACH\n'
+#     tty_printf '%s\n\n' '----'
+#     tty_printf 'type a session id or basename prefix. enter attaches selection.\n'
+#     tty_printf 'up/down changes selection. esc goes back.\n\n'
+#     tty_printf 'search> %s\n\n' "$query"
+#     render_match_list "$selection" 1
+#     tty_printf '\n'
+#
+#     key="$(read_key)" || return 0
+#     case "$key" in
+#       ''|$'\n'|$'\r')
+#         if (( ${#FILTER_MATCHES[@]} > 0 )); then
+#           wsm_cmd attach "${FILTER_MATCHES[$selection]}"
+#           return 10
+#         fi
+#         ;;
+#       $'\e')
+#         if [[ -n "$query" ]]; then
+#           query=""
+#           selection=0
+#         else
+#           return 0
+#         fi
+#         ;;
+#       $'\e[A') (( ${#FILTER_MATCHES[@]} > 0 && selection > 0 )) && selection=$((selection - 1)) ;;
+#       $'\e[B') (( ${#FILTER_MATCHES[@]} > 0 && selection + 1 < ${#FILTER_MATCHES[@]} && selection + 1 < 10 )) && selection=$((selection + 1)) ;;
+#       $'\177'|$'\010') [[ -n "$query" ]] && query="${query%?}" && selection=0 ;;
+#       $'\t')
+#         completed="$(apply_tab_completion "$query" || true)"
+#         if [[ -n "$completed" ]]; then
+#           query="$completed"
+#           selection=0
+#         fi
+#         ;;
+#       $'\e['*) ;;
+#       [[:print:]]) query+="$key"; selection=0 ;;
+#     esac
+#   done
+# }
+
+
 create_flow() {
   local query=""
   local key
@@ -390,31 +505,37 @@ create_flow() {
     filter_matches "$query"
     can_create=0
     invalid_hint=""
+
     if [[ -n "$query" ]]; then
       if canonical_id_is_valid "$query"; then
         if [[ $FILTER_EXACT_MATCH -eq 0 ]]; then
           can_create=1
         fi
       else
-        invalid_hint='invalid canonical target'
+        invalid_hint='Cannot start or end with /'
       fi
     fi
 
     render_header
     tty_printf 'CREATE\n'
     tty_printf '%s\n\n' '----'
-    tty_printf 'type a canonical target. enter creates it when the target is new.\n'
-    tty_printf 'existing names are blocked here. esc goes back.\n\n'
-    tty_printf 'target> %s\n\n' "$query"
-    render_match_list 0 0
+    tty_printf 'Create a new session. Esc goes back, Enter creates.\n'
+    tty_printf 'You can create child sessions by using forward slash, eg. work/project1. \n\n'
+
+    # Show errors/hints *before* the prompt
     if (( can_create == 1 )); then
-      tty_printf '\n  create -> %s\n' "$query"
+      tty_printf 'Enter to create -> %s\n\n' "$query"
     elif [[ -n "$invalid_hint" ]]; then
-      tty_printf '\n  %s\n' "$invalid_hint"
+      tty_printf '%s\n\n' "$invalid_hint"
     elif [[ -n "$query" && $FILTER_EXACT_MATCH -eq 1 ]]; then
-      tty_printf '\n  session already exists: %s\n' "$query"
+      tty_printf 'Already exists: %s\n\n' "$query"
+    else
+      tty_printf '\n'
     fi
-    tty_printf '\n'
+
+    # Print prompt LAST so cursor stays here
+    tty_printf 'session name> %s' "$query"
+
 
     key="$(read_key)" || return 0
     case "$key" in
@@ -437,6 +558,65 @@ create_flow() {
     esac
   done
 }
+
+# create_flow() {
+#   local query=""
+#   local key
+#   local can_create=0
+#   local invalid_hint=""
+#   mapfile -t ALL_IDS < <(list_ids)
+#
+#   while true; do
+#     filter_matches "$query"
+#     can_create=0
+#     invalid_hint=""
+#     if [[ -n "$query" ]]; then
+#       if canonical_id_is_valid "$query"; then
+#         if [[ $FILTER_EXACT_MATCH -eq 0 ]]; then
+#           can_create=1
+#         fi
+#       else
+#         invalid_hint='invalid canonical target'
+#       fi
+#     fi
+#
+#     render_header
+#     tty_printf 'CREATE\n'
+#     tty_printf '%s\n\n' '----'
+#     tty_printf 'Create a new session. Esc goes back, Enter creates.\n'
+#     tty_printf 'You can create child sessions by using forward slash, eg. work/project1. \n\n'
+#     tty_printf 'target> %s\n\n' "$query"
+#     render_match_list 0 0
+#     if (( can_create == 1 )); then
+#       tty_printf '\n  create -> %s\n' "$query"
+#     elif [[ -n "$invalid_hint" ]]; then
+#       tty_printf '\n  %s\n' "$invalid_hint"
+#     elif [[ -n "$query" && $FILTER_EXACT_MATCH -eq 1 ]]; then
+#       tty_printf '\n  session already exists: %s\n' "$query"
+#     fi
+#     tty_printf '\n'
+#
+#     key="$(read_key)" || return 0
+#     case "$key" in
+#       ''|$'\n'|$'\r')
+#         if (( can_create == 1 )); then
+#           wsm_cmd create "$query"
+#           return 10
+#         fi
+#         ;;
+#       $'\e')
+#         if [[ -n "$query" ]]; then
+#           query=""
+#         else
+#           return 0
+#         fi
+#         ;;
+#       $'\177'|$'\010') [[ -n "$query" ]] && query="${query%?}" ;;
+#       $'\e['*) ;;
+#       [[:print:]]) query+="$key" ;;
+#     esac
+#   done
+# }
 
 first_flow() {
   if [[ -z "$CURRENT_SESSION" ]]; then
