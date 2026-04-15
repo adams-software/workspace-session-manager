@@ -21,9 +21,11 @@ const State = enum {
     osc_other_body,
     osc_maybe_st_52,
     osc_maybe_st_other,
+    osc_discard_52,
+    osc_discard_maybe_st_52,
 };
 
-const max_osc_bytes = 8192;
+const max_osc_bytes = 1024 * 1024;
 
 pub const FeedResult = struct {
     emitted_osc52: bool = false,
@@ -144,6 +146,11 @@ pub const SideEffectForwarder = struct {
         self.state = .idle;
     }
 
+    fn discardOsc52(self: *SideEffectForwarder) void {
+        self.osc_buf.clearRetainingCapacity();
+        self.state = .osc_discard_52;
+    }
+
     pub fn feed(self: *SideEffectForwarder, stdout_actor: anytype, bytes: []const u8) !FeedResult {
         self.screen_buf.clearRetainingCapacity();
         var result = FeedResult{
@@ -182,7 +189,7 @@ pub const SideEffectForwarder = struct {
 
                 .osc => {
                     self.appendOsc(b) catch {
-                        self.resetOsc();
+                        self.discardOsc52();
                         continue;
                     };
                     if (b == '5') {
@@ -194,7 +201,7 @@ pub const SideEffectForwarder = struct {
 
                 .osc_seen_5 => {
                     self.appendOsc(b) catch {
-                        self.resetOsc();
+                        self.discardOsc52();
                         continue;
                     };
                     if (b == '2') {
@@ -206,7 +213,7 @@ pub const SideEffectForwarder = struct {
 
                 .osc_seen_52 => {
                     self.appendOsc(b) catch {
-                        self.resetOsc();
+                        self.discardOsc52();
                         continue;
                     };
                     if (b == ';') {
@@ -218,7 +225,7 @@ pub const SideEffectForwarder = struct {
 
                 .osc_52_body => {
                     self.appendOsc(b) catch {
-                        self.resetOsc();
+                        self.discardOsc52();
                         continue;
                     };
 
@@ -247,7 +254,7 @@ pub const SideEffectForwarder = struct {
 
                 .osc_maybe_st_52 => {
                     self.appendOsc(b) catch {
-                        self.resetOsc();
+                        self.discardOsc52();
                         continue;
                     };
 
@@ -257,6 +264,24 @@ pub const SideEffectForwarder = struct {
                         self.resetOsc();
                     } else {
                         self.state = .osc_52_body;
+                    }
+                },
+
+                .osc_discard_52 => {
+                    if (b == 0x07) {
+                        self.resetOsc();
+                    } else if (b == 0x1b) {
+                        self.state = .osc_discard_maybe_st_52;
+                    }
+                },
+
+                .osc_discard_maybe_st_52 => {
+                    if (b == '\\') {
+                        self.resetOsc();
+                    } else if (b == 0x07) {
+                        self.resetOsc();
+                    } else if (b != 0x1b) {
+                        self.state = .osc_discard_52;
                     }
                 },
 
@@ -435,4 +460,48 @@ test "split chunk OSC 8 is emitted only after completion" {
     const second = try forwarder.feed(&stdout_actor, ".com\x1b\\y");
     try std.testing.expectEqualStrings("\x1b]8;id=1;https://example.com\x1b\\y", second.screen_bytes);
     try std.testing.expectEqual(@as(usize, 0), stdout_actor.controls.items.len);
+}
+
+test "oversized OSC 52 is discarded without leaking payload to screen" {
+    var forwarder = SideEffectForwarder.init(std.testing.allocator);
+    defer forwarder.deinit();
+
+    var stdout_actor = TestStdoutActor.init(std.testing.allocator);
+    defer stdout_actor.deinit();
+
+    var big = std.ArrayList(u8){};
+    defer big.deinit(std.testing.allocator);
+
+    try big.appendSlice(std.testing.allocator, "hello\x1b]52;c;");
+    try big.appendNTimes(std.testing.allocator, 'A', max_osc_bytes + 100);
+    try big.append(std.testing.allocator, 0x07);
+    try big.appendSlice(std.testing.allocator, "world");
+
+    const result = try forwarder.feed(&stdout_actor, big.items);
+
+    try std.testing.expect(!result.emitted_osc52);
+    try std.testing.expectEqualStrings("helloworld", result.screen_bytes);
+    try std.testing.expectEqual(@as(usize, 0), stdout_actor.controls.items.len);
+}
+
+test "oversized OSC 52 split across feeds is discarded without leaking payload" {
+    var forwarder = SideEffectForwarder.init(std.testing.allocator);
+    defer forwarder.deinit();
+
+    var stdout_actor = TestStdoutActor.init(std.testing.allocator);
+    defer stdout_actor.deinit();
+
+    var first = std.ArrayList(u8){};
+    defer first.deinit(std.testing.allocator);
+    try first.appendSlice(std.testing.allocator, "x\x1b]52;c;");
+    try first.appendNTimes(std.testing.allocator, 'A', max_osc_bytes);
+
+    const r1 = try forwarder.feed(&stdout_actor, first.items);
+    try std.testing.expectEqualStrings("x", r1.screen_bytes);
+    try std.testing.expectEqual(@as(usize, 0), stdout_actor.controls.items.len);
+
+    const r2 = try forwarder.feed(&stdout_actor, "AAAA\x07y");
+    try std.testing.expectEqualStrings("y", r2.screen_bytes);
+    try std.testing.expectEqual(@as(usize, 0), stdout_actor.controls.items.len);
+    try std.testing.expect(!r2.emitted_osc52);
 }
