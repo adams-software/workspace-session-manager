@@ -168,6 +168,14 @@ fn openAttachmentForOwnerScopedOp(path: []const u8, takeover: bool) !struct { cl
     return .{ .cli = cli, .att = att };
 }
 
+fn restoreTerminalScreen(out_fd: c_int) void {
+    if (c.isatty(out_fd) != 1) return;
+
+    // sgr0, show cursor, leave alt-screen, clear screen, cursor home
+    const seq = "\x1b[0m\x1b[?25h\x1b[?1049l\x1b[2J\x1b[H";
+    _ = c.write(out_fd, seq.ptr, seq.len);
+}
+
 fn runAttachDirect(path: []const u8, mode: client.AttachMode) u8 {
     var cli = client.SessionClient.init(std.heap.page_allocator, path) catch {
         err("msr: failed to create client\n", .{});
@@ -189,6 +197,7 @@ fn runAttachDirect(path: []const u8, mode: client.AttachMode) u8 {
     switch (bridge_exit) {
         .clean => {},
         .remote_closed => {
+            restoreTerminalScreen(c.STDOUT_FILENO);
             if (c.isatty(c.STDERR_FILENO) == 1) {
                 err("msr: session closed the current attachment\n", .{});
             }
