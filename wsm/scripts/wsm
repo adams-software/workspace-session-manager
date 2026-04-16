@@ -51,7 +51,7 @@ USAGE
   [WSM_ROOT=<path>] [WSM_MENU_KEY=<spec>] wsm [--root <path>] [--menu-key <spec>] <command> [args]
 
 COMMANDS
-  [c]reate [--log] <target> [-- <cmd...>] create and attach to a workspace session
+  [c]reate target> [-- <cmd...>] create and attach to a workspace session
   [a]ttach <target-or-query>             attach to a resolved workspace session
   [d]etach                               detach the current session
   lo[g] [target-or-query]                view transcript for a session
@@ -558,12 +558,7 @@ case "$cmd" in
     ;;
 
   c|create)
-    create_log=0
-
-    if [[ ${1:-} == --log ]]; then
-      create_log=1
-      shift || true
-    fi
+    create_log=1   # default enabled
 
     [[ $# -ge 1 ]] || { err "wsm: create requires <target>"; exit 1; }
     target="$1"
@@ -577,6 +572,7 @@ case "$cmd" in
       create_canonical "$target" "$create_log"
     fi
     ;;
+
 
   a|attach)
     [[ $# -ge 1 ]] || { err "wsm: attach requires <target-or-query>"; exit 1; }
