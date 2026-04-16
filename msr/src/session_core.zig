@@ -187,6 +187,20 @@ pub const Core = struct {
             },
         }
     }
+    pub fn installInitialOwner(
+        self: *Core,
+        allocator: std.mem.Allocator,
+        fd: Fd,
+        ops: *OpList,
+    ) !void {
+        switch (self.owner) {
+            .none => {
+                self.owner = .{ .attached_unready = .{ .fd = fd } };
+                try appendInstallOwner(ops, allocator, fd);
+            },
+            else => return error.InvalidState,
+        }
+    }
 
     pub fn hasOwner(self: *const Core) bool {
         return switch (self.owner) {
@@ -628,4 +642,18 @@ test "takeover fails pending requester and replaces owner" {
         .attached_unready => |owner| try std.testing.expectEqual(@as(Fd, 11), owner.fd),
         else => return error.TestUnexpectedResult,
     }
+}
+test "installInitialOwner installs unready owner without reply" {
+    var core = Core{};
+    defer core.deinit(std.testing.allocator);
+
+    var ops = OpList{};
+    defer deinitOpList(std.testing.allocator, &ops);
+
+    try core.installInitialOwner(std.testing.allocator, 10, &ops);
+
+    try std.testing.expect(core.hasOwner());
+    try std.testing.expectEqual(@as(?Fd, 10), core.ownerFd());
+    try std.testing.expectEqual(@as(usize, 1), ops.items.len);
+    try std.testing.expect(ops.items[0] == .install_owner);
 }

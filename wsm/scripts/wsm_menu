@@ -220,7 +220,7 @@ render_header() {
 
 render_menu() {
   tty_printf '[a] attach: search and switch to a different session within workspace\n'
-  tty_printf '[c] create: create new session within workspace and immediately attach\n'
+  tty_printf '[c] create: create new session within workspace and attach\n'
   tty_printf '[d] detach: detach from current session\n'
   tty_printf '[g] log: view history for current session\n'
   tty_printf '[s] list: list all sessions within workspace\n'
@@ -520,7 +520,7 @@ create_flow() {
     render_header
     tty_printf 'CREATE\n'
     tty_printf '%s\n\n' '----'
-    tty_printf 'Create a new session. Esc goes back, Enter creates.\n'
+    tty_printf 'Create a new session. Esc goes back, Enter creates and attaches.\n'
     tty_printf 'You can create child sessions by using forward slash, eg. work/project1. \n\n'
 
     # Show errors/hints *before* the prompt

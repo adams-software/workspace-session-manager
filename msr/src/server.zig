@@ -706,6 +706,15 @@ pub const SessionServer = struct {
 
         return progressed;
     }
+    pub fn installInitialOwner(self: *SessionServer, fd: c_int) Error!void {
+        if (self.state != .listening) return Error.InvalidState;
+
+        var ops = core.OpList{};
+        defer core.deinitOpList(self.allocator, &ops);
+
+        try self.core_state.installInitialOwner(self.allocator, fd, &ops);
+        try self.applyCoreOps(&ops);
+    }
 };
 
 test "server starts created" {

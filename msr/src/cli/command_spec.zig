@@ -79,7 +79,7 @@ pub fn hasFlagAlias(cmd: *const CommandSpec, alias: []const u8) bool {
 
 pub fn usageLine(cmd: *const CommandSpec) []const u8 {
     switch (cmd.id) {
-        .create => return "  msr create [-a|--attach] <path> [-- <cmd...>]\n",
+        .create => return "  msr create [-d|--detach] <path> [-- <cmd...>]\n",
         .attach => return "  msr attach [-f|--force] <path>\n",
         .detach => return "  msr detach\n",
         .current => return "  msr current\n",
@@ -117,7 +117,7 @@ pub fn shortUsage(id: CommandId) []const u8 {
 }
 
 pub const create_flags = [_]FlagSpec{
-    .{ .long = "attach", .short = 'a', .help = "attach immediately after the session becomes ready" },
+    .{ .long = "detach", .short = 'd', .help = "do not attach to session immediately, run in background" },
 };
 
 pub const create_positionals = [_]PositionalSpec{
@@ -158,12 +158,12 @@ pub const commands = [_]CommandSpec{
         .name = "create",
         .aliases = &.{ "c", "create" },
         .summary = "create a session",
-        .description = "Creates a persistent PTY-backed session at the given socket path. If no command is provided after --, the default interactive shell is used.",
+        .description = "Creates a persistent PTY-backed session at the given socket path and attaches immediately by default. Use -d or --detach to create without attaching. If no command is provided after --, the default interactive shell is used.",
         .positionals = &create_positionals,
         .flags = &create_flags,
         .examples = &.{
-            .{ .command = "msr c /tmp/dev.sock", .help = "create a session using the default interactive shell" },
-            .{ .command = "msr c -a /tmp/dev.sock -- /bin/sh -i", .help = "create and attach immediately" },
+            .{ .command = "msr c /tmp/dev.sock", .help = "create a session using the default interactive shell and attach" },
+            .{ .command = "msr c -d /tmp/dev.sock -- /bin/sh -i", .help = "create session in the background" },
         },
     },
     .{

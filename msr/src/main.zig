@@ -9,7 +9,14 @@ const c = @cImport({
     @cInclude("unistd.h");
     @cInclude("stdlib.h");
     @cInclude("stdio.h");
+    @cInclude("sys/socket.h");
+    @cInclude("fcntl.h");
 });
+
+const HostStartConfig = struct {
+    wait_for_owner_before_start: bool = false,
+    initial_owner_fd: ?c_int = null,
+};
 
 fn out(comptime fmt: []const u8, args: anytype) void {
     std.debug.print(fmt, args);
@@ -23,7 +30,7 @@ fn usageLineForKind(kind: cli_parse.CommandKind) []const u8 {
     return switch (kind) {
         .help => "  msr help\n",
         .current => "  msr current\n",
-        .create => "  msr create [-a|--attach] <path> [-- <cmd...>]\n",
+        .create => "  msr create [-d|--detach] <path> [-- <cmd...>]\n",
         .attach => "  msr attach [-f|--force] <path>\n",
         .detach => "  msr detach\n",
         .resize => "  msr resize [-f|--force] <path> <cols> <rows>\n",
@@ -37,26 +44,26 @@ fn usageLineForKind(kind: cli_parse.CommandKind) []const u8 {
 fn usage() void {
     out(
         "NAME\n" ++
-            "  msr - minimal session runtime\n\n" ++
-            "USAGE\n" ++
-            "  [MSR_SESSION=<path>] msr [--session <path>] <command> [args]\n\n" ++
-            "COMMANDS\n" ++
-            "  create [-a|--attach] <path> [-- <cmd...>]  create a session\n" ++
-            "  attach [-f|--force] <path>                 attach to a session\n" ++
-            "  detach                                     detach the current session\n" ++
-            "  current                                    print the current session path\n" ++
-            "  resize [-f|--force] <path> <cols> <rows>   resize a session\n" ++
-            "  terminate [-f|--force] <path> [signal]     send TERM, INT, or KILL\n" ++
-            "  wait <path>                                wait for session exit\n" ++
-            "  status <path>                              print session status\n" ++
-            "  exists <path>                              test whether a session is reachable\n" ++
-            "  help                                       show this help\n\n" ++
-            "CONTEXT\n" ++
-            "  --session=<path> or --session <path> overrides MSR_SESSION.\n" ++
-            "  In current-session mode, attach and detach route through the current\n" ++
-            "  session owner; other commands keep explicit-argument behavior.\n",
+        "  msr - minimal session runtime\n\n" ++
+        "USAGE\n" ++
+        "  [MSR_SESSION=<path>] msr [--session <path>] <command> [args]\n\n" ++
+        "COMMANDS\n" ++
+        "  create [-d|--detach] <path> [-- <cmd...>]    create a session, attach by default\n" ++
+        "  attach [-f|--force] <path>                   attach to a session\n" ++
+        "  detach                                       detach the current session\n" ++
+        "  current                                      print the current session path\n" ++
+        "  resize [-f|--force] <path> <cols> <rows>     resize a session\n" ++
+        "  terminate [-f|--force] <path> [signal]       send TERM, INT, or KILL\n" ++
+        "  wait <path>                                  wait for session exit\n" ++
+        "  status <path>                                print session status\n" ++
+        "  exists <path>                                test whether a session is reachable\n" ++
+        "  help                                         show this help\n\n" ++
+        "CONTEXT\n" ++
+        "  --session=<path> or --session <path> overrides MSR_SESSION.\n" ++
+        "  In current-session mode, attach and detach route through the current\n" ++
+        "  session owner; other commands keep explicit-argument behavior.\n",
         .{},
-    );
+        );
 }
 
 fn usageCreate() void { out("{s}", .{usageLineForKind(.create)}); }
@@ -88,7 +95,7 @@ fn usageForCommandKind(kind: cli_parse.CommandKind) void {
 fn nestedUsage(current_session: []const u8) void {
     out(
         "SESSION\n" ++
-            "  {s}\n\n",
+        "  {s}\n\n",
         .{current_session},
     );
     usage();
@@ -108,7 +115,12 @@ fn signalFromCli(sig: cli_parse.SignalSpec) client.Signal {
     };
 }
 
-fn spawnHostDetached(argv0: []const u8, path: []const u8, child_argv: []const []const u8) !void {
+fn spawnHostDetached(
+    argv0: []const u8,
+    path: []const u8,
+    child_argv: []const []const u8,
+    wait_for_owner_before_start: bool,
+) !void {
     const pid = c.fork();
     if (pid < 0) return error.ForkFailed;
 
@@ -119,16 +131,25 @@ fn spawnHostDetached(argv0: []const u8, path: []const u8, child_argv: []const []
         defer arena.deinit();
         const a = arena.allocator();
 
-        const n: usize = 4 + child_argv.len + 1;
+        const extra: usize = if (wait_for_owner_before_start) 1 else 0;
+        const n: usize = 4 + extra + child_argv.len + 1;
         const av = a.alloc(?[*:0]u8, n) catch c._exit(127);
 
         av[0] = (a.dupeZ(u8, argv0) catch c._exit(127)).ptr;
         av[1] = (a.dupeZ(u8, "_host") catch c._exit(127)).ptr;
         av[2] = (a.dupeZ(u8, path) catch c._exit(127)).ptr;
-        av[3] = (a.dupeZ(u8, "--") catch c._exit(127)).ptr;
+
+        var idx: usize = 3;
+        if (wait_for_owner_before_start) {
+            av[idx] = (a.dupeZ(u8, "--wait-owner") catch c._exit(127)).ptr;
+            idx += 1;
+        }
+
+        av[idx] = (a.dupeZ(u8, "--") catch c._exit(127)).ptr;
+        idx += 1;
 
         for (child_argv, 0..) |arg, i| {
-            av[4 + i] = (a.dupeZ(u8, arg) catch c._exit(127)).ptr;
+            av[idx + i] = (a.dupeZ(u8, arg) catch c._exit(127)).ptr;
         }
         av[n - 1] = null;
 
@@ -136,6 +157,55 @@ fn spawnHostDetached(argv0: []const u8, path: []const u8, child_argv: []const []
             c._exit(127);
         }
 
+        _ = c.execvp(av[0].?, @ptrCast(av.ptr));
+        c._exit(127);
+    }
+}
+
+fn spawnHostAttachedWithInitialOwner(
+    argv0: []const u8,
+    path: []const u8,
+    child_argv: []const []const u8,
+    owner_fd_in_child: c_int,
+    other_fd_to_close_in_child: c_int,
+) !void {
+    const pid = c.fork();
+    if (pid < 0) return error.ForkFailed;
+
+    if (pid == 0) {
+        _ = c.setsid();
+
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+
+        var fd_buf: [32]u8 = undefined;
+        const fd_text = std.fmt.bufPrint(&fd_buf, "{d}", .{owner_fd_in_child}) catch c._exit(127);
+
+        const n: usize = 6 + child_argv.len + 1;
+        const av = a.alloc(?[*:0]u8, n) catch c._exit(127);
+
+        av[0] = (a.dupeZ(u8, argv0) catch c._exit(127)).ptr;
+        av[1] = (a.dupeZ(u8, "_host") catch c._exit(127)).ptr;
+        av[2] = (a.dupeZ(u8, path) catch c._exit(127)).ptr;
+        av[3] = (a.dupeZ(u8, "--initial-owner-fd") catch c._exit(127)).ptr;
+        av[4] = (a.dupeZ(u8, fd_text) catch c._exit(127)).ptr;
+        av[5] = (a.dupeZ(u8, "--") catch c._exit(127)).ptr;
+
+        for (child_argv, 0..) |arg, i| {
+            av[6 + i] = (a.dupeZ(u8, arg) catch c._exit(127)).ptr;
+        }
+        av[n - 1] = null;
+
+        if (c.setenv("MSR_SESSION", av[2].?, 1) != 0) {
+            c._exit(127);
+        }
+
+        const fd_flags = c.fcntl(owner_fd_in_child, c.F_GETFD, @as(c_int, 0));
+        if (fd_flags >= 0) {
+            _ = c.fcntl(owner_fd_in_child, c.F_SETFD, fd_flags & ~@as(c_int, c.FD_CLOEXEC));
+        }
+        _ = c.close(other_fd_to_close_in_child);
         _ = c.execvp(av[0].?, @ptrCast(av.ptr));
         c._exit(127);
     }
@@ -158,6 +228,24 @@ fn waitForReady(path: []const u8, timeout_ms: u32) bool {
         };
         return true;
     }
+    return false;
+}
+
+fn waitForInitialOwner(srv: *session_server.SessionServer, timeout_ms: u32) bool {
+    const step_us: u32 = 10_000;
+    const loops = timeout_ms / 10;
+    var i: u32 = 0;
+
+    while (i < loops) : (i += 1) {
+        _ = srv.step() catch |e| switch (e) {
+            session_server.Error.Unsupported => false,
+            else => return false,
+        };
+
+        if (srv.hasOwner()) return true;
+        _ = c.usleep(step_us);
+    }
+
     return false;
 }
 
@@ -219,6 +307,72 @@ fn runAttachDirect(path: []const u8, mode: client.AttachMode) u8 {
     return 0;
 }
 
+fn runAttachDirectWithRetry(path: []const u8, mode: client.AttachMode, timeout_ms: u32) u8 {
+    const step_us: u32 = 10_000;
+    const loops = timeout_ms / 10;
+    var i: u32 = 0;
+
+    while (i < loops) : (i += 1) {
+        var cli = client.SessionClient.init(std.heap.page_allocator, path) catch {
+            _ = c.usleep(step_us);
+            continue;
+        };
+        defer cli.deinit();
+
+        var att = cli.attach(mode) catch |e| switch (e) {
+            client.Error.ConnectFailed,
+            client.Error.AttachConflict,
+            client.Error.AttachRejected,
+            => {
+                _ = c.usleep(step_us);
+                continue;
+            },
+            else => {
+                err("msr: attach failed: {s}\n", .{@errorName(e)});
+                return 1;
+            },
+        };
+        defer att.close();
+
+        const bridge_exit = attach_bridge.runAttachBridge(
+            std.heap.page_allocator,
+            &att,
+            c.STDIN_FILENO,
+            c.STDOUT_FILENO,
+        ) catch |e| {
+            err("msr: attach bridge failed: {s}\n", .{@errorName(e)});
+            return 1;
+        };
+
+        switch (bridge_exit) {
+            .clean => {},
+            .remote_closed => {
+                restoreTerminalScreen(c.STDOUT_FILENO);
+                if (c.isatty(c.STDERR_FILENO) == 1) {
+                    err("msr: session closed the current attachment\n", .{});
+                }
+            },
+            .stdout_unavailable => {
+                if (c.isatty(c.STDERR_FILENO) == 1) {
+                    err("msr: local terminal output became unavailable; session is still running\n", .{});
+                }
+            },
+            .remote_error => {
+                err("msr: attach stream failed\n", .{});
+                return 1;
+            },
+        }
+
+        if (c.isatty(c.STDOUT_FILENO) == 1) {
+            out("\r\n", .{});
+        }
+        return 0;
+    }
+
+    err("msr: attach timed out\n", .{});
+    return 1;
+}
+
 fn ownerForwardWithRetry(current_session: []const u8, action: client.ForwardAction) !void {
     var cli = try client.SessionClient.init(std.heap.page_allocator, current_session);
     defer cli.deinit();
@@ -262,35 +416,10 @@ fn runDetachNested(current_session: []const u8) u8 {
     return 0;
 }
 
-fn runHost(path: []const u8, child_argv: []const []const u8) !u8 {
-
-    const env_entry = try std.fmt.allocPrint(std.heap.page_allocator, "MSR_SESSION={s}", .{path});
-    defer std.heap.page_allocator.free(env_entry);
-    const env = [_][]const u8{env_entry};
-
-    var session_host = try host.PtyChildHost.init(std.heap.page_allocator, .{
-        .argv = child_argv,
-        .env = env[0..],
-        .rows = 24,
-        .cols = 80,
-    });
-    defer session_host.deinit();
-
-    try session_host.start();
-
-    var server_state = session_server.SessionServer.init(std.heap.page_allocator, &session_host);
-    defer server_state.deinit();
-
-    server_state.listen(path) catch |e| {
-        switch (e) {
-            session_server.Error.AlreadyExists => err("msr: session already exists at {s}\n", .{path}),
-            session_server.Error.PermissionDenied => err("msr: permission denied creating session socket at {s}\n", .{path}),
-            session_server.Error.PathTooLong => err("msr: session socket path is too long: {s}\n", .{path}),
-            else => err("msr: failed to create session at {s}\n", .{path}),
-        }
-        return 1;
-    };
-
+fn runHostMainLoop(
+    server_state: *session_server.SessionServer,
+    session_host: *host.PtyChildHost,
+) !u8 {
     while (true) {
         const progressed = blk: {
             const value = server_state.step() catch |e| {
@@ -329,6 +458,134 @@ fn runHost(path: []const u8, child_argv: []const []const u8) !u8 {
     return 0;
 }
 
+fn runHost(path: []const u8, child_argv: []const []const u8, config: HostStartConfig) !u8 {
+    const env_entry = try std.fmt.allocPrint(std.heap.page_allocator, "MSR_SESSION={s}", .{path});
+    defer std.heap.page_allocator.free(env_entry);
+    const env = [_][]const u8{env_entry};
+
+    var session_host = try host.PtyChildHost.init(std.heap.page_allocator, .{
+        .argv = child_argv,
+        .env = env[0..],
+        .rows = 24,
+        .cols = 80,
+    });
+    defer session_host.deinit();
+
+    var server_state = session_server.SessionServer.init(std.heap.page_allocator, &session_host);
+    defer server_state.deinit();
+
+    server_state.listen(path) catch |e| {
+        switch (e) {
+            session_server.Error.AlreadyExists => err("msr: session already exists at {s}\n", .{path}),
+            session_server.Error.PermissionDenied => err("msr: permission denied creating session socket at {s}\n", .{path}),
+            session_server.Error.PathTooLong => err("msr: session socket path is too long: {s}\n", .{path}),
+            else => err("msr: failed to create session at {s}\n", .{path}),
+        }
+        return 1;
+    };
+
+    if (config.initial_owner_fd) |fd| {
+        try server_state.installInitialOwner(fd);
+    }
+
+    if (config.wait_for_owner_before_start) {
+        if (!waitForInitialOwner(&server_state, 2000)) {
+            err("msr: initial attach did not arrive\n", .{});
+            _ = server_state.stop() catch {};
+            return 1;
+        }
+    } else {
+        try session_host.start();
+    }
+
+    if (config.wait_for_owner_before_start) {
+        try session_host.start();
+    }
+
+    return try runHostMainLoop(&server_state, &session_host);
+}
+
+fn runCreateDetached(argv0: []const u8, path: []const u8, child_argv: []const []const u8) u8 {
+    spawnHostDetached(argv0, path, child_argv, false) catch {
+        err("msr: failed to spawn host\n", .{});
+        return 1;
+    };
+
+    if (!waitForReady(path, 2000)) {
+        err("msr: session did not become ready\n", .{});
+        return 1;
+    }
+
+    return 0;
+}
+
+fn runCreateAttached(argv0: []const u8, path: []const u8, child_argv: []const []const u8) u8 {
+    const pair = createSocketPair() catch {
+        err("msr: failed to create initial owner socketpair\n", .{});
+        return 1;
+    };
+
+    const parent_fd = pair[0];
+    const child_fd = pair[1];
+
+    spawnHostAttachedWithInitialOwner(argv0, path, child_argv, child_fd, parent_fd) catch {
+        _ = c.close(parent_fd);
+        _ = c.close(child_fd);
+        err("msr: failed to spawn host\n", .{});
+        return 1;
+    };
+
+    _ = c.close(child_fd);
+
+    var att = client.SessionAttachment{
+        .allocator = std.heap.page_allocator,
+        .fd = parent_fd,
+    };
+    defer att.close();
+
+    const bridge_exit = attach_bridge.runAttachBridge(
+        std.heap.page_allocator,
+        &att,
+        c.STDIN_FILENO,
+        c.STDOUT_FILENO,
+    ) catch |e| {
+        err("msr: attach bridge failed: {s}\n", .{@errorName(e)});
+        return 1;
+    };
+
+    switch (bridge_exit) {
+        .clean => {},
+        .remote_closed => {
+            restoreTerminalScreen(c.STDOUT_FILENO);
+            if (c.isatty(c.STDERR_FILENO) == 1) {
+                err("msr: session closed the current attachment\n", .{});
+            }
+        },
+        .stdout_unavailable => {
+            if (c.isatty(c.STDERR_FILENO) == 1) {
+                err("msr: local terminal output became unavailable; session is still running\n", .{});
+            }
+        },
+        .remote_error => {
+            err("msr: attach stream failed\n", .{});
+            return 1;
+        },
+    }
+
+    if (c.isatty(c.STDOUT_FILENO) == 1) {
+        out("\r\n", .{});
+    }
+    return 0;
+}
+
+fn createSocketPair() ![2]c_int {
+    var fds: [2]c_int = undefined;
+    if (c.socketpair(c.AF_UNIX, c.SOCK_STREAM, 0, &fds) != 0) {
+        return error.SocketPairFailed;
+    }
+    return fds;
+}
+
 pub fn main() !u8 {
     const allocator = std.heap.smp_allocator;
     const argv = try std.process.argsAlloc(allocator);
@@ -341,15 +598,44 @@ pub fn main() !u8 {
         }
 
         const path = argv[2];
+        var initial_owner_fd: ?c_int = null;
+        var wait_owner = false;
+        var idx: usize = 3;
 
-        if (argv.len < 5 or !std.mem.eql(u8, argv[3], "--")) {
+        while (idx < argv.len and !std.mem.eql(u8, argv[idx], "--")) {
+            if (std.mem.eql(u8, argv[idx], "--wait-owner")) {
+                wait_owner = true;
+                idx += 1;
+                continue;
+            }
+
+            if (std.mem.eql(u8, argv[idx], "--initial-owner-fd")) {
+                if (idx + 1 >= argv.len) {
+                    err("msr: invalid _host arguments\n", .{});
+                    return 1;
+                }
+                initial_owner_fd = std.fmt.parseInt(c_int, argv[idx + 1], 10) catch {
+                    err("msr: invalid _host arguments\n", .{});
+                    return 1;
+                };
+                idx += 2;
+                continue;
+            }
+
             err("msr: invalid _host arguments\n", .{});
             return 1;
         }
 
-        return try runHost(path, argv[4..]);
-    }
+        if (idx >= argv.len or !std.mem.eql(u8, argv[idx], "--")) {
+            err("msr: invalid _host arguments\n", .{});
+            return 1;
+        }
 
+        return try runHost(path, argv[idx + 1 ..], .{
+            .wait_for_owner_before_start = wait_owner,
+            .initial_owner_fd = initial_owner_fd,
+        });
+    }
     const parsed = try cli_parse.parseArgv(allocator, if (argv.len > 1) argv[1..] else &.{});
     switch (parsed) {
         .fail => |failure| {
@@ -571,25 +857,17 @@ pub fn main() !u8 {
                             },
                         }
                     }
-
-                    spawnHostDetached(argv[0], path, child_argv) catch {
-                        err("msr: failed to spawn host\n", .{});
-                        return 1;
-                    };
-
-                    if (!waitForReady(path, 2000)) {
-                        err("msr: session did not become ready\n", .{});
+                    if (current_session != null and !args.detach) {
+                        err("msr: nested create defaults to attached mode; use -d|--detach or create then nested attach explicitly\n", .{});
                         return 1;
                     }
 
-                    if (args.attach_after_create) {
-                        if (current_session) |session| {
-                            return runAttachNested(session, path, false);
-                        }
-                        return runAttachDirect(path, .exclusive);
+                    if (args.detach) {
+                        return runCreateDetached(argv[0], path, child_argv);
                     }
 
-                    return 0;
+                    return runCreateAttached(argv[0], path, child_argv);
+
                 },
             }
         },
