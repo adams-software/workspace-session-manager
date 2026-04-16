@@ -22,6 +22,7 @@ mkdir -p "$BIN_DIR" "$COMPLETIONS_DIR"
 install -m 0755 "$REPO_ROOT/zig-out/bin/msr" "$BIN_DIR/msr"
 install -m 0755 "$REPO_ROOT/zig-out/bin/vpty" "$BIN_DIR/vpty"
 install -m 0755 "$REPO_ROOT/zig-out/bin/alt" "$BIN_DIR/alt"
+install -m 0755 "$REPO_ROOT/zig-out/bin/scroll" "$BIN_DIR/scroll"
 install -m 0755 "$REPO_ROOT/wsm/scripts/wsm" "$BIN_DIR/wsm"
 install -m 0755 "$REPO_ROOT/wsm/scripts/wsm_menu" "$BIN_DIR/wsm_menu"
 install -m 0755 "$REPO_ROOT/wsm/scripts/wsm_menu_alt" "$BIN_DIR/wsm_menu_alt"
@@ -54,7 +55,7 @@ Contents:
 - bin/: user-facing commands
 - completions/: bash completion autoload files
 - install.sh: POSIX sh installer (defaults to ~/.local)
-- vendored libvterm is compiled into `vpty`; no separate system libvterm runtime package is required
+- vendored libvterm is compiled into `vpty` and `scroll`; no separate system libvterm runtime package is required
 
 Install:
   sh install.sh

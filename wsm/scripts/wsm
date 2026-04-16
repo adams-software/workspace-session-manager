@@ -28,6 +28,7 @@ else
 fi
 ALT_BIN="${ALT_BIN:-$BIN_DIR/alt}"
 VPTY_BIN="${VPTY_BIN:-$BIN_DIR/vpty}"
+SCROLL_BIN="${SCROLL_BIN:-$BIN_DIR/scroll}"
 
 err() { printf '%s\n' "$*" >&2; }
 out() { printf '%s\n' "$*"; }
@@ -426,6 +427,10 @@ replay_canonical() {
     err "wsm: no transcript for session: $id"
     exit 1
   }
+
+  if [[ -x "$SCROLL_BIN" ]] && command -v less >/dev/null 2>&1; then
+    exec bash -lc 'stty sane; clear; "$1" --ansi "$2" | less -R' _ "$SCROLL_BIN" "$log_file"
+  fi
 
   exec bash -lc 'stty sane; clear; cat "$1"; printf "\n\n-- end of transcript --\n"; printf "[enter] close... "; IFS= read -r _; exit 0' _ "$log_file"
 }
