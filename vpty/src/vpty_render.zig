@@ -13,13 +13,16 @@ pub const OutputState = struct {
 };
 
 pub const Renderer = struct {
-    // Full-frame renderer by policy. We capture a fresh snapshot for each
-    // accepted model change and keep only publish/commit version ordering.
     output_state: OutputState = .{},
     pending_output_state: ?OutputState = null,
     pending_output_version: u64 = 0,
+
+    committed_snapshot: ?host.HostScreenSnapshot = null,
+    pending_snapshot: ?host.HostScreenSnapshot = null,
+
     stdout_thread: *StdoutThread,
     needs_render: bool = true,
+    force_full_render: bool = true,
     last_generated_version: u64 = 0,
     render_buf: std.ArrayList(u8) = .{},
 
@@ -30,6 +33,7 @@ pub const Renderer = struct {
     }
 
     pub fn deinit(self: *Renderer) void {
+        self.freeStoredSnapshots();
         self.render_buf.deinit(std.heap.page_allocator);
     }
 
@@ -40,8 +44,10 @@ pub const Renderer = struct {
     }
 
     pub fn publishModelChanged(self: *Renderer, changed: actor_mailboxes.ModelChanged) void {
-        _ = changed;
         self.needs_render = true;
+        if (changed.force_full_render) {
+            self.force_full_render = true;
+        }
     }
 
     pub fn needsRender(self: *const Renderer) bool {
@@ -70,13 +76,26 @@ pub const Renderer = struct {
 
         var next_output_state = self.output_state;
 
+        const must_full_redraw =
+            self.force_full_render or
+            !self.output_state.has_drawn or
+            self.committed_snapshot == null or
+            self.output_state.alt_screen != owned_snapshot.alt_screen or
+            snapshotShapeChanged(self.committed_snapshot.?, &owned_snapshot);
+
         if (owned_snapshot.alt_screen != self.output_state.alt_screen or !self.output_state.has_drawn) {
             self.writeBytes(if (owned_snapshot.alt_screen) "\x1b[?1049h" else "\x1b[?1049l");
             next_output_state.alt_screen = owned_snapshot.alt_screen;
         }
 
         self.writeBytes("\x1b[?25l");
-        self.renderFullFrame(&owned_snapshot);
+
+        if (must_full_redraw) {
+            self.renderFullFrame(&owned_snapshot);
+        } else {
+            self.renderChangedRows(&self.committed_snapshot.?, &owned_snapshot);
+        }
+        self.force_full_render = false;
 
         self.moveCursor(owned_snapshot.cursor_row, owned_snapshot.cursor_col);
 
@@ -91,15 +110,16 @@ pub const Renderer = struct {
         next_output_state.cursor_col = owned_snapshot.cursor_col;
         next_output_state.has_drawn = true;
 
-        host.freeScreenSnapshot(std.heap.page_allocator, &owned_snapshot);
         self.last_generated_version = version;
 
         self.stdout_thread.publishRenderCandidate(actor_mailboxes.RenderPublish{
             .version = self.last_generated_version,
             .bytes = self.render_buf.items,
         }) catch return;
+
         self.pending_output_state = next_output_state;
         self.pending_output_version = self.last_generated_version;
+        self.replacePendingSnapshot(owned_snapshot);
     }
 
     pub fn reset(self: *Renderer) void {
@@ -109,6 +129,7 @@ pub const Renderer = struct {
         self.pending_output_version = 0;
         self.last_generated_version = 0;
         self.needs_render = true;
+        self.force_full_render = true;
         self.ensureBufferCapacity();
     }
 
@@ -117,11 +138,19 @@ pub const Renderer = struct {
             if (notice.version >= self.pending_output_version) {
                 self.output_state = state;
                 self.pending_output_state = null;
+
+                if (self.pending_snapshot) |snapshot| {
+                    if (self.committed_snapshot) |*old| {
+                        host.freeScreenSnapshot(std.heap.page_allocator, old);
+                    }
+                    self.committed_snapshot = snapshot;
+                    self.pending_snapshot = null;
+                }
+
                 self.pending_output_version = 0;
             }
         }
     }
-
     pub fn shutdown(self: *Renderer, version: u64) void {
         self.render_buf.clearRetainingCapacity();
 
@@ -143,6 +172,7 @@ pub const Renderer = struct {
         self.pending_output_state = null;
         self.pending_output_version = 0;
         self.last_generated_version = 0;
+        self.freeStoredSnapshots();
         self.needs_render = false;
     }
 
@@ -198,6 +228,62 @@ pub const Renderer = struct {
         }
 
         emitHyperlinkTransition(self, snapshot, 0, &style_state.active_hyperlink);
+    }
+    fn freeStoredSnapshots(self: *Renderer) void {
+        if (self.committed_snapshot) |*snapshot| {
+            host.freeScreenSnapshot(std.heap.page_allocator, snapshot);
+            self.committed_snapshot = null;
+        }
+        if (self.pending_snapshot) |*snapshot| {
+            host.freeScreenSnapshot(std.heap.page_allocator, snapshot);
+            self.pending_snapshot = null;
+        }
+    }
+
+    fn replacePendingSnapshot(self: *Renderer, snapshot: host.HostScreenSnapshot) void {
+        if (self.pending_snapshot) |*old| {
+            host.freeScreenSnapshot(std.heap.page_allocator, old);
+        }
+        self.pending_snapshot = snapshot;
+    }
+
+    fn renderChangedRows(self: *Renderer, prev: *const host.HostScreenSnapshot, next: *const host.HostScreenSnapshot) void {
+        var row_idx: usize = 0;
+        while (row_idx < next.lines.len) : (row_idx += 1) {
+            const prev_line = prev.lines[row_idx];
+            const next_line = next.lines[row_idx];
+
+            if (!lineEq(prev_line, next_line)) {
+                self.renderWholeRow(@intCast(row_idx), next, next_line);
+            }
+        }
+    }
+
+    fn renderWholeRow(
+        self: *Renderer,
+        row: u16,
+        snapshot: *const host.HostScreenSnapshot,
+        line: host.HostScreenLine,
+    ) void {
+        self.moveCursor(row, 0);
+
+        var style_state = StyleState{};
+        style_state.reset(self);
+
+        var col: usize = 0;
+        while (col < line.cells.len) {
+            const cell = line.cells[col];
+            if (cell.width == 0) {
+                col += 1;
+                continue;
+            }
+            emitHyperlinkTransition(self, snapshot, cell.hyperlink, &style_state.active_hyperlink);
+            emitCell(self, cell, &style_state);
+            col += @max(@as(usize, 1), @as(usize, cell.width));
+        }
+
+        emitHyperlinkTransition(self, snapshot, 0, &style_state.active_hyperlink);
+        self.eraseToEndOfLine();
     }
 };
 
@@ -307,6 +393,41 @@ fn emitCell(renderer: *Renderer, cell: host.HostScreenCell, style_state: *StyleS
     if (cell.width == 1) {
         renderer.writeBytes(" ");
     }
+}
+fn snapshotShapeChanged(a: host.HostScreenSnapshot, b: *const host.HostScreenSnapshot) bool {
+    return a.rows != b.rows or a.cols != b.cols or a.lines.len != b.lines.len;
+}
+
+fn lineEq(a: host.HostScreenLine, b: host.HostScreenLine) bool {
+    if (a.eol != b.eol) return false;
+    if (a.cells.len != b.cells.len) return false;
+
+    var i: usize = 0;
+    while (i < a.cells.len) : (i += 1) {
+        if (!cellEq(a.cells[i], b.cells[i])) return false;
+    }
+    return true;
+}
+
+fn cellEq(a: host.HostScreenCell, b: host.HostScreenCell) bool {
+    return a.width == b.width and
+        a.hyperlink == b.hyperlink and
+        colorEq(a.fg, b.fg) and
+        colorEq(a.bg, b.bg) and
+        attrsEq(a.attrs, b.attrs) and
+        a.chars_len == b.chars_len and
+        std.mem.eql(u32, a.chars[0..a.chars_len], b.chars[0..b.chars_len]);
+}
+
+fn attrsEq(a: host.HostCellAttrs, b: host.HostCellAttrs) bool {
+    return a.bold == b.bold and
+        a.italic == b.italic and
+        a.underline == b.underline and
+        a.blink == b.blink and
+        a.reverse == b.reverse and
+        a.conceal == b.conceal and
+        a.strike == b.strike and
+        a.font == b.font;
 }
 
 test "hyperlink transitions open once per run and close on change/end" {

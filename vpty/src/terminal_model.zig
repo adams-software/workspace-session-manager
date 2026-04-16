@@ -8,12 +8,15 @@ pub const GraphemeMode = VTermAdapter.GraphemeMode;
 
 pub const ModelUpdate = struct {
     version: u64,
+    force_full_render: bool = false,
 
     pub fn asModelChanged(self: ModelUpdate) actor_mailboxes.ModelChanged {
-        return .{ .version = self.version };
+        return .{
+            .version = self.version,
+            .force_full_render = self.force_full_render,
+        };
     }
 };
-
 pub const ModelSize = VTermAdapter.Size;
 
 pub const TerminalModel = struct {
@@ -65,7 +68,10 @@ pub const TerminalModel = struct {
         _ = version;
     }
 
-    pub fn forceFullDamage(self: *TerminalModel) void {
-        _ = self;
+    pub fn forceFullDamage(self: *TerminalModel) ModelUpdate {
+        return .{
+            .version = self.version,
+            .force_full_render = true,
+        };
     }
 };

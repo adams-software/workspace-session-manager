@@ -80,6 +80,7 @@ pub const RenderPublish = struct {
 
 pub const ModelChanged = struct {
     version: u64,
+    force_full_render: bool = false,
 };
 
 pub const CommitNotice = struct {

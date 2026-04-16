@@ -186,11 +186,10 @@ fn applyViewerSize(
 
 fn forceViewerRepaint(shared_model: *SharedTerminalModel, render_thread: *RenderThread) void {
     shared_model.lock();
-    shared_model.model.forceFullDamage();
-    const version = shared_model.model.currentVersion();
+    const update = shared_model.model.forceFullDamage();
     shared_model.unlock();
 
-    render_thread.publishModelChanged(.{ .version = version });
+    render_thread.publishModelChanged(update.asModelChanged());
 }
 
 fn viewerSizeChanged(current: ?ModelSize, rows: u16, cols: u16) bool {
@@ -414,10 +413,11 @@ const VptyRuntime = struct {
 
     fn primeRender(self: *VptyRuntime) void {
         self.shared_model.lock();
-        self.shared_model.model.forceFullDamage();
+        const update = self.shared_model.model.forceFullDamage();
         self.shared_model.unlock();
+
         self.render_thread.reset();
-        self.render_thread.publishModelChanged(.{ .version = self.shared_model.model.currentVersion() });
+        self.render_thread.publishModelChanged(update.asModelChanged());
     }
 
     fn installSignalHandlers() !SignalHandlers {
