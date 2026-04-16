@@ -1,14 +1,14 @@
 const std = @import("std");
 const pty_host = @import("host");
-const screen_types = @import("vterm_screen_types");
+const term_engine = @import("term_engine");
 
-pub const HostColor = screen_types.HostColor;
-pub const HostCellAttrs = screen_types.HostCellAttrs;
-pub const HostHyperlink = screen_types.HostHyperlink;
-pub const HostScreenCell = screen_types.HostScreenCell;
-pub const HostScreenLine = screen_types.HostScreenLine;
-pub const HostScreenSnapshot = screen_types.HostScreenSnapshot;
-pub const freeScreenSnapshot = screen_types.freeScreenSnapshot;
+pub const HostColor = term_engine.HostColor;
+pub const HostCellAttrs = term_engine.HostCellAttrs;
+pub const HostHyperlink = term_engine.HostHyperlink;
+pub const HostScreenCell = term_engine.HostScreenCell;
+pub const HostScreenLine = term_engine.HostScreenLine;
+pub const HostScreenSnapshot = term_engine.HostScreenSnapshot;
+pub const freeScreenSnapshot = term_engine.freeScreenSnapshot;
 
 pub const ExitStatus = pty_host.ExitStatus;
 pub const HostState = pty_host.HostState;

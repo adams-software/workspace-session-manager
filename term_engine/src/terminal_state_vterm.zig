@@ -3,7 +3,7 @@ const c = @cImport({
     @cInclude("vterm_shim.h");
     @cInclude("stdlib.h");
 });
-const screen_types = @import("vterm_screen_types");
+const screen_types = @import("vterm_screen_types.zig");
 
 fn convertColor(raw: c.msr_vterm_color, is_fg: bool) screen_types.HostColor {
     if ((is_fg and raw.is_default_fg != 0) or (!is_fg and raw.is_default_bg != 0)) {

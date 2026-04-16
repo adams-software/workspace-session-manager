@@ -16,6 +16,8 @@ typedef struct msr_vterm_hyperlink_record {
   size_t uri_len;
 } msr_vterm_hyperlink_record;
 
+typedef struct msr_vterm_history_event msr_vterm_history_event;
+
 typedef struct {
   VTerm *vt;
   VTermState *state;
@@ -30,6 +32,10 @@ typedef struct {
   msr_vterm_hyperlink_record *hyperlinks;
   size_t hyperlinks_len;
   size_t hyperlinks_cap;
+  int history_events_enabled;
+  msr_vterm_history_event *history_events;
+  size_t history_events_len;
+  size_t history_events_cap;
 } msr_vterm_handle;
 
 typedef struct {
@@ -63,6 +69,22 @@ typedef struct {
   msr_vterm_cell_attrs attrs;
 } msr_vterm_cell;
 
+struct msr_vterm_history_event {
+  uint8_t kind;
+  uint8_t continuation;
+  uint16_t rows;
+  uint16_t cols;
+  msr_vterm_cell *cells;
+};
+
+enum {
+  MSR_VTERM_HISTORY_NONE = 0,
+  MSR_VTERM_HISTORY_LINE_COMMITTED = 1,
+  MSR_VTERM_HISTORY_ALT_ENTER = 2,
+  MSR_VTERM_HISTORY_ALT_EXIT = 3,
+  MSR_VTERM_HISTORY_RESIZE = 4,
+};
+
 msr_vterm_handle *msr_vterm_new(int rows, int cols, int grapheme_mode);
 void msr_vterm_free(msr_vterm_handle *handle);
 void msr_vterm_set_size(msr_vterm_handle *handle, int rows, int cols);
@@ -73,6 +95,8 @@ void msr_vterm_get_cell(msr_vterm_handle *handle, int row, int col, msr_vterm_ce
 int msr_vterm_row_is_eol(msr_vterm_handle *handle, int row);
 const char *msr_vterm_get_hyperlink_uri(msr_vterm_handle *handle, uint32_t hyperlink_handle, size_t *len);
 const char *msr_vterm_get_hyperlink_params(msr_vterm_handle *handle, uint32_t hyperlink_handle, size_t *len);
+void msr_vterm_enable_history_events(msr_vterm_handle *handle, int enable);
+int msr_vterm_next_history_event(msr_vterm_handle *handle, msr_vterm_history_event *out);
 
 #ifdef __cplusplus
 }

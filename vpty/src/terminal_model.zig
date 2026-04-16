@@ -1,10 +1,10 @@
 const std = @import("std");
 const actor_mailboxes = @import("actor_mailboxes");
-const VTermAdapter = @import("terminal_state_vterm").VTermAdapter;
-const screen_types = @import("vterm_screen_types");
+const term_engine = @import("term_engine");
 
-pub const HostScreenSnapshot = screen_types.HostScreenSnapshot;
-pub const GraphemeMode = VTermAdapter.GraphemeMode;
+const VTermAdapter = term_engine.VTermAdapter;
+pub const HostScreenSnapshot = term_engine.HostScreenSnapshot;
+pub const GraphemeMode = term_engine.GraphemeMode;
 
 pub const ModelUpdate = struct {
     version: u64,

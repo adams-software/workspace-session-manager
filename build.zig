@@ -1,22 +1,22 @@
 const std = @import("std");
 
 fn addVendoredLibvterm(module: *std.Build.Module, b: *std.Build) void {
-    module.addIncludePath(b.path("vpty/vendor/libvterm/include"));
-    module.addIncludePath(b.path("vpty/vendor/libvterm/src"));
-    module.addIncludePath(b.path("vpty/vendor/utf8proc"));
-    module.addIncludePath(b.path("vpty/src"));
-    module.addCSourceFile(.{ .file = b.path("vpty/src/vterm_shim.c") });
+    module.addIncludePath(b.path("term_engine/vendor/libvterm/include"));
+    module.addIncludePath(b.path("term_engine/vendor/libvterm/src"));
+    module.addIncludePath(b.path("term_engine/vendor/utf8proc"));
+    module.addIncludePath(b.path("term_engine/src"));
+    module.addCSourceFile(.{ .file = b.path("term_engine/src/vterm_shim.c") });
     module.addCSourceFiles(.{ .files = &.{
-        "vpty/vendor/utf8proc/utf8proc.c",
-        "vpty/vendor/libvterm/src/encoding.c",
-        "vpty/vendor/libvterm/src/keyboard.c",
-        "vpty/vendor/libvterm/src/mouse.c",
-        "vpty/vendor/libvterm/src/parser.c",
-        "vpty/vendor/libvterm/src/pen.c",
-        "vpty/vendor/libvterm/src/screen.c",
-        "vpty/vendor/libvterm/src/state.c",
-        "vpty/vendor/libvterm/src/unicode.c",
-        "vpty/vendor/libvterm/src/vterm.c",
+        "term_engine/vendor/utf8proc/utf8proc.c",
+        "term_engine/vendor/libvterm/src/encoding.c",
+        "term_engine/vendor/libvterm/src/keyboard.c",
+        "term_engine/vendor/libvterm/src/mouse.c",
+        "term_engine/vendor/libvterm/src/parser.c",
+        "term_engine/vendor/libvterm/src/pen.c",
+        "term_engine/vendor/libvterm/src/screen.c",
+        "term_engine/vendor/libvterm/src/state.c",
+        "term_engine/vendor/libvterm/src/unicode.c",
+        "term_engine/vendor/libvterm/src/vterm.c",
     } });
 }
 
@@ -25,21 +25,13 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     // Shared modules
-    const vterm_screen_types_mod = b.addModule("vterm_screen_types", .{
-        .root_source_file = b.path("vpty/src/vterm_screen_types.zig"),
+    const term_engine_mod = b.addModule("term_engine", .{
+        .root_source_file = b.path("term_engine/src/root.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
-
-    const terminal_state_vterm_mod = b.addModule("terminal_state_vterm", .{
-        .root_source_file = b.path("vpty/src/terminal_state_vterm.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    addVendoredLibvterm(terminal_state_vterm_mod, b);
-    terminal_state_vterm_mod.addImport("vterm_screen_types", vterm_screen_types_mod);
+    addVendoredLibvterm(term_engine_mod, b);
 
     const byte_queue_mod = b.addModule("byte_queue", .{
         .root_source_file = b.path("ptyio/src/stream/byte_queue.zig"),
@@ -282,7 +274,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     session_host_vpty_mod.addImport("host", host_mod);
-    session_host_vpty_mod.addImport("vterm_screen_types", vterm_screen_types_mod);
+    session_host_vpty_mod.addImport("term_engine", term_engine_mod);
 
     const terminal_model_mod = b.addModule("terminal_model", .{
         .root_source_file = b.path("vpty/src/terminal_model.zig"),
@@ -290,8 +282,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
-    terminal_model_mod.addImport("terminal_state_vterm", terminal_state_vterm_mod);
-    terminal_model_mod.addImport("vterm_screen_types", vterm_screen_types_mod);
+    terminal_model_mod.addImport("term_engine", term_engine_mod);
 
     const stdout_actor_mod = b.addModule("stdout_actor", .{
         .root_source_file = b.path("vpty/src/stdout_actor.zig"),
@@ -383,7 +374,6 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(vpty_exe);
 
-    // alt
     const ptyio_tty_size_mod = b.addModule("ptyio_tty_size", .{
         .root_source_file = b.path("ptyio/src/tty/tty_size.zig"),
         .target = target,
@@ -391,6 +381,22 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
 
+    // scroll spike
+    const scroll_root = b.createModule(.{
+        .root_source_file = b.path("scroll/src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    scroll_root.addImport("term_engine", term_engine_mod);
+    scroll_root.addImport("ptyio_tty_size", ptyio_tty_size_mod);
+    const scroll_exe = b.addExecutable(.{
+        .name = "scroll",
+        .root_module = scroll_root,
+    });
+    b.installArtifact(scroll_exe);
+
+    // alt
     const alt_root = b.createModule(.{
         .root_source_file = b.path("alt/src/main.zig"),
         .target = target,
@@ -422,17 +428,7 @@ pub fn build(b: *std.Build) void {
     alt_test_root.addImport("ptyio_tty_size", ptyio_tty_size_mod);
     const alt_tests = b.addTest(.{ .root_module = alt_test_root });
 
-    const terminal_state_vterm_test_root = b.createModule(.{
-        .root_source_file = b.path("vpty/src/terminal_state_vterm.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    addVendoredLibvterm(terminal_state_vterm_test_root, b);
-    terminal_state_vterm_test_root.addImport("vterm_screen_types", vterm_screen_types_mod);
-    const terminal_state_vterm_tests = b.addTest(.{
-        .root_module = terminal_state_vterm_test_root,
-    });
+    const terminal_state_vterm_tests = b.addTest(.{ .root_module = term_engine_mod });
 
     // Test runners and aliases
     const run_terminal_state_vterm_tests = b.addRunArtifact(terminal_state_vterm_tests);

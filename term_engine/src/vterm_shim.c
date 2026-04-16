@@ -5,6 +5,25 @@
 
 enum { MSR_MAX_OSC8_BYTES = 8192 };
 
+static int ensure_history_event_cap(msr_vterm_handle *h, size_t additional) {
+  size_t needed = h->history_events_len + additional;
+  if (needed <= h->history_events_cap) return 1;
+  size_t next_cap = h->history_events_cap ? h->history_events_cap * 2 : 16;
+  while (next_cap < needed) next_cap *= 2;
+  msr_vterm_history_event *next = (msr_vterm_history_event *)realloc(h->history_events, next_cap * sizeof(msr_vterm_history_event));
+  if (!next) return 0;
+  h->history_events = next;
+  h->history_events_cap = next_cap;
+  return 1;
+}
+
+static int push_history_event(msr_vterm_handle *h, msr_vterm_history_event ev) {
+  if (!h || !h->history_events_enabled) return 1;
+  if (!ensure_history_event_cap(h, 1)) return 0;
+  h->history_events[h->history_events_len++] = ev;
+  return 1;
+}
+
 static int ensure_osc8_buf(msr_vterm_handle *h, size_t additional) {
   size_t needed = h->osc8_buf_len + additional + 1;
   if (needed > MSR_MAX_OSC8_BYTES) return 0;
@@ -34,6 +53,26 @@ static char *dup_bytes(const char *src, size_t len) {
   if (len > 0) memcpy(copy, src, len);
   copy[len] = '\0';
   return copy;
+}
+
+static msr_vterm_color convert_color(VTermColor color) {
+  msr_vterm_color out = {0};
+  out.is_default_fg = VTERM_COLOR_IS_DEFAULT_FG(&color) ? 1 : 0;
+  out.is_default_bg = VTERM_COLOR_IS_DEFAULT_BG(&color) ? 1 : 0;
+
+  if (VTERM_COLOR_IS_INDEXED(&color)) {
+    out.type = 1;
+    out.palette_index = color.indexed.idx;
+    return out;
+  }
+  if (VTERM_COLOR_IS_RGB(&color)) {
+    out.type = 2;
+    out.red = color.rgb.red;
+    out.green = color.rgb.green;
+    out.blue = color.rgb.blue;
+    return out;
+  }
+  return out;
 }
 
 // Hyperlink records are currently interned for the lifetime of the adapter.
@@ -119,7 +158,15 @@ static int on_settermprop(VTermProp prop, VTermValue *val, void *user) {
   msr_vterm_handle *h = (msr_vterm_handle *)user;
   if (!h) return 1;
   if (prop == VTERM_PROP_CURSORVISIBLE) h->cursor_visible = val->boolean;
-  if (prop == VTERM_PROP_ALTSCREEN) h->alt_screen = val->boolean;
+  if (prop == VTERM_PROP_ALTSCREEN) {
+    int new_alt = val->boolean;
+    if (h->alt_screen != new_alt) {
+      msr_vterm_history_event ev = {0};
+      ev.kind = new_alt ? MSR_VTERM_HISTORY_ALT_ENTER : MSR_VTERM_HISTORY_ALT_EXIT;
+      push_history_event(h, ev);
+    }
+    h->alt_screen = new_alt;
+  }
   return 1;
 }
 
@@ -128,6 +175,53 @@ static int on_resize(int rows, int cols, void *user) {
   if (!h) return 1;
   h->rows = rows;
   h->cols = cols;
+  msr_vterm_history_event ev = {0};
+  ev.kind = MSR_VTERM_HISTORY_RESIZE;
+  ev.rows = (uint16_t)rows;
+  ev.cols = (uint16_t)cols;
+  push_history_event(h, ev);
+  return 1;
+}
+
+static int on_sb_pushline4(int cols, const VTermScreenCell *cells, bool continuation, void *user) {
+  msr_vterm_handle *h = (msr_vterm_handle *)user;
+  if (!h || !h->history_events_enabled) return 1;
+
+  msr_vterm_cell *copy = (msr_vterm_cell *)calloc((size_t)cols, sizeof(msr_vterm_cell));
+  if (!copy) return 0;
+
+  for (int i = 0; i < cols; i++) {
+    const VTermScreenCell *src = &cells[i];
+    msr_vterm_cell *dst = &copy[i];
+    size_t n = 0;
+    while (n < VTERM_MAX_CHARS_PER_CELL && src->chars[n]) {
+      dst->chars[n] = src->chars[n];
+      n++;
+    }
+    dst->chars_len = (uint8_t)n;
+    dst->width = (uint8_t)src->width;
+    dst->hyperlink_handle = src->uri > 0 ? (uint32_t)src->uri : 0;
+    dst->fg = convert_color(src->fg);
+    dst->bg = convert_color(src->bg);
+    dst->attrs.bold = src->attrs.bold ? 1 : 0;
+    dst->attrs.italic = src->attrs.italic ? 1 : 0;
+    dst->attrs.underline = src->attrs.underline ? 1 : 0;
+    dst->attrs.blink = src->attrs.blink ? 1 : 0;
+    dst->attrs.reverse = src->attrs.reverse ? 1 : 0;
+    dst->attrs.conceal = src->attrs.conceal ? 1 : 0;
+    dst->attrs.strike = src->attrs.strike ? 1 : 0;
+    dst->attrs.font = src->attrs.font;
+  }
+
+  msr_vterm_history_event ev = {0};
+  ev.kind = MSR_VTERM_HISTORY_LINE_COMMITTED;
+  ev.continuation = continuation ? 1 : 0;
+  ev.cols = (uint16_t)cols;
+  ev.cells = copy;
+  if (!push_history_event(h, ev)) {
+    free(copy);
+    return 0;
+  }
   return 1;
 }
 
@@ -136,6 +230,7 @@ static VTermScreenCallbacks screen_cbs = {
   .movecursor = on_movecursor,
   .settermprop = on_settermprop,
   .resize = on_resize,
+  .sb_pushline4 = on_sb_pushline4,
 };
 
 static int fallback_osc(int command, VTermStringFragment frag, void *user) {
@@ -162,26 +257,6 @@ static VTermStateFallbacks state_fallbacks = {
   .osc = fallback_osc,
 };
 
-static msr_vterm_color convert_color(VTermColor color) {
-  msr_vterm_color out = {0};
-  out.is_default_fg = VTERM_COLOR_IS_DEFAULT_FG(&color) ? 1 : 0;
-  out.is_default_bg = VTERM_COLOR_IS_DEFAULT_BG(&color) ? 1 : 0;
-
-  if (VTERM_COLOR_IS_INDEXED(&color)) {
-    out.type = 1;
-    out.palette_index = color.indexed.idx;
-    return out;
-  }
-  if (VTERM_COLOR_IS_RGB(&color)) {
-    out.type = 2;
-    out.red = color.rgb.red;
-    out.green = color.rgb.green;
-    out.blue = color.rgb.blue;
-    return out;
-  }
-  return out;
-}
-
 msr_vterm_handle *msr_vterm_new(int rows, int cols, int grapheme_mode) {
   msr_vterm_handle *h = (msr_vterm_handle *)calloc(1, sizeof(msr_vterm_handle));
   if (!h) return NULL;
@@ -203,6 +278,7 @@ msr_vterm_handle *msr_vterm_new(int rows, int cols, int grapheme_mode) {
   h->alt_screen = 0;
 
   vterm_screen_set_callbacks(h->screen, &screen_cbs, h);
+  vterm_screen_callbacks_has_pushline4(h->screen);
   vterm_screen_set_unrecognised_fallbacks(h->screen, &state_fallbacks, h);
   vterm_screen_enable_altscreen(h->screen, 1);
   vterm_screen_reset(h->screen, 1);
@@ -220,6 +296,10 @@ void msr_vterm_free(msr_vterm_handle *handle) {
     free(handle->hyperlinks[i].params);
     free(handle->hyperlinks[i].uri);
   }
+  for (size_t i = 0; i < handle->history_events_len; i++) {
+    free(handle->history_events[i].cells);
+  }
+  free(handle->history_events);
   free(handle->hyperlinks);
   free(handle);
 }
@@ -307,4 +387,19 @@ const char *msr_vterm_get_hyperlink_params(msr_vterm_handle *handle, uint32_t hy
   if (idx >= handle->hyperlinks_len) return NULL;
   if (len) *len = handle->hyperlinks[idx].params_len;
   return handle->hyperlinks[idx].params;
+}
+
+void msr_vterm_enable_history_events(msr_vterm_handle *handle, int enable) {
+  if (!handle) return;
+  handle->history_events_enabled = enable ? 1 : 0;
+}
+
+int msr_vterm_next_history_event(msr_vterm_handle *handle, msr_vterm_history_event *out) {
+  if (!handle || !out || handle->history_events_len == 0) return 0;
+  *out = handle->history_events[0];
+  if (handle->history_events_len > 1) {
+    memmove(handle->history_events, handle->history_events + 1, (handle->history_events_len - 1) * sizeof(msr_vterm_history_event));
+  }
+  handle->history_events_len -= 1;
+  return 1;
 }
