@@ -113,6 +113,7 @@ If you want the lower-level tools directly:
 msr
 vpty
 alt
+scroll
 ```
 
 ## Package map
@@ -137,6 +138,11 @@ PTY switcher.
 
 Runs a primary side and an alternate side on separate PTYs behind a local hotkey.
 
+### `scroll/`
+Offline transcript-to-buffer extractor.
+
+Replays a `script` typescript file through the shared terminal engine and emits either plain text or ANSI-preserving linear output for pagers like `less -R`.
+
 ### `shared/`
 Small cross-cutting package for truly shared code and scripts.
 
@@ -151,6 +157,7 @@ A practical mental model is:
 - `msr` is the core session runtime
 - `vpty` handles terminal modeling and redraw behavior
 - `alt` switches between PTY-backed sides with a configurable hotkey
+- `scroll` turns transcript files into terminal-aware linear output for logs/replay
 
 If you are trying to understand the repo in more depth, continue with:
 
@@ -158,6 +165,7 @@ If you are trying to understand the repo in more depth, continue with:
 2. `msr/README.md`
 3. `vpty/README.md`
 4. `alt/README.md`
+5. `scroll/docs/design.md`
 
 ## Current maturity
 
@@ -192,6 +200,7 @@ Current binaries include:
 - `zig-out/bin/msr`
 - `zig-out/bin/vpty`
 - `zig-out/bin/alt`
+- `zig-out/bin/scroll`
 
 ## Development shell
 

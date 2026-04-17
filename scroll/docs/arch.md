@@ -7,7 +7,7 @@ Build `scroll` as a standalone transcript-to-buffer tool that:
 - reads a `script` typescript file
 - reconstructs terminal behavior with libvterm-backed logic
 - extracts committed normal-screen history lines
-- emits a normalized linear text buffer to stdout
+- emits a normalized linear buffer to stdout in either plain text or optional ANSI-preserving form
 - suppresses alternate-screen and TUI regions instead of rendering them
 
 This should be a new tool, not more logic inside `vpty`.
@@ -39,6 +39,7 @@ The strongest reusable pieces from the current repo are:
 - Unicode and grapheme handling
 - alt-screen state detection
 - snapshot or visible-row access for final flush behavior
+- shared terminal interpretation in `term_engine`
 
 You can also reuse the existing transcript capture path in `wsm`:
 
@@ -225,16 +226,17 @@ Required behavior:
 
 - UTF-8 output
 - sensible newline normalization
-- no terminal control sequences in v1 output
-- no terminal control sequences from suppressed regions
+- plain-text mode emits no terminal control sequences
+- suppressed alternate-screen regions emit nothing
+- ANSI mode preserves styling for supported extracted lines
 
 Later options may include:
 
-- ANSI-preserving mode
+- richer hyperlink preservation for committed history lines
 - optional alternate-screen markers
 - offset annotations
 
-But v1 should stay plain text.
+But v1 should keep plain text as the default output mode.
 
 ## Handling large files
 

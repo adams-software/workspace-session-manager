@@ -9,6 +9,8 @@ The v1 goal is deliberately narrow:
 - ingest a raw typescript file
 - interpret it with a real terminal engine
 - produce a normalized scrollback-style text stream
+- keep plain text as the default output mode
+- support optional ANSI-preserving output for pager use
 - omit TUI rendering for now
 - suppress alternate-screen/TUI regions instead of replaying them
 
@@ -16,6 +18,7 @@ Example usage:
 
 ```bash
 scroll session.typescript | less
+scroll --ansi session.typescript | less -R
 scroll session.typescript | nvim -
 cat session.typescript | scroll
 ```
@@ -60,6 +63,11 @@ cat session.typescript | scroll
 ### Output
 
 `scroll` writes a normalized UTF-8 linear buffer to stdout.
+
+Modes:
+
+- default: plain text
+- `--ansi`: preserve ANSI styling and OSC 8 hyperlinks where supported by the extracted data
 
 That output is intended to be piped to:
 
@@ -248,15 +256,16 @@ The emitted output should be designed to work well with standard text tools.
 - UTF-8 output
 - preserve ordinary text content
 - normalize line endings sensibly
-- avoid emitting terminal control sequences in v1 output
+- plain-text mode avoids emitting terminal control sequences
+- ANSI mode preserves styling on supported extracted lines
 
 ### Nice-to-have later
 
-- optional ANSI-preserving mode for colors on normal lines
+- richer hyperlink preservation for committed history lines
 - optional alt-screen markers
 - offset annotations
 
-Recommendation for v1: plain text only.
+Recommendation for v1: plain text remains the default, with ANSI as an opt-in mode.
 
 ## CLI shape
 
