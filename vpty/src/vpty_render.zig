@@ -161,6 +161,7 @@ pub const Renderer = struct {
         self.writeBytes("\x1b[?25h");
         self.resetStyle();
         self.writeBytes("\x1b(B");
+        self.writeBytes("\r\n");
 
         self.stdout_thread.publishRenderCandidate(actor_mailboxes.RenderPublish{
             .version = version,
