@@ -62,7 +62,7 @@ pub const Command = union(enum) {
 pub const PathArgs = struct { path: []const u8 };
 pub const CreateArgs = struct {
     path: []const u8,
-    detach: bool,
+    wait_attach: bool,
     child_argv: ?[]const []const u8,
 };
 pub const AttachArgs = struct {
@@ -187,14 +187,14 @@ pub fn parseArgv(allocator: std.mem.Allocator, argv: []const []const u8) (std.me
             return .{ .ok = .{ .current_session = current_session, .command = .detach } };
         },
         .create => {
-            if (flagHasUnexpectedValue(parsed, .create, "d") or flagHasUnexpectedValue(parsed, .create, "detach")) {
+            if (flagHasUnexpectedValue(parsed, .create, "wait-attach")) {
                 return .{ .fail = .{ .kind = .unexpected_argument, .command = .create } };
             }
-            const detach = hasFlag(parsed, .create, "d") or hasFlag(parsed, .create, "detach");
+            const wait_attach = hasFlag(parsed, .create, "wait-attach");
             if (parsed.positionals.len - positionals_offset != 1) return .{ .fail = .{ .kind = .missing_argument, .command = .create } };
             return .{ .ok = .{ .current_session = current_session, .command = .{ .create = .{
                 .path = parsed.positionals[positionals_offset],
-                .detach = detach,
+                .wait_attach = wait_attach,
                 .child_argv = if (parsed.literal_tail) |tail| try allocator.dupe([]const u8, tail) else null,
             } } } };
         },
@@ -235,14 +235,14 @@ pub fn parseArgv(allocator: std.mem.Allocator, argv: []const []const u8) (std.me
     }
 }
 
-test "cli_parse parses create with attach flag after path" {
-    const argv = [_][]const u8{ "c", "/tmp/x", "-d" };
+test "cli_parse parses create with wait-attach flag after path" {
+    const argv = [_][]const u8{ "c", "/tmp/x", "--wait-attach" };
     const res = try parseArgv(std.testing.allocator, argv[0..]);
     switch (res) {
         .ok => |ok| switch (ok.command) {
             .create => |cargs| {
                 try std.testing.expectEqualStrings("/tmp/x", cargs.path);
-                try std.testing.expect(cargs.detach);
+                try std.testing.expect(cargs.wait_attach);
             },
             else => return error.UnexpectedResult,
         },
@@ -269,7 +269,7 @@ test "cli_parse parses basic create" {
         .ok => |ok| switch (ok.command) {
             .create => |cargs| {
                 try std.testing.expectEqualStrings("/tmp/x", cargs.path);
-                try std.testing.expect(!cargs.detach);
+                try std.testing.expect(!cargs.wait_attach);
                 try std.testing.expect(cargs.child_argv == null);
             },
             else => return error.UnexpectedResult,
@@ -315,14 +315,14 @@ test "cli_parse parses inline session option before command" {
     }
 }
 
-test "cli_parse parses create with detach flag after path" {
-    const argv = [_][]const u8{ "c", "/tmp/x", "-d" };
+test "cli_parse parses create with long wait-attach flag before path" {
+    const argv = [_][]const u8{ "create", "--wait-attach", "/tmp/x" };
     const res = try parseArgv(std.testing.allocator, argv[0..]);
     switch (res) {
         .ok => |ok| switch (ok.command) {
             .create => |cargs| {
                 try std.testing.expectEqualStrings("/tmp/x", cargs.path);
-                try std.testing.expect(cargs.detach);
+                try std.testing.expect(cargs.wait_attach);
             },
             else => return error.UnexpectedResult,
         },

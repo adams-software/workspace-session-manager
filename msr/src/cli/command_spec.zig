@@ -79,7 +79,7 @@ pub fn hasFlagAlias(cmd: *const CommandSpec, alias: []const u8) bool {
 
 pub fn usageLine(cmd: *const CommandSpec) []const u8 {
     switch (cmd.id) {
-        .create => return "  msr create [-d|--detach] <path> [-- <cmd...>]\n",
+        .create => return "  msr create [--wait-attach] <path> [-- <cmd...>]\n",
         .attach => return "  msr attach [-f|--force] <path>\n",
         .detach => return "  msr detach\n",
         .current => return "  msr current\n",
@@ -117,7 +117,7 @@ pub fn shortUsage(id: CommandId) []const u8 {
 }
 
 pub const create_flags = [_]FlagSpec{
-    .{ .long = "detach", .short = 'd', .help = "do not attach to session immediately, run in background" },
+    .{ .long = "wait-attach", .help = "delay child startup until the first attach/owner is present" },
 };
 
 pub const create_positionals = [_]PositionalSpec{
@@ -158,12 +158,12 @@ pub const commands = [_]CommandSpec{
         .name = "create",
         .aliases = &.{ "c", "create" },
         .summary = "create a session",
-        .description = "Creates a persistent PTY-backed session at the given socket path and attaches immediately by default. Use -d or --detach to create without attaching. If no command is provided after --, the default interactive shell is used.",
+        .description = "Creates a persistent PTY-backed session at the given socket path. By default the child starts immediately and the command returns without attaching. Use --wait-attach to delay child startup until the first attach/owner is present. If no command is provided after --, the default interactive shell is used.",
         .positionals = &create_positionals,
         .flags = &create_flags,
         .examples = &.{
-            .{ .command = "msr c /tmp/dev.sock", .help = "create a session using the default interactive shell and attach" },
-            .{ .command = "msr c -d /tmp/dev.sock -- /bin/sh -i", .help = "create session in the background" },
+            .{ .command = "msr c /tmp/dev.sock", .help = "create a session using the default interactive shell" },
+            .{ .command = "msr c --wait-attach /tmp/dev.sock -- nvim", .help = "create a session that waits for first attach before starting" },
         },
     },
     .{

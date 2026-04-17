@@ -11,11 +11,13 @@ const c = @cImport({
     @cInclude("stdio.h");
     @cInclude("sys/socket.h");
     @cInclude("fcntl.h");
+    @cInclude("sys/ioctl.h");
 });
 
 const HostStartConfig = struct {
-    wait_for_owner_before_start: bool = false,
+    defer_child_start_until_owner_ready: bool = false,
     initial_owner_fd: ?c_int = null,
+    initial_size: ?host.Size = null,
 };
 
 fn out(comptime fmt: []const u8, args: anytype) void {
@@ -30,7 +32,7 @@ fn usageLineForKind(kind: cli_parse.CommandKind) []const u8 {
     return switch (kind) {
         .help => "  msr help\n",
         .current => "  msr current\n",
-        .create => "  msr create [-d|--detach] <path> [-- <cmd...>]\n",
+        .create => "  msr create [--wait-attach] <path> [-- <cmd...>]\n",
         .attach => "  msr attach [-f|--force] <path>\n",
         .detach => "  msr detach\n",
         .resize => "  msr resize [-f|--force] <path> <cols> <rows>\n",
@@ -48,7 +50,7 @@ fn usage() void {
         "USAGE\n" ++
         "  [MSR_SESSION=<path>] msr [--session <path>] <command> [args]\n\n" ++
         "COMMANDS\n" ++
-        "  create [-d|--detach] <path> [-- <cmd...>]    create a session, attach by default\n" ++
+        "  create [--wait-attach] <path> [-- <cmd...>]  create a session; do not attach\n" ++
         "  attach [-f|--force] <path>                   attach to a session\n" ++
         "  detach                                       detach the current session\n" ++
         "  current                                      print the current session path\n" ++
@@ -119,7 +121,8 @@ fn spawnHostDetached(
     argv0: []const u8,
     path: []const u8,
     child_argv: []const []const u8,
-    wait_for_owner_before_start: bool,
+    defer_child_start_until_owner_ready: bool,
+    initial_size: ?host.Size,
 ) !void {
     const pid = c.fork();
     if (pid < 0) return error.ForkFailed;
@@ -131,7 +134,9 @@ fn spawnHostDetached(
         defer arena.deinit();
         const a = arena.allocator();
 
-        const extra: usize = if (wait_for_owner_before_start) 1 else 0;
+        var extra: usize = 0;
+        if (defer_child_start_until_owner_ready) extra += 1;
+        if (initial_size != null) extra += 2;
         const n: usize = 4 + extra + child_argv.len + 1;
         const av = a.alloc(?[*:0]u8, n) catch c._exit(127);
 
@@ -140,8 +145,16 @@ fn spawnHostDetached(
         av[2] = (a.dupeZ(u8, path) catch c._exit(127)).ptr;
 
         var idx: usize = 3;
-        if (wait_for_owner_before_start) {
-            av[idx] = (a.dupeZ(u8, "--wait-owner") catch c._exit(127)).ptr;
+        if (defer_child_start_until_owner_ready) {
+            av[idx] = (a.dupeZ(u8, "--defer-start-until-owner-ready") catch c._exit(127)).ptr;
+            idx += 1;
+        }
+        if (initial_size) |size| {
+            av[idx] = (a.dupeZ(u8, "--size") catch c._exit(127)).ptr;
+            idx += 1;
+            var size_buf: [32]u8 = undefined;
+            const size_text = std.fmt.bufPrint(&size_buf, "{d}x{d}", .{ size.cols, size.rows }) catch c._exit(127);
+            av[idx] = (a.dupeZ(u8, size_text) catch c._exit(127)).ptr;
             idx += 1;
         }
 
@@ -162,56 +175,18 @@ fn spawnHostDetached(
     }
 }
 
-fn spawnHostAttachedWithInitialOwner(
-    argv0: []const u8,
-    path: []const u8,
-    child_argv: []const []const u8,
-    owner_fd_in_child: c_int,
-    other_fd_to_close_in_child: c_int,
-) !void {
-    const pid = c.fork();
-    if (pid < 0) return error.ForkFailed;
+fn detectTerminalSize(fd: c_int) ?host.Size {
+    if (c.isatty(fd) != 1) return null;
 
-    if (pid == 0) {
-        _ = c.setsid();
+    var ws: c.struct_winsize = undefined;
+    if (c.ioctl(fd, c.TIOCGWINSZ, &ws) != 0) return null;
 
-        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
-        defer arena.deinit();
-        const a = arena.allocator();
-
-        var fd_buf: [32]u8 = undefined;
-        const fd_text = std.fmt.bufPrint(&fd_buf, "{d}", .{owner_fd_in_child}) catch c._exit(127);
-
-        const n: usize = 6 + child_argv.len + 1;
-        const av = a.alloc(?[*:0]u8, n) catch c._exit(127);
-
-        av[0] = (a.dupeZ(u8, argv0) catch c._exit(127)).ptr;
-        av[1] = (a.dupeZ(u8, "_host") catch c._exit(127)).ptr;
-        av[2] = (a.dupeZ(u8, path) catch c._exit(127)).ptr;
-        av[3] = (a.dupeZ(u8, "--initial-owner-fd") catch c._exit(127)).ptr;
-        av[4] = (a.dupeZ(u8, fd_text) catch c._exit(127)).ptr;
-        av[5] = (a.dupeZ(u8, "--") catch c._exit(127)).ptr;
-
-        for (child_argv, 0..) |arg, i| {
-            av[6 + i] = (a.dupeZ(u8, arg) catch c._exit(127)).ptr;
-        }
-        av[n - 1] = null;
-
-        if (c.setenv("MSR_SESSION", av[2].?, 1) != 0) {
-            c._exit(127);
-        }
-
-        const fd_flags = c.fcntl(owner_fd_in_child, c.F_GETFD, @as(c_int, 0));
-        if (fd_flags >= 0) {
-            _ = c.fcntl(owner_fd_in_child, c.F_SETFD, fd_flags & ~@as(c_int, c.FD_CLOEXEC));
-        }
-        _ = c.close(other_fd_to_close_in_child);
-        _ = c.execvp(av[0].?, @ptrCast(av.ptr));
-        c._exit(127);
-    }
+    const cols: u16 = if (ws.ws_col == 0) 80 else @intCast(ws.ws_col);
+    const rows: u16 = if (ws.ws_row == 0) 24 else @intCast(ws.ws_row);
+    return .{ .cols = cols, .rows = rows };
 }
 
-fn waitForReady(path: []const u8, timeout_ms: u32) bool {
+fn waitForSocketReady(path: []const u8, timeout_ms: u32) bool {
     const step_us: u32 = 10_000;
     const loops = timeout_ms / 10;
     var i: u32 = 0;
@@ -228,24 +203,6 @@ fn waitForReady(path: []const u8, timeout_ms: u32) bool {
         };
         return true;
     }
-    return false;
-}
-
-fn waitForInitialOwner(srv: *session_server.SessionServer, timeout_ms: u32) bool {
-    const step_us: u32 = 10_000;
-    const loops = timeout_ms / 10;
-    var i: u32 = 0;
-
-    while (i < loops) : (i += 1) {
-        _ = srv.step() catch |e| switch (e) {
-            session_server.Error.Unsupported => false,
-            else => return false,
-        };
-
-        if (srv.hasOwner()) return true;
-        _ = c.usleep(step_us);
-    }
-
     return false;
 }
 
@@ -419,7 +376,9 @@ fn runDetachNested(current_session: []const u8) u8 {
 fn runHostMainLoop(
     server_state: *session_server.SessionServer,
     session_host: *host.PtyChildHost,
+    defer_child_start_until_owner_ready: bool,
 ) !u8 {
+    var pending_child_start = defer_child_start_until_owner_ready;
     while (true) {
         const progressed = blk: {
             const value = server_state.step() catch |e| {
@@ -439,6 +398,20 @@ fn runHostMainLoop(
             break :blk value;
         };
 
+        if (pending_child_start and server_state.ownerIsReady()) {
+            if (session_host.currentState() == .idle) {
+                const size = server_state.core_state.size;
+                session_host.applySize(.{ .cols = size.cols, .rows = size.rows }) catch {};
+                session_host.start() catch |e| {
+                    err("msr: failed to start deferred child: {s}\n", .{@errorName(e)});
+                    _ = server_state.stop() catch {};
+                    _ = session_host.close() catch {};
+                    return 1;
+                };
+            }
+            pending_child_start = false;
+        }
+
         _ = session_host.refresh() catch {};
 
         switch (session_host.currentState()) {
@@ -446,12 +419,19 @@ fn runHostMainLoop(
                 if (!progressed) _ = c.usleep(1_000);
                 continue;
             },
+            .idle => {
+                if (pending_child_start) {
+                    if (!progressed) _ = c.usleep(1_000);
+                    continue;
+                }
+                break;
+            },
             .exited => {
                 _ = server_state.stop() catch {};
                 _ = session_host.close() catch {};
                 break;
             },
-            .idle, .closed => break,
+            .closed => break,
         }
     }
 
@@ -463,16 +443,19 @@ fn runHost(path: []const u8, child_argv: []const []const u8, config: HostStartCo
     defer std.heap.page_allocator.free(env_entry);
     const env = [_][]const u8{env_entry};
 
+    const initial_size: host.Size = config.initial_size orelse .{ .cols = 80, .rows = 24 };
+
     var session_host = try host.PtyChildHost.init(std.heap.page_allocator, .{
         .argv = child_argv,
         .env = env[0..],
-        .rows = 24,
-        .cols = 80,
+        .rows = initial_size.rows,
+        .cols = initial_size.cols,
     });
     defer session_host.deinit();
 
     var server_state = session_server.SessionServer.init(std.heap.page_allocator, &session_host);
     defer server_state.deinit();
+    server_state.core_state.size = .{ .cols = initial_size.cols, .rows = initial_size.rows };
 
     server_state.listen(path) catch |e| {
         switch (e) {
@@ -488,102 +471,27 @@ fn runHost(path: []const u8, child_argv: []const []const u8, config: HostStartCo
         try server_state.installInitialOwner(fd);
     }
 
-    if (config.wait_for_owner_before_start) {
-        if (!waitForInitialOwner(&server_state, 2000)) {
-            err("msr: initial attach did not arrive\n", .{});
-            _ = server_state.stop() catch {};
-            return 1;
-        }
-    } else {
+    if (!config.defer_child_start_until_owner_ready) {
         try session_host.start();
     }
 
-    if (config.wait_for_owner_before_start) {
-        try session_host.start();
-    }
-
-    return try runHostMainLoop(&server_state, &session_host);
+    return try runHostMainLoop(&server_state, &session_host, config.defer_child_start_until_owner_ready);
 }
 
-fn runCreateDetached(argv0: []const u8, path: []const u8, child_argv: []const []const u8) u8 {
-    spawnHostDetached(argv0, path, child_argv, false) catch {
+fn runCreate(argv0: []const u8, path: []const u8, child_argv: []const []const u8, wait_attach: bool) u8 {
+    const initial_size = detectTerminalSize(c.STDOUT_FILENO);
+
+    spawnHostDetached(argv0, path, child_argv, wait_attach, initial_size) catch {
         err("msr: failed to spawn host\n", .{});
         return 1;
     };
 
-    if (!waitForReady(path, 2000)) {
+    if (!waitForSocketReady(path, 2000)) {
         err("msr: session did not become ready\n", .{});
         return 1;
     }
 
     return 0;
-}
-
-fn runCreateAttached(argv0: []const u8, path: []const u8, child_argv: []const []const u8) u8 {
-    const pair = createSocketPair() catch {
-        err("msr: failed to create initial owner socketpair\n", .{});
-        return 1;
-    };
-
-    const parent_fd = pair[0];
-    const child_fd = pair[1];
-
-    spawnHostAttachedWithInitialOwner(argv0, path, child_argv, child_fd, parent_fd) catch {
-        _ = c.close(parent_fd);
-        _ = c.close(child_fd);
-        err("msr: failed to spawn host\n", .{});
-        return 1;
-    };
-
-    _ = c.close(child_fd);
-
-    var att = client.SessionAttachment{
-        .allocator = std.heap.page_allocator,
-        .fd = parent_fd,
-    };
-    defer att.close();
-
-    const bridge_exit = attach_bridge.runAttachBridge(
-        std.heap.page_allocator,
-        &att,
-        c.STDIN_FILENO,
-        c.STDOUT_FILENO,
-    ) catch |e| {
-        err("msr: attach bridge failed: {s}\n", .{@errorName(e)});
-        return 1;
-    };
-
-    switch (bridge_exit) {
-        .clean => {},
-        .remote_closed => {
-            restoreTerminalScreen(c.STDOUT_FILENO);
-            if (c.isatty(c.STDERR_FILENO) == 1) {
-                err("msr: session closed the current attachment\n", .{});
-            }
-        },
-        .stdout_unavailable => {
-            if (c.isatty(c.STDERR_FILENO) == 1) {
-                err("msr: local terminal output became unavailable; session is still running\n", .{});
-            }
-        },
-        .remote_error => {
-            err("msr: attach stream failed\n", .{});
-            return 1;
-        },
-    }
-
-    if (c.isatty(c.STDOUT_FILENO) == 1) {
-        out("\r\n", .{});
-    }
-    return 0;
-}
-
-fn createSocketPair() ![2]c_int {
-    var fds: [2]c_int = undefined;
-    if (c.socketpair(c.AF_UNIX, c.SOCK_STREAM, 0, &fds) != 0) {
-        return error.SocketPairFailed;
-    }
-    return fds;
 }
 
 pub fn main() !u8 {
@@ -599,13 +507,37 @@ pub fn main() !u8 {
 
         const path = argv[2];
         var initial_owner_fd: ?c_int = null;
-        var wait_owner = false;
+        var defer_start_until_owner_ready = false;
+        var initial_size: ?host.Size = null;
         var idx: usize = 3;
 
         while (idx < argv.len and !std.mem.eql(u8, argv[idx], "--")) {
-            if (std.mem.eql(u8, argv[idx], "--wait-owner")) {
-                wait_owner = true;
+            if (std.mem.eql(u8, argv[idx], "--defer-start-until-owner-ready")) {
+                defer_start_until_owner_ready = true;
                 idx += 1;
+                continue;
+            }
+
+            if (std.mem.eql(u8, argv[idx], "--size")) {
+                if (idx + 1 >= argv.len) {
+                    err("msr: invalid _host arguments\n", .{});
+                    return 1;
+                }
+                const raw = argv[idx + 1];
+                const x = std.mem.indexOfScalar(u8, raw, 'x') orelse {
+                    err("msr: invalid _host arguments\n", .{});
+                    return 1;
+                };
+                const cols = std.fmt.parseInt(u16, raw[0..x], 10) catch {
+                    err("msr: invalid _host arguments\n", .{});
+                    return 1;
+                };
+                const rows = std.fmt.parseInt(u16, raw[x + 1 ..], 10) catch {
+                    err("msr: invalid _host arguments\n", .{});
+                    return 1;
+                };
+                initial_size = .{ .cols = cols, .rows = rows };
+                idx += 2;
                 continue;
             }
 
@@ -632,8 +564,9 @@ pub fn main() !u8 {
         }
 
         return try runHost(path, argv[idx + 1 ..], .{
-            .wait_for_owner_before_start = wait_owner,
+            .defer_child_start_until_owner_ready = defer_start_until_owner_ready,
             .initial_owner_fd = initial_owner_fd,
+            .initial_size = initial_size,
         });
     }
     const parsed = try cli_parse.parseArgv(allocator, if (argv.len > 1) argv[1..] else &.{});
@@ -857,16 +790,7 @@ pub fn main() !u8 {
                             },
                         }
                     }
-                    if (current_session != null and !args.detach) {
-                        err("msr: nested create defaults to attached mode; use -d|--detach or create then nested attach explicitly\n", .{});
-                        return 1;
-                    }
-
-                    if (args.detach) {
-                        return runCreateDetached(argv[0], path, child_argv);
-                    }
-
-                    return runCreateAttached(argv[0], path, child_argv);
+                    return runCreate(argv[0], path, child_argv, args.wait_attach);
 
                 },
             }

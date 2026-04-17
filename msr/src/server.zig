@@ -87,6 +87,13 @@ pub const SessionServer = struct {
         return self.core_state.ownerFd();
     }
 
+    pub fn ownerIsReady(self: *const SessionServer) bool {
+        return switch (self.core_state.owner) {
+            .attached_ready => true,
+            else => false,
+        };
+    }
+
     pub fn listen(self: *SessionServer, socket_path: []const u8) Error!void {
         if (self.state != .created) return Error.InvalidState;
         try validateSocketPath(socket_path);
@@ -436,10 +443,22 @@ pub const SessionServer = struct {
                 }
             },
             .terminate => |sig| blk: {
-                self.session_host.terminate(signalName(sig)) catch {
-                    break :blk .{ .err = .invalid_args };
-                };
-                break :blk .ok;
+                switch (self.session_host.currentState()) {
+                    .idle => {
+                        self.stop() catch {
+                            break :blk .{ .err = .invalid_args };
+                        };
+                        _ = self.session_host.close() catch {};
+                        break :blk .ok;
+                    },
+                    .starting, .running, .exited => {
+                        self.session_host.terminate(signalName(sig)) catch {
+                            break :blk .{ .err = .invalid_args };
+                        };
+                        break :blk .ok;
+                    },
+                    .closed => break :blk .{ .err = .invalid_args },
+                }
             },
             .attach => .{ .err = .invalid_args },
             .detach => .{ .err = .invalid_args },
@@ -468,7 +487,31 @@ pub const SessionServer = struct {
                             return;
                         };
 
-                        try self.applyCoreOps(&ops);
+                        var reply_ok = false;
+                        var filtered = core.OpList{};
+                        defer core.deinitOpList(self.allocator, &filtered);
+
+                        for (ops.items) |op| {
+                            switch (op) {
+                                .reply => |reply| {
+                                    if (reply.fd == conn.fd and reply.ok) {
+                                        reply_ok = true;
+                                    } else {
+                                        try filtered.append(self.allocator, op);
+                                    }
+                                },
+                                else => try filtered.append(self.allocator, op),
+                            }
+                        }
+
+                        if (reply_ok) {
+                            wire.writeMessage(self.allocator, conn.fd, .{ .control_res = .ok }) catch {
+                                _ = c.close(conn.fd);
+                                return;
+                            };
+                        }
+
+                        try self.applyCoreOps(&filtered);
                         return;
                     },
                     .owner_forward => |forward| {
@@ -662,8 +705,13 @@ pub const SessionServer = struct {
 
     fn pumpPtyIo(self: *SessionServer) Error!bool {
         const master_fd = self.session_host.masterFd() orelse {
-            if (self.core_state.hasOwner()) self.dropOwner(true);
-            return false;
+            switch (self.session_host.currentState()) {
+                .idle, .starting => return false,
+                .running, .exited, .closed => {
+                    if (self.core_state.hasOwner()) self.dropOwner(true);
+                    return false;
+                },
+            }
         };
 
         var progressed = false;

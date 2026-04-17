@@ -18,13 +18,19 @@ Or for an explicit current-session context:
 MSR_SESSION=/tmp/demo.msr msr --help
 ```
 
-Create and attach to a session:
+Create a session:
 
 ```bash
-msr create -a /tmp/demo.msr -- bash
+msr create /tmp/demo.msr -- bash
 ```
 
-Reattach later:
+Create a session that waits for first attach before starting the child:
+
+```bash
+msr create --wait-attach /tmp/demo.msr -- nvim
+```
+
+Attach:
 
 ```bash
 msr attach /tmp/demo.msr

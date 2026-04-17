@@ -167,6 +167,11 @@ fn pumpAttachmentMessages(
                 if (pending_transition.* != null) return error.UnsupportedMessage;
                 pending_transition.* = try executeForwardRequest(allocator, att_transport, req);
             },
+            .control_res => {
+                // Benign on the attachment stream during initial owner_ready/resize
+                // handshake and other transitional moments. The bridge has no action
+                // to take here, so just ignore it.
+            },
             else => return error.UnsupportedMessage,
         }
     }
@@ -261,8 +266,10 @@ pub fn runAttachBridge(
         _ = c.tcsetattr(in_fd, c.TCSANOW, &saved_termios);
     };
 
-    try fd_stream.setNonBlocking(in_fd);
-    try fd_stream.setNonBlocking(out_fd);
+    fd_stream.setNonBlocking(in_fd) catch {
+        stdin_open = false;
+    };
+    _ = fd_stream.setNonBlocking(out_fd) catch {};
 
     try queueOwnerReady(&att_transport);
     try queueResizeIfAvailable(&att_transport, in_fd);
