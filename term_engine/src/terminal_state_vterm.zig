@@ -6,14 +6,33 @@ const c = @cImport({
 const screen_types = @import("vterm_screen_types.zig");
 
 fn convertColor(raw: c.msr_vterm_color, is_fg: bool) screen_types.HostColor {
+    const ansi_class: screen_types.HostAnsiClass = switch (raw.ansi_class) {
+        c.MSR_VTERM_ANSI_CLASSIC_LOW => .classic_low,
+        c.MSR_VTERM_ANSI_CLASSIC_BRIGHT => .classic_bright,
+        c.MSR_VTERM_ANSI_INDEXED_EXTENDED => .indexed_extended,
+        else => .none,
+    };
+
     if ((is_fg and raw.is_default_fg != 0) or (!is_fg and raw.is_default_bg != 0)) {
-        return .{ .kind = .default };
+        return .{ .kind = .default, .ansi_class = .none, .promoted_by_bold = false };
     }
 
     return switch (raw.type) {
-        1 => .{ .kind = .indexed, .palette_index = raw.palette_index },
-        2 => .{ .kind = .rgb, .red = raw.red, .green = raw.green, .blue = raw.blue },
-        else => .{ .kind = .default },
+        1 => .{
+            .kind = .indexed,
+            .palette_index = raw.palette_index,
+            .ansi_class = ansi_class,
+            .promoted_by_bold = raw.promoted_by_bold != 0,
+        },
+        2 => .{
+            .kind = .rgb,
+            .red = raw.red,
+            .green = raw.green,
+            .blue = raw.blue,
+            .ansi_class = .none,
+            .promoted_by_bold = false,
+        },
+        else => .{ .kind = .default, .ansi_class = .none, .promoted_by_bold = false },
     };
 }
 
@@ -393,4 +412,38 @@ test "unicode mode keeps combining mark attached to previous base" {
     try std.testing.expectEqual(@as(u32, 'e'), snapshot.lines[0].cells[0].chars[0]);
     try std.testing.expectEqual(@as(u32, 0x0301), snapshot.lines[0].cells[0].chars[1]);
     try std.testing.expectEqual(@as(u32, '!'), snapshot.lines[0].cells[1].chars[0]);
+}
+
+test "snapshot preserves ansi provenance for classic, bright, and extended indexed colors" {
+    var adapter = try VTermAdapter.init(2, 16);
+    defer adapter.deinit();
+
+    adapter.feed("\x1b[34mA\x1b[94mB\x1b[38;5;27mC\x1b[0m");
+
+    var snapshot = try adapter.snapshot(std.testing.allocator);
+    defer screen_types.freeScreenSnapshot(std.testing.allocator, &snapshot);
+
+    const a = snapshot.lines[0].cells[0].fg;
+    try std.testing.expectEqual(screen_types.HostColor{ .kind = .indexed, .palette_index = 4, .ansi_class = .classic_low, .promoted_by_bold = false }, a);
+
+    const b = snapshot.lines[0].cells[1].fg;
+    try std.testing.expectEqual(screen_types.HostColor{ .kind = .indexed, .palette_index = 12, .ansi_class = .classic_bright, .promoted_by_bold = false }, b);
+
+    const c_fg = snapshot.lines[0].cells[2].fg;
+    try std.testing.expectEqual(screen_types.HostColor{ .kind = .indexed, .palette_index = 27, .ansi_class = .indexed_extended, .promoted_by_bold = false }, c_fg);
+}
+
+test "snapshot preserves bold promoted classic-low provenance" {
+    var adapter = try VTermAdapter.init(2, 16);
+    defer adapter.deinit();
+
+    adapter.feed("\x1b[1;34mA\x1b[0m");
+
+    var snapshot = try adapter.snapshot(std.testing.allocator);
+    defer screen_types.freeScreenSnapshot(std.testing.allocator, &snapshot);
+
+    const fg = snapshot.lines[0].cells[0].fg;
+    try std.testing.expectEqual(@as(u8, 12), fg.palette_index);
+    try std.testing.expectEqual(screen_types.HostAnsiClass.classic_low, fg.ansi_class);
+    try std.testing.expect(fg.promoted_by_bold);
 }

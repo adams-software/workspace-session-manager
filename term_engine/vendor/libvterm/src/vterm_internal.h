@@ -50,6 +50,10 @@ struct VTermPen
   unsigned int font:4; /* To store 0-9 */
   unsigned int small:1;
   unsigned int baseline:2;
+  unsigned int fg_ansi_class:3;
+  unsigned int bg_ansi_class:3;
+  unsigned int fg_promoted_by_bold:1;
+  unsigned int bg_promoted_by_bold:1;
   int uri;
 };
 

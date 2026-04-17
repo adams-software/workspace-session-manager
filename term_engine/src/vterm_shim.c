@@ -55,10 +55,12 @@ static char *dup_bytes(const char *src, size_t len) {
   return copy;
 }
 
-static msr_vterm_color convert_color(VTermColor color) {
+static msr_vterm_color convert_color(VTermColor color, uint8_t ansi_class, uint8_t promoted_by_bold) {
   msr_vterm_color out = {0};
   out.is_default_fg = VTERM_COLOR_IS_DEFAULT_FG(&color) ? 1 : 0;
   out.is_default_bg = VTERM_COLOR_IS_DEFAULT_BG(&color) ? 1 : 0;
+  out.ansi_class = ansi_class;
+  out.promoted_by_bold = promoted_by_bold;
 
   if (VTERM_COLOR_IS_INDEXED(&color)) {
     out.type = 1;
@@ -201,8 +203,8 @@ static int on_sb_pushline4(int cols, const VTermScreenCell *cells, bool continua
     dst->chars_len = (uint8_t)n;
     dst->width = (uint8_t)src->width;
     dst->hyperlink_handle = src->uri > 0 ? (uint32_t)src->uri : 0;
-    dst->fg = convert_color(src->fg);
-    dst->bg = convert_color(src->bg);
+    dst->fg = convert_color(src->fg, 0, 0);
+    dst->bg = convert_color(src->bg, 0, 0);
     dst->attrs.bold = src->attrs.bold ? 1 : 0;
     dst->attrs.italic = src->attrs.italic ? 1 : 0;
     dst->attrs.underline = src->attrs.underline ? 1 : 0;
@@ -352,8 +354,8 @@ void msr_vterm_get_cell(msr_vterm_handle *handle, int row, int col, msr_vterm_ce
   out->chars_len = (uint8_t)n;
   out->width = (uint8_t)cell.width;
   out->hyperlink_handle = cell.uri > 0 ? (uint32_t)cell.uri : 0;
-  out->fg = convert_color(cell.fg);
-  out->bg = convert_color(cell.bg);
+  out->fg = convert_color(cell.fg, cell.fg_ansi_class, cell.fg_promoted_by_bold);
+  out->bg = convert_color(cell.bg, cell.bg_ansi_class, cell.bg_promoted_by_bold);
   out->attrs.bold = cell.attrs.bold ? 1 : 0;
   out->attrs.italic = cell.attrs.italic ? 1 : 0;
   out->attrs.underline = cell.attrs.underline ? 1 : 0;

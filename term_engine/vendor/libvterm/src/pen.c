@@ -2,6 +2,13 @@
 
 #include <stdio.h>
 
+enum {
+  MSR_VTERM_ANSI_NONE = 0,
+  MSR_VTERM_ANSI_CLASSIC_LOW = 1,
+  MSR_VTERM_ANSI_CLASSIC_BRIGHT = 2,
+  MSR_VTERM_ANSI_INDEXED_EXTENDED = 3,
+};
+
 /**
  * Structure used to store RGB triples without the additional metadata stored in
  * VTermColor.
@@ -156,6 +163,18 @@ static void set_pen_col_ansi(VTermState *state, VTermAttr attr, long col)
   setpenattr_col(state, attr, *colp);
 }
 
+static void set_pen_colour_provenance(VTermState *state, VTermAttr attr, uint8_t ansi_class, uint8_t promoted_by_bold)
+{
+  if(attr == VTERM_ATTR_BACKGROUND) {
+    state->pen.bg_ansi_class = ansi_class;
+    state->pen.bg_promoted_by_bold = promoted_by_bold;
+  }
+  else {
+    state->pen.fg_ansi_class = ansi_class;
+    state->pen.fg_promoted_by_bold = promoted_by_bold;
+  }
+}
+
 INTERNAL void vterm_state_newpen(VTermState *state)
 {
   // 90% grey so that pure white is brighter
@@ -180,6 +199,10 @@ INTERNAL void vterm_state_resetpen(VTermState *state)
   state->pen.small = 0;     setpenattr_bool(state, VTERM_ATTR_SMALL, 0);
   state->pen.baseline = 0;  setpenattr_int (state, VTERM_ATTR_BASELINE, 0);
   state->pen.uri = 0;       setpenattr_int (state, VTERM_ATTR_URI, 0);
+  state->pen.fg_ansi_class = MSR_VTERM_ANSI_NONE;
+  state->pen.bg_ansi_class = MSR_VTERM_ANSI_NONE;
+  state->pen.fg_promoted_by_bold = 0;
+  state->pen.bg_promoted_by_bold = 0;
 
   state->pen.fg = state->default_fg;  setpenattr_col(state, VTERM_ATTR_FOREGROUND, state->default_fg);
   state->pen.bg = state->default_bg;  setpenattr_col(state, VTERM_ATTR_BACKGROUND, state->default_bg);
@@ -298,8 +321,11 @@ INTERNAL void vterm_state_setpen(VTermState *state, const long args[], int argco
       const VTermColor *fg = &state->pen.fg;
       state->pen.bold = 1;
       setpenattr_bool(state, VTERM_ATTR_BOLD, 1);
-      if(!VTERM_COLOR_IS_DEFAULT_FG(fg) && VTERM_COLOR_IS_INDEXED(fg) && fg->indexed.idx < 8 && state->bold_is_highbright)
+      if(!VTERM_COLOR_IS_DEFAULT_FG(fg) && VTERM_COLOR_IS_INDEXED(fg) && fg->indexed.idx < 8 && state->bold_is_highbright) {
         set_pen_col_ansi(state, VTERM_ATTR_FOREGROUND, fg->indexed.idx + (state->pen.bold ? 8 : 0));
+        state->pen.fg_ansi_class = MSR_VTERM_ANSI_CLASSIC_LOW;
+        state->pen.fg_promoted_by_bold = 1;
+      }
       break;
     }
 
@@ -364,6 +390,12 @@ INTERNAL void vterm_state_setpen(VTermState *state, const long args[], int argco
     case 22: // Bold off
       state->pen.bold = 0;
       setpenattr_bool(state, VTERM_ATTR_BOLD, 0);
+      if(!VTERM_COLOR_IS_DEFAULT_FG(&state->pen.fg) && VTERM_COLOR_IS_INDEXED(&state->pen.fg) &&
+         state->pen.fg_promoted_by_bold && state->pen.fg.indexed.idx >= 8 && state->pen.fg.indexed.idx < 16) {
+        set_pen_col_ansi(state, VTERM_ATTR_FOREGROUND, state->pen.fg.indexed.idx - 8);
+        state->pen.fg_ansi_class = MSR_VTERM_ANSI_CLASSIC_LOW;
+        state->pen.fg_promoted_by_bold = 0;
+      }
       break;
 
     case 23: // Italic and Gothic (currently unsupported) off
@@ -399,38 +431,68 @@ INTERNAL void vterm_state_setpen(VTermState *state, const long args[], int argco
     case 30: case 31: case 32: case 33:
     case 34: case 35: case 36: case 37: // Foreground colour palette
       value = CSI_ARG(args[argi]) - 30;
-      if(state->pen.bold && state->bold_is_highbright)
+      set_pen_colour_provenance(state, VTERM_ATTR_FOREGROUND, MSR_VTERM_ANSI_CLASSIC_LOW, 0);
+      if(state->pen.bold && state->bold_is_highbright) {
         value += 8;
+        state->pen.fg_promoted_by_bold = 1;
+      }
       set_pen_col_ansi(state, VTERM_ATTR_FOREGROUND, value);
       break;
 
     case 38: // Foreground colour alternative palette
       if(argcount - argi < 1)
         return;
+      if(CSI_ARG(args[argi+1]) == 5 && argcount - argi >= 3 && !CSI_ARG_IS_MISSING(args[argi+2])) {
+        long idx = CSI_ARG(args[argi+2]);
+        if(idx < 8)
+          set_pen_colour_provenance(state, VTERM_ATTR_FOREGROUND, MSR_VTERM_ANSI_CLASSIC_LOW, 0);
+        else if(idx < 16)
+          set_pen_colour_provenance(state, VTERM_ATTR_FOREGROUND, MSR_VTERM_ANSI_CLASSIC_BRIGHT, 0);
+        else
+          set_pen_colour_provenance(state, VTERM_ATTR_FOREGROUND, MSR_VTERM_ANSI_INDEXED_EXTENDED, 0);
+      }
+      else {
+        set_pen_colour_provenance(state, VTERM_ATTR_FOREGROUND, MSR_VTERM_ANSI_NONE, 0);
+      }
       argi += 1 + lookup_colour(state, CSI_ARG(args[argi+1]), args+argi+2, argcount-argi-2, &state->pen.fg);
       setpenattr_col(state, VTERM_ATTR_FOREGROUND, state->pen.fg);
       break;
 
     case 39: // Foreground colour default
       state->pen.fg = state->default_fg;
+      set_pen_colour_provenance(state, VTERM_ATTR_FOREGROUND, MSR_VTERM_ANSI_NONE, 0);
       setpenattr_col(state, VTERM_ATTR_FOREGROUND, state->pen.fg);
       break;
 
     case 40: case 41: case 42: case 43:
     case 44: case 45: case 46: case 47: // Background colour palette
       value = CSI_ARG(args[argi]) - 40;
+      set_pen_colour_provenance(state, VTERM_ATTR_BACKGROUND, MSR_VTERM_ANSI_CLASSIC_LOW, 0);
       set_pen_col_ansi(state, VTERM_ATTR_BACKGROUND, value);
       break;
 
     case 48: // Background colour alternative palette
       if(argcount - argi < 1)
         return;
+      if(CSI_ARG(args[argi+1]) == 5 && argcount - argi >= 3 && !CSI_ARG_IS_MISSING(args[argi+2])) {
+        long idx = CSI_ARG(args[argi+2]);
+        if(idx < 8)
+          set_pen_colour_provenance(state, VTERM_ATTR_BACKGROUND, MSR_VTERM_ANSI_CLASSIC_LOW, 0);
+        else if(idx < 16)
+          set_pen_colour_provenance(state, VTERM_ATTR_BACKGROUND, MSR_VTERM_ANSI_CLASSIC_BRIGHT, 0);
+        else
+          set_pen_colour_provenance(state, VTERM_ATTR_BACKGROUND, MSR_VTERM_ANSI_INDEXED_EXTENDED, 0);
+      }
+      else {
+        set_pen_colour_provenance(state, VTERM_ATTR_BACKGROUND, MSR_VTERM_ANSI_NONE, 0);
+      }
       argi += 1 + lookup_colour(state, CSI_ARG(args[argi+1]), args+argi+2, argcount-argi-2, &state->pen.bg);
       setpenattr_col(state, VTERM_ATTR_BACKGROUND, state->pen.bg);
       break;
 
     case 49: // Default background
       state->pen.bg = state->default_bg;
+      set_pen_colour_provenance(state, VTERM_ATTR_BACKGROUND, MSR_VTERM_ANSI_NONE, 0);
       setpenattr_col(state, VTERM_ATTR_BACKGROUND, state->pen.bg);
       break;
 
@@ -449,12 +511,14 @@ INTERNAL void vterm_state_setpen(VTermState *state, const long args[], int argco
     case 90: case 91: case 92: case 93:
     case 94: case 95: case 96: case 97: // Foreground colour high-intensity palette
       value = CSI_ARG(args[argi]) - 90 + 8;
+      set_pen_colour_provenance(state, VTERM_ATTR_FOREGROUND, MSR_VTERM_ANSI_CLASSIC_BRIGHT, 0);
       set_pen_col_ansi(state, VTERM_ATTR_FOREGROUND, value);
       break;
 
     case 100: case 101: case 102: case 103:
     case 104: case 105: case 106: case 107: // Background colour high-intensity palette
       value = CSI_ARG(args[argi]) - 100 + 8;
+      set_pen_colour_provenance(state, VTERM_ATTR_BACKGROUND, MSR_VTERM_ANSI_CLASSIC_BRIGHT, 0);
       set_pen_col_ansi(state, VTERM_ATTR_BACKGROUND, value);
       break;
 

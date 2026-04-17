@@ -542,6 +542,10 @@ typedef struct {
   char     width;
   VTermScreenCellAttrs attrs;
   VTermColor fg, bg;
+  uint8_t fg_ansi_class;
+  uint8_t bg_ansi_class;
+  uint8_t fg_promoted_by_bold;
+  uint8_t bg_promoted_by_bold;
   int uri;
 } VTermScreenCell;
 

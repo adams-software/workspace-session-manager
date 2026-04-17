@@ -27,6 +27,10 @@ typedef struct
   unsigned int font      : 4; /* 0 to 9 */
   unsigned int small     : 1;
   unsigned int baseline  : 2;
+  unsigned int fg_ansi_class : 3;
+  unsigned int bg_ansi_class : 3;
+  unsigned int fg_promoted_by_bold : 1;
+  unsigned int bg_promoted_by_bold : 1;
   int uri;
 
   /* Extra state storage that isn't strictly pen-related */
@@ -300,6 +304,10 @@ static int erase_internal(VTermRect rect, int selective, void *user)
         /* Only copy .fg and .bg; leave things like rv in reset state */
         .fg = screen->pen.fg,
         .bg = screen->pen.bg,
+        .fg_ansi_class = screen->pen.fg_ansi_class,
+        .bg_ansi_class = screen->pen.bg_ansi_class,
+        .fg_promoted_by_bold = screen->pen.fg_promoted_by_bold,
+        .bg_promoted_by_bold = screen->pen.bg_promoted_by_bold,
       };
       cell->pen.dwl = info->doublewidth;
       cell->pen.dhl = info->doubleheight;
@@ -449,9 +457,13 @@ static int setpenattr(VTermAttr attr, VTermValue *val, void *user)
     return 1;
   case VTERM_ATTR_FOREGROUND:
     screen->pen.fg = val->color;
+    screen->pen.fg_ansi_class = screen->state->pen.fg_ansi_class;
+    screen->pen.fg_promoted_by_bold = screen->state->pen.fg_promoted_by_bold;
     return 1;
   case VTERM_ATTR_BACKGROUND:
     screen->pen.bg = val->color;
+    screen->pen.bg_ansi_class = screen->state->pen.bg_ansi_class;
+    screen->pen.bg_promoted_by_bold = screen->state->pen.bg_promoted_by_bold;
     return 1;
   case VTERM_ATTR_SMALL:
     screen->pen.small = val->boolean;
@@ -1020,6 +1032,10 @@ int vterm_screen_get_cell(const VTermScreen *screen, VTermPos pos, VTermScreenCe
 
   cell->fg = intcell->pen.fg;
   cell->bg = intcell->pen.bg;
+  cell->fg_ansi_class = intcell->pen.fg_ansi_class;
+  cell->bg_ansi_class = intcell->pen.bg_ansi_class;
+  cell->fg_promoted_by_bold = intcell->pen.fg_promoted_by_bold;
+  cell->bg_promoted_by_bold = intcell->pen.bg_promoted_by_bold;
   cell->uri = intcell->pen.uri;
 
   if(pos.col < (screen->cols - 1) &&

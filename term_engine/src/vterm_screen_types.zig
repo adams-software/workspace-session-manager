@@ -1,17 +1,30 @@
 const std = @import("std");
 
+pub const HostAnsiClass = enum(u8) {
+    none = 0,
+    classic_low = 1,      // 30..37 / 40..47
+    classic_bright = 2,   // 90..97 / 100..107
+    indexed_extended = 3, // 38;5;n / 48;5;n where n >= 16
+};
+
 pub const HostColor = struct {
-    pub const Kind = enum {
+    kind: enum {
         default,
         indexed,
         rgb,
-    };
+    } = .default,
 
-    kind: Kind = .default,
     palette_index: u8 = 0,
     red: u8 = 0,
     green: u8 = 0,
     blue: u8 = 0,
+
+    ansi_class: HostAnsiClass = .none,
+
+    // True only when a low classic fg was promoted to bright because of
+    // libvterm bold-highbright policy. Probably stays false in your current stack,
+    // but it is worth preserving.
+    promoted_by_bold: bool = false,
 };
 
 pub const HostCellAttrs = struct {

@@ -369,13 +369,20 @@ fn colorEq(a: host.HostColor, b: host.HostColor) bool {
         a.palette_index == b.palette_index and
         a.red == b.red and
         a.green == b.green and
-        a.blue == b.blue;
+        a.blue == b.blue and
+        a.ansi_class == b.ansi_class and
+        a.promoted_by_bold == b.promoted_by_bold;
 }
 
 fn emitColor(renderer: *Renderer, base: u8, color: host.HostColor) void {
     switch (color.kind) {
         .default => renderer.out("\x1b[{d}m", .{base + 1}),
-        .indexed => renderer.out("\x1b[{d};5;{d}m", .{ base, color.palette_index }),
+        .indexed => switch (color.ansi_class) {
+            .classic_low => renderer.out("\x1b[{d}m", .{(if (base == 38) @as(u8, 30) else @as(u8, 40)) + color.palette_index}),
+            .classic_bright => renderer.out("\x1b[{d}m", .{(if (base == 38) @as(u8, 90) else @as(u8, 100)) + (color.palette_index - 8)}),
+            .indexed_extended => renderer.out("\x1b[{d};5;{d}m", .{ base, color.palette_index }),
+            .none => renderer.out("\x1b[{d};5;{d}m", .{ base, color.palette_index }),
+        },
         .rgb => renderer.out("\x1b[{d};2;{d};{d};{d}m", .{ base, color.red, color.green, color.blue }),
     }
 }
@@ -488,6 +495,24 @@ test "hyperlink transitions open once per run and close on change/end" {
 
     try std.testing.expectEqualStrings(
         "\x1b]8;id=1;https://a.test\x1b\\\x1b]8;;\x1b\\\x1b]8;id=2;https://b.test\x1b\\\x1b]8;;\x1b\\",
+        renderer.render_buf.items,
+    );
+}
+
+test "emitColor preserves classic ansi and extended indexed encodings" {
+    var renderer = Renderer{ .stdout_thread = undefined };
+    renderer.ensureBufferCapacity();
+    defer renderer.deinit();
+
+    emitColor(&renderer, 38, .{ .kind = .indexed, .palette_index = 4, .ansi_class = .classic_low });
+    emitColor(&renderer, 38, .{ .kind = .indexed, .palette_index = 12, .ansi_class = .classic_bright });
+    emitColor(&renderer, 38, .{ .kind = .indexed, .palette_index = 27, .ansi_class = .indexed_extended });
+    emitColor(&renderer, 48, .{ .kind = .indexed, .palette_index = 5, .ansi_class = .classic_low });
+    emitColor(&renderer, 48, .{ .kind = .indexed, .palette_index = 13, .ansi_class = .classic_bright });
+    emitColor(&renderer, 48, .{ .kind = .indexed, .palette_index = 200, .ansi_class = .indexed_extended });
+
+    try std.testing.expectEqualStrings(
+        "\x1b[34m\x1b[94m\x1b[38;5;27m\x1b[45m\x1b[105m\x1b[48;5;200m",
         renderer.render_buf.items,
     );
 }

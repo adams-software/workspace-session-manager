@@ -18,6 +18,13 @@ typedef struct msr_vterm_hyperlink_record {
 
 typedef struct msr_vterm_history_event msr_vterm_history_event;
 
+enum msr_vterm_ansi_class {
+  MSR_VTERM_ANSI_NONE = 0,
+  MSR_VTERM_ANSI_CLASSIC_LOW = 1,
+  MSR_VTERM_ANSI_CLASSIC_BRIGHT = 2,
+  MSR_VTERM_ANSI_INDEXED_EXTENDED = 3,
+};
+
 typedef struct {
   VTerm *vt;
   VTermState *state;
@@ -46,6 +53,8 @@ typedef struct {
   uint8_t blue;
   uint8_t is_default_fg;
   uint8_t is_default_bg;
+  uint8_t ansi_class;        // NEW
+  uint8_t promoted_by_bold;  // NEW
 } msr_vterm_color;
 
 typedef struct {
