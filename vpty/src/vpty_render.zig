@@ -83,10 +83,7 @@ pub const Renderer = struct {
             self.output_state.alt_screen != owned_snapshot.alt_screen or
             snapshotShapeChanged(self.committed_snapshot.?, &owned_snapshot);
 
-        if (owned_snapshot.alt_screen != self.output_state.alt_screen or !self.output_state.has_drawn) {
-            self.writeBytes(if (owned_snapshot.alt_screen) "\x1b[?1049h" else "\x1b[?1049l");
-            next_output_state.alt_screen = owned_snapshot.alt_screen;
-        }
+        next_output_state.alt_screen = owned_snapshot.alt_screen;
 
         self.writeBytes("\x1b[?25l");
 
@@ -155,9 +152,6 @@ pub const Renderer = struct {
         self.render_buf.clearRetainingCapacity();
 
         self.writeBytes("\x1b]8;;\x1b\\");
-        if (self.output_state.alt_screen) {
-            self.writeBytes("\x1b[?1049l");
-        }
         self.writeBytes("\x1b[?25h");
         self.resetStyle();
         self.writeBytes("\x1b(B");
@@ -195,17 +189,11 @@ pub const Renderer = struct {
         self.out("\x1b[{d};{d}H", .{ row + 1, col + 1 });
     }
 
-    fn clearScreen(self: *Renderer) void {
-        self.writeBytes("\x1b[2J\x1b[H");
-    }
-
     fn eraseToEndOfLine(self: *Renderer) void {
         self.writeBytes("\x1b[K");
     }
 
     fn renderFullFrame(self: *Renderer, snapshot: *const host.HostScreenSnapshot) void {
-        self.clearScreen();
-
         var style_state = StyleState{};
         style_state.reset(self);
 
