@@ -1,6 +1,8 @@
 const std = @import("std");
 const actor_mailboxes = @import("actor_mailboxes");
-const Renderer = @import("vpty_render").Renderer;
+const vpty_render = @import("vpty_render");
+const Renderer = vpty_render.Renderer;
+const Viewport = vpty_render.Viewport;
 const TerminalModel = @import("terminal_model").TerminalModel;
 const StdoutThread = @import("stdout_thread").StdoutThread;
 const WakePipe = @import("wake_pipe").WakePipe;
@@ -47,10 +49,10 @@ pub const RenderThread = struct {
     stop_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     wake_pipe: WakePipe = .{},
 
-    pub fn init(allocator: std.mem.Allocator, shared_model: *SharedTerminalModel, stdout_thread: *StdoutThread) RenderThread {
+    pub fn init(allocator: std.mem.Allocator, shared_model: *SharedTerminalModel, stdout_thread: *StdoutThread, viewport: Viewport) RenderThread {
         return .{
             .allocator = allocator,
-            .renderer = Renderer.init(stdout_thread),
+            .renderer = Renderer.init(stdout_thread, viewport),
             .stdout_thread = stdout_thread,
             .shared_model = shared_model,
         };

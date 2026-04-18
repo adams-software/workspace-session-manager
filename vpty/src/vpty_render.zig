@@ -12,6 +12,22 @@ pub const OutputState = struct {
     has_drawn: bool = false,
 };
 
+pub const Viewport = struct {
+    origin_row: u16 = 0,
+    origin_col: u16 = 0,
+    rows: u16 = 0,
+    cols: u16 = 0,
+
+    pub fn init(origin_row: u16, origin_col: u16, rows: u16, cols: u16) Viewport {
+        return .{
+            .origin_row = origin_row,
+            .origin_col = origin_col,
+            .rows = rows,
+            .cols = cols,
+        };
+    }
+};
+
 pub const Renderer = struct {
     output_state: OutputState = .{},
     pending_output_state: ?OutputState = null,
@@ -21,13 +37,14 @@ pub const Renderer = struct {
     pending_snapshot: ?host.HostScreenSnapshot = null,
 
     stdout_thread: *StdoutThread,
+    viewport: Viewport = .{},
     needs_render: bool = true,
     force_full_render: bool = true,
     last_generated_version: u64 = 0,
     render_buf: std.ArrayList(u8) = .{},
 
-    pub fn init(stdout_thread: *StdoutThread) Renderer {
-        var self = Renderer{ .stdout_thread = stdout_thread };
+    pub fn init(stdout_thread: *StdoutThread, viewport: Viewport) Renderer {
+        var self = Renderer{ .stdout_thread = stdout_thread, .viewport = viewport };
         self.ensureBufferCapacity();
         return self;
     }
@@ -85,24 +102,13 @@ pub const Renderer = struct {
 
         next_output_state.alt_screen = owned_snapshot.alt_screen;
 
-        self.writeBytes("\x1b[?25l");
-
-        if (must_full_redraw) {
-            self.renderFullFrame(&owned_snapshot);
-        } else {
-            self.renderChangedRows(&self.committed_snapshot.?, &owned_snapshot);
-        }
+        _ = must_full_redraw;
+        self.renderFullFrame(&owned_snapshot);
         self.force_full_render = false;
 
         self.moveCursor(owned_snapshot.cursor_row, owned_snapshot.cursor_col);
 
-        if (owned_snapshot.cursor_visible != self.output_state.cursor_visible) {
-            self.writeBytes(if (owned_snapshot.cursor_visible) "\x1b[?25h" else "\x1b[?25l");
-            next_output_state.cursor_visible = owned_snapshot.cursor_visible;
-        } else if (owned_snapshot.cursor_visible) {
-            self.writeBytes("\x1b[?25h");
-        }
-
+        next_output_state.cursor_visible = owned_snapshot.cursor_visible;
         next_output_state.cursor_row = owned_snapshot.cursor_row;
         next_output_state.cursor_col = owned_snapshot.cursor_col;
         next_output_state.has_drawn = true;
@@ -149,19 +155,7 @@ pub const Renderer = struct {
         }
     }
     pub fn shutdown(self: *Renderer, version: u64) void {
-        self.render_buf.clearRetainingCapacity();
-
-        self.writeBytes("\x1b]8;;\x1b\\");
-        self.writeBytes("\x1b[?25h");
-        self.resetStyle();
-        self.writeBytes("\x1b(B");
-        self.writeBytes("\r\n");
-
-        self.stdout_thread.publishRenderCandidate(actor_mailboxes.RenderPublish{
-            .version = version,
-            .bytes = self.render_buf.items,
-        }) catch {};
-
+        _ = version;
         self.render_buf.clearRetainingCapacity();
         self.output_state = .{};
         self.pending_output_state = null;
@@ -186,11 +180,25 @@ pub const Renderer = struct {
     }
 
     fn moveCursor(self: *Renderer, row: u16, col: u16) void {
-        self.out("\x1b[{d};{d}H", .{ row + 1, col + 1 });
+        const max_row = if (self.viewport.rows == 0) @as(u16, 0) else self.viewport.rows - 1;
+        const max_col = if (self.viewport.cols == 0) @as(u16, 0) else self.viewport.cols - 1;
+        const clamped_row = @min(row, max_row);
+        const clamped_col = @min(col, max_col);
+        self.out("\x1b[{d};{d}H", .{
+            self.viewport.origin_row + clamped_row + 1,
+            self.viewport.origin_col + clamped_col + 1,
+        });
     }
 
-    fn eraseToEndOfLine(self: *Renderer) void {
-        self.writeBytes("\x1b[K");
+    fn fillRemainingViewportColumns(self: *Renderer, style_state: *StyleState, written_cols: usize) void {
+        const viewport_cols: usize = self.viewport.cols;
+        if (written_cols >= viewport_cols) return;
+
+        style_state.reset(self);
+        var remaining = viewport_cols - written_cols;
+        while (remaining > 0) : (remaining -= 1) {
+            self.writeBytes(" ");
+        }
     }
 
     fn renderFullFrame(self: *Renderer, snapshot: *const host.HostScreenSnapshot) void {
@@ -200,20 +208,24 @@ pub const Renderer = struct {
         for (snapshot.lines, 0..) |line, row_idx| {
             self.moveCursor(@intCast(row_idx), 0);
 
-            var col: usize = 0;
-            while (col < line.cells.len) {
-                const cell = line.cells[col];
+            var src_col: usize = 0;
+            var written_cols: usize = 0;
+            while (src_col < line.cells.len and written_cols < self.viewport.cols) {
+                const cell = line.cells[src_col];
                 if (cell.width == 0) {
-                    col += 1;
+                    src_col += 1;
                     continue;
                 }
+                const cell_width = @max(@as(usize, 1), @as(usize, cell.width));
+                if (written_cols + cell_width > self.viewport.cols) break;
                 emitHyperlinkTransition(self, snapshot, cell.hyperlink, &style_state.active_hyperlink);
                 emitCell(self, cell, &style_state);
-                col += @max(@as(usize, 1), @as(usize, cell.width));
+                written_cols += cell_width;
+                src_col += cell_width;
             }
 
             emitHyperlinkTransition(self, snapshot, 0, &style_state.active_hyperlink);
-            self.eraseToEndOfLine();
+            self.fillRemainingViewportColumns(&style_state, written_cols);
         }
 
         emitHyperlinkTransition(self, snapshot, 0, &style_state.active_hyperlink);
@@ -259,20 +271,24 @@ pub const Renderer = struct {
         var style_state = StyleState{};
         style_state.reset(self);
 
-        var col: usize = 0;
-        while (col < line.cells.len) {
-            const cell = line.cells[col];
+        var src_col: usize = 0;
+        var written_cols: usize = 0;
+        while (src_col < line.cells.len and written_cols < self.viewport.cols) {
+            const cell = line.cells[src_col];
             if (cell.width == 0) {
-                col += 1;
+                src_col += 1;
                 continue;
             }
+            const cell_width = @max(@as(usize, 1), @as(usize, cell.width));
+            if (written_cols + cell_width > self.viewport.cols) break;
             emitHyperlinkTransition(self, snapshot, cell.hyperlink, &style_state.active_hyperlink);
             emitCell(self, cell, &style_state);
-            col += @max(@as(usize, 1), @as(usize, cell.width));
+            written_cols += cell_width;
+            src_col += cell_width;
         }
 
         emitHyperlinkTransition(self, snapshot, 0, &style_state.active_hyperlink);
-        self.eraseToEndOfLine();
+        self.fillRemainingViewportColumns(&style_state, written_cols);
     }
 };
 
@@ -427,7 +443,7 @@ fn attrsEq(a: host.HostCellAttrs, b: host.HostCellAttrs) bool {
 }
 
 test "hyperlink transitions open once per run and close on change/end" {
-    var renderer = Renderer{ .stdout_thread = undefined };
+    var renderer = Renderer{ .stdout_thread = undefined, .viewport = .{} };
     renderer.ensureBufferCapacity();
     defer renderer.deinit();
 
@@ -489,7 +505,7 @@ test "hyperlink transitions open once per run and close on change/end" {
 }
 
 test "emitColor preserves classic ansi and extended indexed encodings" {
-    var renderer = Renderer{ .stdout_thread = undefined };
+    var renderer = Renderer{ .stdout_thread = undefined, .viewport = .{} };
     renderer.ensureBufferCapacity();
     defer renderer.deinit();
 

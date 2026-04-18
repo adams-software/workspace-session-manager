@@ -18,6 +18,7 @@ const TerminalModel = terminal_model_mod.TerminalModel;
 const render_thread_mod = @import("render_thread");
 const RenderThread = render_thread_mod.RenderThread;
 const SharedTerminalModel = render_thread_mod.SharedTerminalModel;
+const Viewport = @import("vpty_render").Viewport;
 const WakePipe = @import("wake_pipe").WakePipe;
 const ModelSize = terminal_model_mod.ModelSize;
 const GraphemeMode = terminal_model_mod.GraphemeMode;
@@ -26,10 +27,26 @@ const INPUT_READ_CHUNK = 4096;
 const OUTPUT_READ_CHUNK = 4096;
 const IO_SPIN_LIMIT = 16;
 
+fn parseU16Flag(flag: []const u8, value: []const u8) !u16 {
+    return std.fmt.parseInt(u16, value, 10) catch {
+        err("vpty: invalid value for {s}: {s}\n", .{ flag, value });
+        return error.InvalidArgs;
+    };
+}
+
 var winch_changed: bool = false;
 var terminate_requested: bool = false;
 var terminate_signal: c_int = 0;
 var wake_pipe: WakePipe = .{};
+
+const ParsedArgs = struct {
+    viewport: Viewport,
+    child_argv: std.ArrayList([]const u8),
+
+    fn deinit(self: *ParsedArgs, allocator: std.mem.Allocator) void {
+        self.child_argv.deinit(allocator);
+    }
+};
 
 const TransportState = struct {
     stdin_open: bool = true,
@@ -132,9 +149,10 @@ fn usage() void {
         "NAME\n" ++
             "  vpty - minimal terminal frontend for PTY-hosted applications\n\n" ++
             "USAGE\n" ++
-            "  vpty -- <command> [args...]\n\n" ++
+            "  vpty [--origin-row N] [--origin-col N] [--rows N] [--cols N] -- <command> [args...]\n\n" ++
             "DESCRIPTION\n" ++
-            "  Runs a child process on an inner PTY.\n",
+            "  Runs a child process on an inner PTY and renders it into a viewport.\n" ++
+            "  If viewport flags are omitted, the viewport defaults to the full current terminal at origin (0,0).\n",
         .{},
     );
 }
@@ -202,17 +220,25 @@ fn handleSigwinch(_: c_int) callconv(.c) void {
     wake_pipe.notify();
 }
 
-fn handleResizeIfNeeded(session_host: *host.SessionHost, shared_model: *SharedTerminalModel, render_thread: *RenderThread, terminal: *vpty_terminal.TerminalMode) void {
+fn handleResizeIfNeeded(
+    session_host: *host.SessionHost,
+    shared_model: *SharedTerminalModel,
+    render_thread: *RenderThread,
+    terminal: *vpty_terminal.TerminalMode,
+    viewport: Viewport,
+) void {
     if (!winch_changed) return;
     winch_changed = false;
     const size = terminal.currentSize() catch vpty_terminal.Size{ .rows = 24, .cols = 80 };
+    const target_rows = if (viewport.rows == 0) size.rows else viewport.rows;
+    const target_cols = if (viewport.cols == 0) size.cols else viewport.cols;
 
     shared_model.lock();
-    const changed = viewerSizeChanged(shared_model.model.currentSize(), size.rows, size.cols);
+    const changed = viewerSizeChanged(shared_model.model.currentSize(), target_rows, target_cols);
     shared_model.unlock();
 
     if (changed) {
-        applyViewerSize(session_host, shared_model, render_thread, size.rows, size.cols);
+        applyViewerSize(session_host, shared_model, render_thread, target_rows, target_cols);
     } else {
         forceViewerRepaint(shared_model, render_thread);
     }
@@ -247,8 +273,9 @@ fn stepLifecycle(
     shared_model: *SharedTerminalModel,
     render_thread: *RenderThread,
     terminal: *vpty_terminal.TerminalMode,
+    viewport: Viewport,
 ) !?host.ExitStatus {
-    handleResizeIfNeeded(session_host, shared_model, render_thread, terminal);
+    handleResizeIfNeeded(session_host, shared_model, render_thread, terminal, viewport);
     return try handleTerminationIfNeeded(session_host);
 }
 
@@ -321,14 +348,14 @@ fn refreshAndMaybeExit(session_host: *host.SessionHost) !?host.ExitStatus {
     return null;
 }
 
-fn pumpUntilExit(session_host: *host.SessionHost, shared_model: *SharedTerminalModel, render_thread: *RenderThread, terminal: *vpty_terminal.TerminalMode, forwarder: *side_effects.SideEffectForwarder, stdout_actor: *StdoutThread) !host.ExitStatus {
+fn pumpUntilExit(session_host: *host.SessionHost, shared_model: *SharedTerminalModel, render_thread: *RenderThread, terminal: *vpty_terminal.TerminalMode, viewport: Viewport, forwarder: *side_effects.SideEffectForwarder, stdout_actor: *StdoutThread) !host.ExitStatus {
     var transport = TransportState{};
     defer transport.deinit(std.heap.page_allocator);
 
     try transport.configureNonBlocking(session_host, terminal.stdin_fd, terminal.stdout_fd);
 
     while (true) {
-        if (try stepLifecycle(session_host, shared_model, render_thread, terminal)) |status| return status;
+        if (try stepLifecycle(session_host, shared_model, render_thread, terminal, viewport)) |status| return status;
 
         var pfds = [4]c.struct_pollfd{
             .{ .fd = if (transport.stdin_open) terminal.stdin_fd else -1, .events = if (transport.stdin_open) c.POLLIN else 0, .revents = 0 },
@@ -358,6 +385,7 @@ fn pumpUntilExit(session_host: *host.SessionHost, shared_model: *SharedTerminalM
 const VptyRuntime = struct {
     allocator: std.mem.Allocator,
     child_argv: []const []const u8,
+    viewport: Viewport,
     terminal: vpty_terminal.TerminalMode,
     forwarder: side_effects.SideEffectForwarder,
     stdout_actor: StdoutThread,
@@ -365,7 +393,7 @@ const VptyRuntime = struct {
     shared_model: SharedTerminalModel,
     render_thread: RenderThread,
 
-    fn init(self: *VptyRuntime, allocator: std.mem.Allocator, io: anytype, child_argv: []const []const u8) !void {
+    fn init(self: *VptyRuntime, allocator: std.mem.Allocator, io: anytype, child_argv: []const []const u8, viewport_override: ?Viewport) !void {
         var terminal = vpty_terminal.TerminalMode.init(c.STDIN_FILENO, c.STDOUT_FILENO);
         errdefer terminal.restore();
 
@@ -376,20 +404,22 @@ const VptyRuntime = struct {
         errdefer stdout_actor.deinit();
 
         const size = terminal.currentSize() catch vpty_terminal.Size{ .rows = 24, .cols = 80 };
+        const viewport = viewport_override orelse Viewport.init(0, 0, size.rows, size.cols);
 
         var session_host = try host.SessionHost.init(allocator, .{
             .argv = child_argv,
-            .rows = size.rows,
-            .cols = size.cols,
+            .rows = viewport.rows,
+            .cols = viewport.cols,
         });
         errdefer session_host.deinit();
 
-        var shared_model = SharedTerminalModel.init(io, try TerminalModel.initWithMode(size.rows, size.cols, graphemeModeFromEnv()));
+        var shared_model = SharedTerminalModel.init(io, try TerminalModel.initWithMode(viewport.rows, viewport.cols, graphemeModeFromEnv()));
         errdefer shared_model.model.deinit();
 
         self.* = .{
             .allocator = allocator,
             .child_argv = child_argv,
+            .viewport = viewport,
             .terminal = terminal,
             .forwarder = forwarder,
             .stdout_actor = stdout_actor,
@@ -397,7 +427,12 @@ const VptyRuntime = struct {
             .shared_model = shared_model,
             .render_thread = undefined,
         };
-        self.render_thread = RenderThread.init(allocator, &self.shared_model, &self.stdout_actor);
+        self.render_thread = RenderThread.init(
+            allocator,
+            &self.shared_model,
+            &self.stdout_actor,
+            viewport,
+        );
     }
 
     fn deinit(self: *VptyRuntime) void {
@@ -447,7 +482,7 @@ const VptyRuntime = struct {
         const signal_handlers = try installSignalHandlers();
         defer signal_handlers.restore();
 
-        const status = try pumpUntilExit(&self.session_host, &self.shared_model, &self.render_thread, &self.terminal, &self.forwarder, &self.stdout_actor);
+        const status = try pumpUntilExit(&self.session_host, &self.shared_model, &self.render_thread, &self.terminal, self.viewport, &self.forwarder, &self.stdout_actor);
         self.render_thread.shutdownActor();
         self.render_thread.stop();
         self.stdout_actor.stop();
@@ -470,30 +505,49 @@ const SignalHandlers = struct {
     }
 };
 
-fn parseChildArgv(allocator: std.mem.Allocator, argv: []const []const u8) !std.ArrayList([]const u8) {
-    var argv_list = std.ArrayList([]const u8){};
-    errdefer argv_list.deinit(allocator);
-    try argv_list.appendSlice(allocator, argv);
-    const args = argv_list.items;
-
-    if (args.len < 3) {
+fn parseArgs(allocator: std.mem.Allocator, argv: []const []const u8) !ParsedArgs {
+    if (argv.len < 3) {
         usage();
         return error.InvalidArgs;
     }
 
+    var origin_row: ?u16 = null;
+    var origin_col: ?u16 = null;
+    var rows: ?u16 = null;
+    var cols: ?u16 = null;
     var sep_idx: ?usize = null;
-    for (args[1..], 1..) |arg, i| {
+
+    var i: usize = 1;
+    while (i < argv.len) : (i += 1) {
+        const arg = argv[i];
         if (std.mem.eql(u8, arg, "--")) {
             sep_idx = i;
             break;
         }
+        if (std.mem.eql(u8, arg, "--origin-row") or std.mem.eql(u8, arg, "--origin-col") or std.mem.eql(u8, arg, "--rows") or std.mem.eql(u8, arg, "--cols")) {
+            i += 1;
+            if (i >= argv.len) {
+                err("vpty: missing value for {s}\n", .{arg});
+                return error.InvalidArgs;
+            }
+            const value = try parseU16Flag(arg, argv[i]);
+            if (std.mem.eql(u8, arg, "--origin-row")) origin_row = value
+            else if (std.mem.eql(u8, arg, "--origin-col")) origin_col = value
+            else if (std.mem.eql(u8, arg, "--rows")) rows = value
+            else cols = value;
+            continue;
+        }
+
+        err("vpty: unknown option: {s}\n", .{arg});
+        usage();
+        return error.InvalidArgs;
     }
 
     const cmd_start = sep_idx orelse {
         usage();
         return error.InvalidArgs;
     };
-    if (cmd_start + 1 >= args.len) {
+    if (cmd_start + 1 >= argv.len) {
         err("vpty: missing command after --\n", .{});
         usage();
         return error.InvalidArgs;
@@ -501,9 +555,12 @@ fn parseChildArgv(allocator: std.mem.Allocator, argv: []const []const u8) !std.A
 
     var result = std.ArrayList([]const u8){};
     errdefer result.deinit(allocator);
-    try result.appendSlice(allocator, args[(cmd_start + 1)..]);
-    argv_list.deinit(allocator);
-    return result;
+    try result.appendSlice(allocator, argv[(cmd_start + 1)..]);
+
+    return .{
+        .viewport = Viewport.init(origin_row orelse 0, origin_col orelse 0, rows orelse 0, cols orelse 0),
+        .child_argv = result,
+    };
 }
 
 pub fn main() !u8 {
@@ -511,14 +568,18 @@ pub fn main() !u8 {
     const argv = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, argv);
 
-    var child_argv_list = parseChildArgv(allocator, argv) catch |parse_err| switch (parse_err) {
+    var parsed = parseArgs(allocator, argv) catch |parse_err| switch (parse_err) {
         error.InvalidArgs => return 1,
         else => return parse_err,
     };
-    defer child_argv_list.deinit(allocator);
+    defer parsed.deinit(allocator);
 
     var runtime: VptyRuntime = undefined;
-    try runtime.init(allocator, .{}, child_argv_list.items);
+    const viewport_override = if (parsed.viewport.rows == 0 or parsed.viewport.cols == 0)
+        null
+    else
+        parsed.viewport;
+    try runtime.init(allocator, .{}, parsed.child_argv.items, viewport_override);
     defer runtime.deinit();
     return runtime.run();
 }
