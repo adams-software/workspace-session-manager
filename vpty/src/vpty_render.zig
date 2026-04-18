@@ -1,36 +1,37 @@
 const std = @import("std");
 const actor_mailboxes = @import("actor_mailboxes");
 const host = @import("session_host_vpty");
+const single_viewport_adapter = @import("single_viewport_adapter");
 const TerminalModel = @import("terminal_model").TerminalModel;
 const StdoutThread = @import("stdout_thread").StdoutThread;
 
-pub const OutputState = struct {
-    alt_screen: bool = false,
-    cursor_visible: bool = true,
-    cursor_row: u16 = 0,
-    cursor_col: u16 = 0,
+pub const VirtualCursor = single_viewport_adapter.VirtualCursor;
+pub const Viewport = single_viewport_adapter.Viewport;
+pub const TextRun = single_viewport_adapter.TextRun;
+pub const RowPatch = single_viewport_adapter.RowPatch;
+pub const ViewportPatch = single_viewport_adapter.ViewportPatch;
+pub const SingleViewportAdapter = single_viewport_adapter.SingleViewportAdapter;
+
+pub const SurfaceState = struct {
+    cursor: VirtualCursor = .{},
     has_drawn: bool = false,
 };
 
-pub const Viewport = struct {
-    origin_row: u16 = 0,
-    origin_col: u16 = 0,
-    rows: u16 = 0,
-    cols: u16 = 0,
+pub const RenderProduct = struct {
+    version: u64,
+    snapshot: host.HostScreenSnapshot,
+    patch: ViewportPatch,
+    next_surface_state: SurfaceState,
 
-    pub fn init(origin_row: u16, origin_col: u16, rows: u16, cols: u16) Viewport {
-        return .{
-            .origin_row = origin_row,
-            .origin_col = origin_col,
-            .rows = rows,
-            .cols = cols,
-        };
+    pub fn deinit(self: *RenderProduct, allocator: std.mem.Allocator) void {
+        self.patch.deinit(allocator);
+        host.freeScreenSnapshot(allocator, &self.snapshot);
     }
 };
 
 pub const Renderer = struct {
-    output_state: OutputState = .{},
-    pending_output_state: ?OutputState = null,
+    surface_state: SurfaceState = .{},
+    pending_surface_state: ?SurfaceState = null,
     pending_output_version: u64 = 0,
 
     committed_snapshot: ?host.HostScreenSnapshot = null,
@@ -79,56 +80,84 @@ pub const Renderer = struct {
     }
 
     pub fn renderSnapshot(self: *Renderer, version: u64, snapshot: host.HostScreenSnapshot) void {
+        if (self.buildRenderProduct(version, snapshot)) |product| {
+            self.publishRenderProduct(product);
+        }
+    }
+
+    pub fn buildRenderProduct(self: *Renderer, version: u64, snapshot: host.HostScreenSnapshot) ?RenderProduct {
         if (!self.needs_render) {
             var discarded = snapshot;
             host.freeScreenSnapshot(std.heap.page_allocator, &discarded);
-            return;
+            return null;
         }
         self.needs_render = false;
-
-        self.render_buf.clearRetainingCapacity();
 
         var owned_snapshot = snapshot;
         errdefer host.freeScreenSnapshot(std.heap.page_allocator, &owned_snapshot);
 
-        var next_output_state = self.output_state;
+        var next_surface_state = self.surface_state;
 
         const must_full_redraw =
             self.force_full_render or
-            !self.output_state.has_drawn or
+            !self.surface_state.has_drawn or
             self.committed_snapshot == null or
-            self.output_state.alt_screen != owned_snapshot.alt_screen or
             snapshotShapeChanged(self.committed_snapshot.?, &owned_snapshot);
 
-        next_output_state.alt_screen = owned_snapshot.alt_screen;
+        var patch = ViewportPatch.init(must_full_redraw, std.heap.page_allocator);
+        errdefer patch.deinit(std.heap.page_allocator);
 
-        _ = must_full_redraw;
-        self.renderFullFrame(&owned_snapshot);
+        if (must_full_redraw) {
+            tryBuildFullFramePatch(self, &patch, &owned_snapshot);
+        } else {
+            tryBuildChangedRowsPatch(self, &patch, &self.committed_snapshot.?, &owned_snapshot);
+        }
         self.force_full_render = false;
 
-        self.moveCursor(owned_snapshot.cursor_row, owned_snapshot.cursor_col);
+        patch.cursor = self.clipVirtualCursor(.{
+            .visible = owned_snapshot.cursor_visible,
+            .row = owned_snapshot.cursor_row,
+            .col = owned_snapshot.cursor_col,
+        });
+        next_surface_state.cursor = patch.cursor;
+        next_surface_state.has_drawn = true;
 
-        next_output_state.cursor_visible = owned_snapshot.cursor_visible;
-        next_output_state.cursor_row = owned_snapshot.cursor_row;
-        next_output_state.cursor_col = owned_snapshot.cursor_col;
-        next_output_state.has_drawn = true;
+        return .{
+            .version = version,
+            .snapshot = owned_snapshot,
+            .patch = patch,
+            .next_surface_state = next_surface_state,
+        };
+    }
 
-        self.last_generated_version = version;
+    pub fn publishRenderProduct(self: *Renderer, product: RenderProduct) void {
+        var owned_product = product;
+        errdefer owned_product.deinit(std.heap.page_allocator);
+
+        self.render_buf.clearRetainingCapacity();
+        var compositor = SingleViewportAdapter{
+            .viewport = self.viewport,
+            .render_buf = &self.render_buf,
+        };
+        compositor.emitPatch(&owned_product.patch, &owned_product.snapshot);
+
+        self.last_generated_version = owned_product.version;
 
         self.stdout_thread.publishRenderCandidate(actor_mailboxes.RenderPublish{
             .version = self.last_generated_version,
             .bytes = self.render_buf.items,
         }) catch return;
 
-        self.pending_output_state = next_output_state;
+        owned_product.patch.deinit(std.heap.page_allocator);
+        self.pending_surface_state = owned_product.next_surface_state;
         self.pending_output_version = self.last_generated_version;
-        self.replacePendingSnapshot(owned_snapshot);
+        self.replacePendingSnapshot(owned_product.snapshot);
     }
 
     pub fn reset(self: *Renderer) void {
         self.render_buf.clearRetainingCapacity();
-        self.output_state = .{};
-        self.pending_output_state = null;
+        self.surface_state = .{};
+        self.pending_surface_state = null;
         self.pending_output_version = 0;
         self.last_generated_version = 0;
         self.needs_render = true;
@@ -137,10 +166,10 @@ pub const Renderer = struct {
     }
 
     pub fn noteCommitted(self: *Renderer, notice: actor_mailboxes.CommitNotice) void {
-        if (self.pending_output_state) |state| {
+        if (self.pending_surface_state) |state| {
             if (notice.version >= self.pending_output_version) {
-                self.output_state = state;
-                self.pending_output_state = null;
+                self.surface_state = state;
+                self.pending_surface_state = null;
 
                 if (self.pending_snapshot) |snapshot| {
                     if (self.committed_snapshot) |*old| {
@@ -157,79 +186,14 @@ pub const Renderer = struct {
     pub fn shutdown(self: *Renderer, version: u64) void {
         _ = version;
         self.render_buf.clearRetainingCapacity();
-        self.output_state = .{};
-        self.pending_output_state = null;
+        self.surface_state = .{};
+        self.pending_surface_state = null;
         self.pending_output_version = 0;
         self.last_generated_version = 0;
         self.freeStoredSnapshots();
         self.needs_render = false;
     }
 
-    fn writeBytes(self: *Renderer, bytes: []const u8) void {
-        self.render_buf.appendSlice(std.heap.page_allocator, bytes) catch return;
-    }
-
-    fn out(self: *Renderer, comptime fmt: []const u8, args: anytype) void {
-        var buf: [256]u8 = undefined;
-        const rendered = std.fmt.bufPrint(&buf, fmt, args) catch return;
-        self.writeBytes(rendered);
-    }
-
-    fn resetStyle(self: *Renderer) void {
-        self.writeBytes("\x1b[0m");
-    }
-
-    fn moveCursor(self: *Renderer, row: u16, col: u16) void {
-        const max_row = if (self.viewport.rows == 0) @as(u16, 0) else self.viewport.rows - 1;
-        const max_col = if (self.viewport.cols == 0) @as(u16, 0) else self.viewport.cols - 1;
-        const clamped_row = @min(row, max_row);
-        const clamped_col = @min(col, max_col);
-        self.out("\x1b[{d};{d}H", .{
-            self.viewport.origin_row + clamped_row + 1,
-            self.viewport.origin_col + clamped_col + 1,
-        });
-    }
-
-    fn fillRemainingViewportColumns(self: *Renderer, style_state: *StyleState, written_cols: usize) void {
-        const viewport_cols: usize = self.viewport.cols;
-        if (written_cols >= viewport_cols) return;
-
-        style_state.reset(self);
-        var remaining = viewport_cols - written_cols;
-        while (remaining > 0) : (remaining -= 1) {
-            self.writeBytes(" ");
-        }
-    }
-
-    fn renderFullFrame(self: *Renderer, snapshot: *const host.HostScreenSnapshot) void {
-        var style_state = StyleState{};
-        style_state.reset(self);
-
-        for (snapshot.lines, 0..) |line, row_idx| {
-            self.moveCursor(@intCast(row_idx), 0);
-
-            var src_col: usize = 0;
-            var written_cols: usize = 0;
-            while (src_col < line.cells.len and written_cols < self.viewport.cols) {
-                const cell = line.cells[src_col];
-                if (cell.width == 0) {
-                    src_col += 1;
-                    continue;
-                }
-                const cell_width = @max(@as(usize, 1), @as(usize, cell.width));
-                if (written_cols + cell_width > self.viewport.cols) break;
-                emitHyperlinkTransition(self, snapshot, cell.hyperlink, &style_state.active_hyperlink);
-                emitCell(self, cell, &style_state);
-                written_cols += cell_width;
-                src_col += cell_width;
-            }
-
-            emitHyperlinkTransition(self, snapshot, 0, &style_state.active_hyperlink);
-            self.fillRemainingViewportColumns(&style_state, written_cols);
-        }
-
-        emitHyperlinkTransition(self, snapshot, 0, &style_state.active_hyperlink);
-    }
     fn freeStoredSnapshots(self: *Renderer) void {
         if (self.committed_snapshot) |*snapshot| {
             host.freeScreenSnapshot(std.heap.page_allocator, snapshot);
@@ -248,126 +212,50 @@ pub const Renderer = struct {
         self.pending_snapshot = snapshot;
     }
 
-    fn renderChangedRows(self: *Renderer, prev: *const host.HostScreenSnapshot, next: *const host.HostScreenSnapshot) void {
+    fn clipVirtualCursor(self: *Renderer, cursor: VirtualCursor) VirtualCursor {
+        return .{
+            .visible = cursor.visible,
+            .row = if (self.viewport.rows == 0) 0 else @min(cursor.row, self.viewport.rows - 1),
+            .col = if (self.viewport.cols == 0) 0 else @min(cursor.col, self.viewport.cols - 1),
+        };
+    }
+
+    fn tryBuildFullFramePatch(self: *Renderer, patch: *ViewportPatch, snapshot: *const host.HostScreenSnapshot) void {
+        const limit = @min(snapshot.lines.len, self.viewport.rows);
+        for (snapshot.lines[0..limit], 0..) |line, row_idx| {
+            var row_patch = RowPatch.init(@intCast(row_idx));
+            row_patch.runs.append(std.heap.page_allocator, TextRun.init(0, self.viewport.cols, line.cells)) catch {
+                row_patch.deinit(std.heap.page_allocator);
+                return;
+            };
+            patch.rows.append(std.heap.page_allocator, row_patch) catch {
+                row_patch.deinit(std.heap.page_allocator);
+                return;
+            };
+        }
+    }
+
+    fn tryBuildChangedRowsPatch(self: *Renderer, patch: *ViewportPatch, prev: *const host.HostScreenSnapshot, next: *const host.HostScreenSnapshot) void {
+        const limit = @min(@min(prev.lines.len, next.lines.len), self.viewport.rows);
         var row_idx: usize = 0;
-        while (row_idx < next.lines.len) : (row_idx += 1) {
+        while (row_idx < limit) : (row_idx += 1) {
             const prev_line = prev.lines[row_idx];
             const next_line = next.lines[row_idx];
 
             if (!lineEq(prev_line, next_line)) {
-                self.renderWholeRow(@intCast(row_idx), next, next_line);
+                var row_patch = RowPatch.init(@intCast(row_idx));
+                row_patch.runs.append(std.heap.page_allocator, TextRun.init(0, self.viewport.cols, next_line.cells)) catch {
+                    row_patch.deinit(std.heap.page_allocator);
+                    return;
+                };
+                patch.rows.append(std.heap.page_allocator, row_patch) catch {
+                    row_patch.deinit(std.heap.page_allocator);
+                    return;
+                };
             }
         }
     }
-
-    fn renderWholeRow(
-        self: *Renderer,
-        row: u16,
-        snapshot: *const host.HostScreenSnapshot,
-        line: host.HostScreenLine,
-    ) void {
-        self.moveCursor(row, 0);
-
-        var style_state = StyleState{};
-        style_state.reset(self);
-
-        var src_col: usize = 0;
-        var written_cols: usize = 0;
-        while (src_col < line.cells.len and written_cols < self.viewport.cols) {
-            const cell = line.cells[src_col];
-            if (cell.width == 0) {
-                src_col += 1;
-                continue;
-            }
-            const cell_width = @max(@as(usize, 1), @as(usize, cell.width));
-            if (written_cols + cell_width > self.viewport.cols) break;
-            emitHyperlinkTransition(self, snapshot, cell.hyperlink, &style_state.active_hyperlink);
-            emitCell(self, cell, &style_state);
-            written_cols += cell_width;
-            src_col += cell_width;
-        }
-
-        emitHyperlinkTransition(self, snapshot, 0, &style_state.active_hyperlink);
-        self.fillRemainingViewportColumns(&style_state, written_cols);
-    }
 };
-
-fn isValidUnicodeScalar(cp: u32) bool {
-    if (cp > 0x10FFFF) return false;
-    if (cp >= 0xD800 and cp <= 0xDFFF) return false;
-    return true;
-}
-
-fn encodeCodepoints(buf: *[32]u8, cell: host.HostScreenCell) []const u8 {
-    var len: usize = 0;
-    var i: usize = 0;
-
-    while (i < cell.chars_len and i < cell.chars.len) : (i += 1) {
-        const cp = cell.chars[i];
-        if (cp == 0) break;
-        if (!isValidUnicodeScalar(cp)) continue;
-
-        const written = std.unicode.utf8Encode(@as(u21, @intCast(cp)), buf[len..]) catch continue;
-        len += written;
-    }
-
-    return buf[0..len];
-}
-
-const StyleState = struct {
-    fg: host.HostColor = .{},
-    bg: host.HostColor = .{},
-    attrs: host.HostCellAttrs = .{},
-    active_hyperlink: u32 = 0,
-
-    fn reset(self: *StyleState, renderer: *Renderer) void {
-        renderer.resetStyle();
-        self.* = .{};
-    }
-
-    fn emitBool(renderer: *Renderer, on_code: []const u8, off_code: []const u8, current: *bool, target: bool) void {
-        if (current.* == target) return;
-        renderer.writeBytes(if (target) on_code else off_code);
-        current.* = target;
-    }
-
-    fn diffAndEmit(self: *StyleState, renderer: *Renderer, cell: host.HostScreenCell) void {
-        emitBool(renderer, "\x1b[1m", "\x1b[22m", &self.attrs.bold, cell.attrs.bold);
-        emitBool(renderer, "\x1b[3m", "\x1b[23m", &self.attrs.italic, cell.attrs.italic);
-        emitBool(renderer, "\x1b[4m", "\x1b[24m", &self.attrs.underline, cell.attrs.underline);
-        emitBool(renderer, "\x1b[5m", "\x1b[25m", &self.attrs.blink, cell.attrs.blink);
-        emitBool(renderer, "\x1b[7m", "\x1b[27m", &self.attrs.reverse, cell.attrs.reverse);
-        emitBool(renderer, "\x1b[8m", "\x1b[28m", &self.attrs.conceal, cell.attrs.conceal);
-
-        if (!colorEq(self.fg, cell.fg)) {
-            emitColor(renderer, 38, cell.fg);
-            self.fg = cell.fg;
-        }
-        if (!colorEq(self.bg, cell.bg)) {
-            emitColor(renderer, 48, cell.bg);
-            self.bg = cell.bg;
-        }
-    }
-};
-
-fn emitHyperlinkTransition(renderer: *Renderer, snapshot: *const host.HostScreenSnapshot, target: u32, current: *u32) void {
-    if (current.* == target) return;
-
-    if (current.* != 0) renderer.writeBytes("\x1b]8;;\x1b\\");
-
-    if (target != 0 and target <= snapshot.hyperlinks.len) {
-        const link = snapshot.hyperlinks[target - 1];
-        renderer.writeBytes("\x1b]8;");
-        renderer.writeBytes(link.params);
-        renderer.writeBytes(";");
-        renderer.writeBytes(link.uri);
-        renderer.writeBytes("\x1b\\");
-        current.* = target;
-        return;
-    }
-
-    current.* = 0;
-}
 
 fn colorEq(a: host.HostColor, b: host.HostColor) bool {
     return a.kind == b.kind and
@@ -379,33 +267,6 @@ fn colorEq(a: host.HostColor, b: host.HostColor) bool {
         a.promoted_by_bold == b.promoted_by_bold;
 }
 
-fn emitColor(renderer: *Renderer, base: u8, color: host.HostColor) void {
-    switch (color.kind) {
-        .default => renderer.out("\x1b[{d}m", .{base + 1}),
-        .indexed => switch (color.ansi_class) {
-            .classic_low => renderer.out("\x1b[{d}m", .{(if (base == 38) @as(u8, 30) else @as(u8, 40)) + color.palette_index}),
-            .classic_bright => renderer.out("\x1b[{d}m", .{(if (base == 38) @as(u8, 90) else @as(u8, 100)) + (color.palette_index - 8)}),
-            .indexed_extended => renderer.out("\x1b[{d};5;{d}m", .{ base, color.palette_index }),
-            .none => renderer.out("\x1b[{d};5;{d}m", .{ base, color.palette_index }),
-        },
-        .rgb => renderer.out("\x1b[{d};2;{d};{d};{d}m", .{ base, color.red, color.green, color.blue }),
-    }
-}
-
-fn emitCell(renderer: *Renderer, cell: host.HostScreenCell, style_state: *StyleState) void {
-    style_state.diffAndEmit(renderer, cell);
-
-    var buf: [32]u8 = undefined;
-    const text = encodeCodepoints(&buf, cell);
-    if (text.len != 0) {
-        renderer.writeBytes(text);
-        return;
-    }
-
-    if (cell.width == 1) {
-        renderer.writeBytes(" ");
-    }
-}
 fn snapshotShapeChanged(a: host.HostScreenSnapshot, b: *const host.HostScreenSnapshot) bool {
     return a.rows != b.rows or a.cols != b.cols or a.lines.len != b.lines.len;
 }
@@ -442,82 +303,105 @@ fn attrsEq(a: host.HostCellAttrs, b: host.HostCellAttrs) bool {
         a.font == b.font;
 }
 
-test "hyperlink transitions open once per run and close on change/end" {
-    var renderer = Renderer{ .stdout_thread = undefined, .viewport = .{} };
-    renderer.ensureBufferCapacity();
-    defer renderer.deinit();
+test "full frame patch builder clips rows to viewport height" {
+    var renderer = Renderer{ .stdout_thread = undefined, .viewport = Viewport.init(0, 0, 2, 80) };
+    var patch = ViewportPatch.init(true, std.testing.allocator);
+    defer patch.deinit(std.testing.allocator);
 
-    const links = [_]host.HostHyperlink{
-        .{ .params = "id=1", .uri = "https://a.test" },
-        .{ .params = "id=2", .uri = "https://b.test" },
+    const line = host.HostScreenLine{ .cells = &.{}, .eol = true };
+    const lines = [_]host.HostScreenLine{ line, line, line };
+    const snapshot = host.HostScreenSnapshot{
+        .rows = 3,
+        .cols = 80,
+        .cursor_row = 0,
+        .cursor_col = 0,
+        .cursor_visible = true,
+        .alt_screen = false,
+        .seq = 0,
+        .hyperlinks = &.{},
+        .lines = lines[0..],
     };
 
-    var current: u32 = 0;
-    emitHyperlinkTransition(&renderer, &.{
-        .rows = 0,
-        .cols = 0,
-        .cursor_row = 0,
-        .cursor_col = 0,
-        .cursor_visible = false,
-        .alt_screen = false,
-        .seq = 0,
-        .hyperlinks = links[0..],
-        .lines = &.{},
-    }, 1, &current);
-    emitHyperlinkTransition(&renderer, &.{
-        .rows = 0,
-        .cols = 0,
-        .cursor_row = 0,
-        .cursor_col = 0,
-        .cursor_visible = false,
-        .alt_screen = false,
-        .seq = 0,
-        .hyperlinks = links[0..],
-        .lines = &.{},
-    }, 1, &current);
-    emitHyperlinkTransition(&renderer, &.{
-        .rows = 0,
-        .cols = 0,
-        .cursor_row = 0,
-        .cursor_col = 0,
-        .cursor_visible = false,
-        .alt_screen = false,
-        .seq = 0,
-        .hyperlinks = links[0..],
-        .lines = &.{},
-    }, 2, &current);
-    emitHyperlinkTransition(&renderer, &.{
-        .rows = 0,
-        .cols = 0,
-        .cursor_row = 0,
-        .cursor_col = 0,
-        .cursor_visible = false,
-        .alt_screen = false,
-        .seq = 0,
-        .hyperlinks = links[0..],
-        .lines = &.{},
-    }, 0, &current);
+    renderer.tryBuildFullFramePatch(&patch, &snapshot);
 
-    try std.testing.expectEqualStrings(
-        "\x1b]8;id=1;https://a.test\x1b\\\x1b]8;;\x1b\\\x1b]8;id=2;https://b.test\x1b\\\x1b]8;;\x1b\\",
-        renderer.render_buf.items,
-    );
+    try std.testing.expectEqual(@as(usize, 2), patch.rows.items.len);
+    try std.testing.expectEqual(@as(u16, 0), patch.rows.items[0].row);
+    try std.testing.expectEqual(@as(u16, 1), patch.rows.items[1].row);
 }
 
-test "emitColor preserves classic ansi and extended indexed encodings" {
-    var renderer = Renderer{ .stdout_thread = undefined, .viewport = .{} };
-    renderer.ensureBufferCapacity();
-    defer renderer.deinit();
+test "changed row patch builder clips rows to viewport height" {
+    var renderer = Renderer{ .stdout_thread = undefined, .viewport = Viewport.init(0, 0, 2, 80) };
+    var patch = ViewportPatch.init(false, std.testing.allocator);
+    defer patch.deinit(std.testing.allocator);
 
-    emitColor(&renderer, 38, .{ .kind = .indexed, .palette_index = 4, .ansi_class = .classic_low });
-    emitColor(&renderer, 38, .{ .kind = .indexed, .palette_index = 12, .ansi_class = .classic_bright });
-    emitColor(&renderer, 38, .{ .kind = .indexed, .palette_index = 27, .ansi_class = .indexed_extended });
-    emitColor(&renderer, 48, .{ .kind = .indexed, .palette_index = 5, .ansi_class = .classic_low });
-    emitColor(&renderer, 48, .{ .kind = .indexed, .palette_index = 13, .ansi_class = .classic_bright });
-    emitColor(&renderer, 48, .{ .kind = .indexed, .palette_index = 200, .ansi_class = .indexed_extended });
+    const unchanged = host.HostScreenCell{
+        .chars = [_]u32{ 'a', 0, 0, 0, 0, 0 },
+        .chars_len = 1,
+        .width = 1,
+        .attrs = .{},
+        .fg = .{ .kind = .default },
+        .bg = .{ .kind = .default },
+        .hyperlink = 0,
+    };
+    const changed = host.HostScreenCell{
+        .chars = [_]u32{ 'b', 0, 0, 0, 0, 0 },
+        .chars_len = 1,
+        .width = 1,
+        .attrs = .{},
+        .fg = .{ .kind = .default },
+        .bg = .{ .kind = .default },
+        .hyperlink = 0,
+    };
+    const prev_lines = [_]host.HostScreenLine{
+        .{ .cells = &.{ unchanged }, .eol = true },
+        .{ .cells = &.{ unchanged }, .eol = true },
+        .{ .cells = &.{ unchanged }, .eol = true },
+    };
+    const next_lines = [_]host.HostScreenLine{
+        .{ .cells = &.{ unchanged }, .eol = true },
+        .{ .cells = &.{ changed }, .eol = true },
+        .{ .cells = &.{ changed }, .eol = true },
+    };
+    const prev = host.HostScreenSnapshot{
+        .rows = 3,
+        .cols = 80,
+        .cursor_row = 0,
+        .cursor_col = 0,
+        .cursor_visible = true,
+        .alt_screen = false,
+        .seq = 0,
+        .hyperlinks = &.{},
+        .lines = prev_lines[0..],
+    };
+    const next = host.HostScreenSnapshot{
+        .rows = 3,
+        .cols = 80,
+        .cursor_row = 0,
+        .cursor_col = 0,
+        .cursor_visible = true,
+        .alt_screen = false,
+        .seq = 0,
+        .hyperlinks = &.{},
+        .lines = next_lines[0..],
+    };
 
-    try std.testing.expectEqualStrings(
-        "\x1b[34m\x1b[94m\x1b[38;5;27m\x1b[45m\x1b[105m\x1b[48;5;200m",
-        renderer.render_buf.items,
-    );
+    renderer.tryBuildChangedRowsPatch(&patch, &prev, &next);
+
+    try std.testing.expectEqual(@as(usize, 1), patch.rows.items.len);
+    try std.testing.expectEqual(@as(u16, 1), patch.rows.items[0].row);
 }
+
+test "renderer clips virtual cursor to viewport before emitting patch" {
+    var renderer = Renderer{ .stdout_thread = undefined, .viewport = Viewport.init(0, 0, 2, 3) };
+
+    const clipped = renderer.clipVirtualCursor(.{
+        .visible = true,
+        .row = 9,
+        .col = 7,
+    });
+
+    try std.testing.expectEqual(@as(u16, 1), clipped.row);
+    try std.testing.expectEqual(@as(u16, 2), clipped.col);
+    try std.testing.expect(clipped.visible);
+}
+

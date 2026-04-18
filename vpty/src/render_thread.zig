@@ -150,7 +150,9 @@ pub const RenderThread = struct {
                 const captured = self.renderer.takeSnapshot(&self.shared_model.model);
                 self.shared_model.unlock();
                 if (captured) |work| {
-                    self.renderer.renderSnapshot(work.version, work.snapshot);
+                    if (self.renderer.buildRenderProduct(work.version, work.snapshot)) |product| {
+                        self.renderer.publishRenderProduct(product);
+                    }
                     continue;
                 }
             }

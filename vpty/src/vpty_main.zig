@@ -220,6 +220,15 @@ fn handleSigwinch(_: c_int) callconv(.c) void {
     wake_pipe.notify();
 }
 
+fn resolveViewport(partial: Viewport, size: vpty_terminal.Size) Viewport {
+    return Viewport.init(
+        partial.origin_row,
+        partial.origin_col,
+        if (partial.rows == 0) size.rows else partial.rows,
+        if (partial.cols == 0) size.cols else partial.cols,
+    );
+}
+
 fn handleResizeIfNeeded(
     session_host: *host.SessionHost,
     shared_model: *SharedTerminalModel,
@@ -230,8 +239,9 @@ fn handleResizeIfNeeded(
     if (!winch_changed) return;
     winch_changed = false;
     const size = terminal.currentSize() catch vpty_terminal.Size{ .rows = 24, .cols = 80 };
-    const target_rows = if (viewport.rows == 0) size.rows else viewport.rows;
-    const target_cols = if (viewport.cols == 0) size.cols else viewport.cols;
+    const resolved = resolveViewport(viewport, size);
+    const target_rows = resolved.rows;
+    const target_cols = resolved.cols;
 
     shared_model.lock();
     const changed = viewerSizeChanged(shared_model.model.currentSize(), target_rows, target_cols);
@@ -324,13 +334,6 @@ fn stepPtyOutput(
     return emitted_osc52;
 }
 
-fn stepRender(render_thread: *RenderThread, transport: *const TransportState, stdout_actor: *const StdoutThread, emitted_osc52: bool) void {
-    _ = render_thread;
-    _ = transport;
-    _ = stdout_actor;
-    _ = emitted_osc52;
-}
-
 fn stepStdoutLate(stdout_actor: *StdoutThread, shared_model: *SharedTerminalModel, pfds: []const c.struct_pollfd) !void {
     try stepStdoutCommitted(stdout_actor, shared_model, pfds);
 }
@@ -374,8 +377,7 @@ fn pumpUntilExit(session_host: *host.SessionHost, shared_model: *SharedTerminalM
         stepWake(&pfds);
         try stepStdoutCommitted(stdout_actor, shared_model, &pfds);
         try stepInput(&transport, session_host, terminal, &pfds);
-        const emitted_osc52 = try stepPtyOutput(&transport, session_host, shared_model, render_thread, forwarder, stdout_actor, &pfds);
-        stepRender(render_thread, &transport, stdout_actor, emitted_osc52);
+        _ = try stepPtyOutput(&transport, session_host, shared_model, render_thread, forwarder, stdout_actor, &pfds);
         try stepStdoutLate(stdout_actor, shared_model, &pfds);
 
         if (try refreshAndMaybeExit(session_host)) |status| return status;
@@ -393,7 +395,7 @@ const VptyRuntime = struct {
     shared_model: SharedTerminalModel,
     render_thread: RenderThread,
 
-    fn init(self: *VptyRuntime, allocator: std.mem.Allocator, io: anytype, child_argv: []const []const u8, viewport_override: ?Viewport) !void {
+    fn init(self: *VptyRuntime, allocator: std.mem.Allocator, io: anytype, child_argv: []const []const u8, viewport_override: Viewport) !void {
         var terminal = vpty_terminal.TerminalMode.init(c.STDIN_FILENO, c.STDOUT_FILENO);
         errdefer terminal.restore();
 
@@ -404,7 +406,7 @@ const VptyRuntime = struct {
         errdefer stdout_actor.deinit();
 
         const size = terminal.currentSize() catch vpty_terminal.Size{ .rows = 24, .cols = 80 };
-        const viewport = viewport_override orelse Viewport.init(0, 0, size.rows, size.cols);
+        const viewport = resolveViewport(viewport_override, size);
 
         var session_host = try host.SessionHost.init(allocator, .{
             .argv = child_argv,
@@ -575,11 +577,7 @@ pub fn main() !u8 {
     defer parsed.deinit(allocator);
 
     var runtime: VptyRuntime = undefined;
-    const viewport_override = if (parsed.viewport.rows == 0 or parsed.viewport.cols == 0)
-        null
-    else
-        parsed.viewport;
-    try runtime.init(allocator, .{}, parsed.child_argv.items, viewport_override);
+    try runtime.init(allocator, .{}, parsed.child_argv.items, parsed.viewport);
     defer runtime.deinit();
     return runtime.run();
 }
@@ -589,4 +587,16 @@ test "viewerSizeChanged detects same-size WINCH as repaint-only" {
     try std.testing.expect(viewerSizeChanged(.{ .rows = 24, .cols = 80 }, 25, 80));
     try std.testing.expect(viewerSizeChanged(.{ .rows = 24, .cols = 80 }, 24, 81));
     try std.testing.expect(viewerSizeChanged(null, 24, 80));
+}
+
+test "resolveViewport preserves origin while defaulting missing dimensions" {
+    const resolved = resolveViewport(
+        Viewport.init(10, 5, 0, 0),
+        .{ .rows = 24, .cols = 80 },
+    );
+
+    try std.testing.expectEqual(@as(u16, 10), resolved.origin_row);
+    try std.testing.expectEqual(@as(u16, 5), resolved.origin_col);
+    try std.testing.expectEqual(@as(u16, 24), resolved.rows);
+    try std.testing.expectEqual(@as(u16, 80), resolved.cols);
 }

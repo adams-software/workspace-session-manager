@@ -317,6 +317,14 @@ pub fn build(b: *std.Build) void {
     stdout_thread_mod.addImport("actor_mailboxes", actor_mailboxes_mod);
     stdout_thread_mod.addImport("wake_pipe", wake_pipe_mod);
 
+    const single_viewport_adapter_mod = b.addModule("single_viewport_adapter", .{
+        .root_source_file = b.path("vpty/src/single_viewport_adapter.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    single_viewport_adapter_mod.addImport("session_host_vpty", session_host_vpty_mod);
+
     const vpty_render_mod = b.addModule("vpty_render", .{
         .root_source_file = b.path("vpty/src/vpty_render.zig"),
         .target = target,
@@ -324,6 +332,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     vpty_render_mod.addImport("session_host_vpty", session_host_vpty_mod);
+    vpty_render_mod.addImport("single_viewport_adapter", single_viewport_adapter_mod);
     vpty_render_mod.addImport("stdout_thread", stdout_thread_mod);
     vpty_render_mod.addImport("terminal_model", terminal_model_mod);
     vpty_render_mod.addImport("actor_mailboxes", actor_mailboxes_mod);
