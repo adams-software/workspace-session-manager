@@ -163,6 +163,7 @@ pub const SingleViewportAdapter = struct {
 
     pub fn emitPatch(self: *SingleViewportAdapter, patch: *const ViewportPatch, snapshot: *const host.HostScreenSnapshot) void {
         self.writeBytes("\x1b[?25l");
+        self.writeBytes("\x1b[0m");
 
         var style_state = StyleState{};
         style_state.reset(self);
@@ -197,6 +198,7 @@ pub const SingleViewportAdapter = struct {
         }
 
         emitHyperlinkTransition(self, snapshot, 0, &style_state.active_hyperlink);
+        style_state.reset(self);
         self.emitRealCursor(patch.cursor);
     }
 };
@@ -396,4 +398,55 @@ test "emitPatch advances source cells independently from display width" {
     adapter.emitPatch(&patch, &snapshot);
 
     try std.testing.expect(std.mem.indexOf(u8, render_buf.items, "A") != null);
+}
+
+test "emitPatch closes active hyperlink and resets style before final cursor" {
+    var render_buf = std.ArrayList(u8){};
+    defer render_buf.deinit(std.testing.allocator);
+
+    var adapter = SingleViewportAdapter{
+        .viewport = Viewport.init(0, 0, 1, 4),
+        .render_buf = &render_buf,
+    };
+    var patch = ViewportPatch.init(false, std.testing.allocator);
+    defer patch.deinit(std.testing.allocator);
+    patch.cursor = .{ .visible = true, .row = 0, .col = 1 };
+
+    var row = RowPatch.init(0);
+    defer row.deinit(std.testing.allocator);
+
+    const linked = host.HostScreenCell{
+        .chars = [_]u32{ 'X', 0, 0, 0, 0, 0 },
+        .chars_len = 1,
+        .width = 1,
+        .attrs = .{ .bold = true },
+        .fg = .{ .kind = .default },
+        .bg = .{ .kind = .default },
+        .hyperlink = 1,
+    };
+    const cells = [_]host.HostScreenCell{ linked };
+
+    try row.runs.append(std.testing.allocator, TextRun.init(0, 1, cells[0..]));
+    try patch.rows.append(std.testing.allocator, row);
+    _ = patch.rows.pop();
+
+    const hyperlink = [_]host.HostHyperlink{.{ .id = 1, .params = "id=1", .uri = "https://example.com" }};
+    const snapshot = host.HostScreenSnapshot{
+        .rows = 1,
+        .cols = 4,
+        .cursor_row = 0,
+        .cursor_col = 1,
+        .cursor_visible = true,
+        .alt_screen = false,
+        .seq = 0,
+        .hyperlinks = hyperlink[0..],
+        .lines = &.{},
+    };
+
+    adapter.emitPatch(&patch, &snapshot);
+
+    try std.testing.expect(std.mem.indexOf(u8, render_buf.items, "\x1b]8;id=1;https://example.com\x1b\\") != null);
+    try std.testing.expect(std.mem.indexOf(u8, render_buf.items, "\x1b]8;;\x1b\\") != null);
+    try std.testing.expect(std.mem.count(u8, render_buf.items, "\x1b[0m") >= 2);
+    try std.testing.expect(std.mem.endsWith(u8, render_buf.items, "\x1b[?25h\x1b[1;2H"));
 }

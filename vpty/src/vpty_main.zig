@@ -727,3 +727,17 @@ test "parseArgs defaults to fullscreen mode when no viewport flags are provided"
     try std.testing.expect(!parsed.viewport_intent.rows_explicit);
     try std.testing.expect(!parsed.viewport_intent.cols_explicit);
 }
+
+test "parseArgs treats origin-only viewport flags as bounded mode" {
+    const argv = [_][]const u8{ "vpty", "--origin-row", "5", "--origin-col", "10", "--", "bash" };
+    var parsed = try parseArgs(std.testing.allocator, argv[0..]);
+    defer parsed.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(RunMode.bounded, parsed.mode);
+    try std.testing.expectEqual(@as(u16, 5), parsed.viewport.origin_row);
+    try std.testing.expectEqual(@as(u16, 10), parsed.viewport.origin_col);
+    try std.testing.expectEqual(@as(u16, 0), parsed.viewport.rows);
+    try std.testing.expectEqual(@as(u16, 0), parsed.viewport.cols);
+    try std.testing.expect(!parsed.viewport_intent.rows_explicit);
+    try std.testing.expect(!parsed.viewport_intent.cols_explicit);
+}

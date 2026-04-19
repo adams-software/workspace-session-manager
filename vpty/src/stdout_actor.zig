@@ -205,3 +205,32 @@ pub const StdoutBuffer = struct {
     }
 };
 
+test "replaces unstarted render candidate atomically with newer render" {
+    var buffer = StdoutBuffer.init(std.testing.allocator);
+    defer buffer.deinit();
+
+    buffer.publishOwnedRenderCandidate(1, try std.testing.allocator.dupe(u8, "old"));
+    buffer.publishOwnedRenderCandidate(2, try std.testing.allocator.dupe(u8, "new"));
+
+    try std.testing.expect(buffer.pending_render != null);
+    try std.testing.expectEqual(@as(u64, 2), buffer.pending_render.?.publish.version);
+    try std.testing.expectEqualStrings("new", buffer.pending_render.?.storage.items);
+    try std.testing.expect(buffer.deferred_render == null);
+}
+
+test "started render candidate defers newer render until current batch completes" {
+    var buffer = StdoutBuffer.init(std.testing.allocator);
+    defer buffer.deinit();
+
+    buffer.publishOwnedRenderCandidate(1, try std.testing.allocator.dupe(u8, "first"));
+    buffer.pending_render.?.offset = 2;
+    buffer.publishOwnedRenderCandidate(2, try std.testing.allocator.dupe(u8, "second"));
+
+    try std.testing.expect(buffer.pending_render != null);
+    try std.testing.expectEqual(@as(u64, 1), buffer.pending_render.?.publish.version);
+    try std.testing.expectEqual(@as(usize, 2), buffer.pending_render.?.offset);
+    try std.testing.expect(buffer.deferred_render != null);
+    try std.testing.expectEqual(@as(u64, 2), buffer.deferred_render.?.publish.version);
+    try std.testing.expectEqualStrings("second", buffer.deferred_render.?.storage.items);
+}
+
