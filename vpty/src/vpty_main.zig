@@ -39,8 +39,14 @@ var terminate_requested: bool = false;
 var terminate_signal: c_int = 0;
 var wake_pipe: WakePipe = .{};
 
+const ViewportIntent = struct {
+    rows_explicit: bool = false,
+    cols_explicit: bool = false,
+};
+
 const ParsedArgs = struct {
     viewport: Viewport,
+    viewport_intent: ViewportIntent,
     child_argv: std.ArrayList([]const u8),
 
     fn deinit(self: *ParsedArgs, allocator: std.mem.Allocator) void {
@@ -221,11 +227,23 @@ fn handleSigwinch(_: c_int) callconv(.c) void {
 }
 
 fn resolveViewport(partial: Viewport, size: vpty_terminal.Size) Viewport {
+    const available_rows = if (partial.origin_row >= size.rows) @as(u16, 0) else size.rows - partial.origin_row;
+    const available_cols = if (partial.origin_col >= size.cols) @as(u16, 0) else size.cols - partial.origin_col;
+
+    const rows = if (partial.rows == 0)
+        available_rows
+    else
+        @min(partial.rows, available_rows);
+    const cols = if (partial.cols == 0)
+        available_cols
+    else
+        @min(partial.cols, available_cols);
+
     return Viewport.init(
         partial.origin_row,
         partial.origin_col,
-        if (partial.rows == 0) size.rows else partial.rows,
-        if (partial.cols == 0) size.cols else partial.cols,
+        rows,
+        cols,
     );
 }
 
@@ -235,13 +253,14 @@ fn handleResizeIfNeeded(
     render_thread: *RenderThread,
     terminal: *vpty_terminal.TerminalMode,
     viewport: Viewport,
+    viewport_intent: ViewportIntent,
 ) void {
     if (!winch_changed) return;
     winch_changed = false;
     const size = terminal.currentSize() catch vpty_terminal.Size{ .rows = 24, .cols = 80 };
     const resolved = resolveViewport(viewport, size);
-    const target_rows = resolved.rows;
-    const target_cols = resolved.cols;
+    const target_rows = if (viewport_intent.rows_explicit) viewport.rows else resolved.rows;
+    const target_cols = if (viewport_intent.cols_explicit) viewport.cols else resolved.cols;
 
     shared_model.lock();
     const changed = viewerSizeChanged(shared_model.model.currentSize(), target_rows, target_cols);
@@ -284,8 +303,9 @@ fn stepLifecycle(
     render_thread: *RenderThread,
     terminal: *vpty_terminal.TerminalMode,
     viewport: Viewport,
+    viewport_intent: ViewportIntent,
 ) !?host.ExitStatus {
-    handleResizeIfNeeded(session_host, shared_model, render_thread, terminal, viewport);
+    handleResizeIfNeeded(session_host, shared_model, render_thread, terminal, viewport, viewport_intent);
     return try handleTerminationIfNeeded(session_host);
 }
 
@@ -351,14 +371,14 @@ fn refreshAndMaybeExit(session_host: *host.SessionHost) !?host.ExitStatus {
     return null;
 }
 
-fn pumpUntilExit(session_host: *host.SessionHost, shared_model: *SharedTerminalModel, render_thread: *RenderThread, terminal: *vpty_terminal.TerminalMode, viewport: Viewport, forwarder: *side_effects.SideEffectForwarder, stdout_actor: *StdoutThread) !host.ExitStatus {
+fn pumpUntilExit(session_host: *host.SessionHost, shared_model: *SharedTerminalModel, render_thread: *RenderThread, terminal: *vpty_terminal.TerminalMode, viewport: Viewport, viewport_intent: ViewportIntent, forwarder: *side_effects.SideEffectForwarder, stdout_actor: *StdoutThread) !host.ExitStatus {
     var transport = TransportState{};
     defer transport.deinit(std.heap.page_allocator);
 
     try transport.configureNonBlocking(session_host, terminal.stdin_fd, terminal.stdout_fd);
 
     while (true) {
-        if (try stepLifecycle(session_host, shared_model, render_thread, terminal, viewport)) |status| return status;
+        if (try stepLifecycle(session_host, shared_model, render_thread, terminal, viewport, viewport_intent)) |status| return status;
 
         var pfds = [4]c.struct_pollfd{
             .{ .fd = if (transport.stdin_open) terminal.stdin_fd else -1, .events = if (transport.stdin_open) c.POLLIN else 0, .revents = 0 },
@@ -388,6 +408,7 @@ const VptyRuntime = struct {
     allocator: std.mem.Allocator,
     child_argv: []const []const u8,
     viewport: Viewport,
+    viewport_intent: ViewportIntent,
     terminal: vpty_terminal.TerminalMode,
     forwarder: side_effects.SideEffectForwarder,
     stdout_actor: StdoutThread,
@@ -395,7 +416,7 @@ const VptyRuntime = struct {
     shared_model: SharedTerminalModel,
     render_thread: RenderThread,
 
-    fn init(self: *VptyRuntime, allocator: std.mem.Allocator, io: anytype, child_argv: []const []const u8, viewport_override: Viewport) !void {
+    fn init(self: *VptyRuntime, allocator: std.mem.Allocator, io: anytype, child_argv: []const []const u8, viewport_override: Viewport, viewport_intent: ViewportIntent) !void {
         var terminal = vpty_terminal.TerminalMode.init(c.STDIN_FILENO, c.STDOUT_FILENO);
         errdefer terminal.restore();
 
@@ -422,6 +443,7 @@ const VptyRuntime = struct {
             .allocator = allocator,
             .child_argv = child_argv,
             .viewport = viewport,
+            .viewport_intent = viewport_intent,
             .terminal = terminal,
             .forwarder = forwarder,
             .stdout_actor = stdout_actor,
@@ -484,7 +506,7 @@ const VptyRuntime = struct {
         const signal_handlers = try installSignalHandlers();
         defer signal_handlers.restore();
 
-        const status = try pumpUntilExit(&self.session_host, &self.shared_model, &self.render_thread, &self.terminal, self.viewport, &self.forwarder, &self.stdout_actor);
+        const status = try pumpUntilExit(&self.session_host, &self.shared_model, &self.render_thread, &self.terminal, self.viewport, self.viewport_intent, &self.forwarder, &self.stdout_actor);
         self.render_thread.shutdownActor();
         self.render_thread.stop();
         self.stdout_actor.stop();
@@ -561,6 +583,10 @@ fn parseArgs(allocator: std.mem.Allocator, argv: []const []const u8) !ParsedArgs
 
     return .{
         .viewport = Viewport.init(origin_row orelse 0, origin_col orelse 0, rows orelse 0, cols orelse 0),
+        .viewport_intent = .{
+            .rows_explicit = rows != null,
+            .cols_explicit = cols != null,
+        },
         .child_argv = result,
     };
 }
@@ -577,7 +603,7 @@ pub fn main() !u8 {
     defer parsed.deinit(allocator);
 
     var runtime: VptyRuntime = undefined;
-    try runtime.init(allocator, .{}, parsed.child_argv.items, parsed.viewport);
+    try runtime.init(allocator, .{}, parsed.child_argv.items, parsed.viewport, parsed.viewport_intent);
     defer runtime.deinit();
     return runtime.run();
 }
@@ -589,7 +615,7 @@ test "viewerSizeChanged detects same-size WINCH as repaint-only" {
     try std.testing.expect(viewerSizeChanged(null, 24, 80));
 }
 
-test "resolveViewport preserves origin while defaulting missing dimensions" {
+test "resolveViewport preserves origin while defaulting missing dimensions to remaining space" {
     const resolved = resolveViewport(
         Viewport.init(10, 5, 0, 0),
         .{ .rows = 24, .cols = 80 },
@@ -597,6 +623,30 @@ test "resolveViewport preserves origin while defaulting missing dimensions" {
 
     try std.testing.expectEqual(@as(u16, 10), resolved.origin_row);
     try std.testing.expectEqual(@as(u16, 5), resolved.origin_col);
-    try std.testing.expectEqual(@as(u16, 24), resolved.rows);
-    try std.testing.expectEqual(@as(u16, 80), resolved.cols);
+    try std.testing.expectEqual(@as(u16, 14), resolved.rows);
+    try std.testing.expectEqual(@as(u16, 75), resolved.cols);
+}
+
+test "resolveViewport clips explicit dimensions to remaining physical bounds" {
+    const resolved = resolveViewport(
+        Viewport.init(20, 70, 10, 20),
+        .{ .rows = 24, .cols = 80 },
+    );
+
+    try std.testing.expectEqual(@as(u16, 20), resolved.origin_row);
+    try std.testing.expectEqual(@as(u16, 70), resolved.origin_col);
+    try std.testing.expectEqual(@as(u16, 4), resolved.rows);
+    try std.testing.expectEqual(@as(u16, 10), resolved.cols);
+}
+
+test "parseArgs marks explicit rows and cols intent" {
+    const argv = [_][]const u8{ "vpty", "--origin-row", "5", "--rows", "10", "--cols", "40", "--", "bash" };
+    var parsed = try parseArgs(std.testing.allocator, argv[0..]);
+    defer parsed.deinit(std.testing.allocator);
+
+    try std.testing.expect(parsed.viewport_intent.rows_explicit);
+    try std.testing.expect(parsed.viewport_intent.cols_explicit);
+    try std.testing.expectEqual(@as(u16, 5), parsed.viewport.origin_row);
+    try std.testing.expectEqual(@as(u16, 10), parsed.viewport.rows);
+    try std.testing.expectEqual(@as(u16, 40), parsed.viewport.cols);
 }

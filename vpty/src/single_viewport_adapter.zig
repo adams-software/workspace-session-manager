@@ -186,7 +186,7 @@ pub const SingleViewportAdapter = struct {
                     emitHyperlinkTransition(self, snapshot, cell.hyperlink, &style_state.active_hyperlink);
                     emitCell(self, cell, &style_state);
                     written_cols += cell_width;
-                    src_col += cell_width;
+                    src_col += 1;
                 }
             }
 
@@ -341,4 +341,59 @@ test "emitPatch preserves hidden final cursor state" {
     try std.testing.expect(std.mem.indexOf(u8, render_buf.items, "\x1b[?25l") != null);
     try std.testing.expect(std.mem.indexOf(u8, render_buf.items, "\x1b[?25h") == null);
     try std.testing.expect(!std.mem.endsWith(u8, render_buf.items, "H"));
+}
+
+test "emitPatch advances source cells independently from display width" {
+    var render_buf = std.ArrayList(u8){};
+    defer render_buf.deinit(std.testing.allocator);
+
+    var adapter = SingleViewportAdapter{
+        .viewport = Viewport.init(0, 0, 1, 4),
+        .render_buf = &render_buf,
+    };
+    var patch = ViewportPatch.init(false, std.testing.allocator);
+    defer patch.deinit(std.testing.allocator);
+
+    var row = RowPatch.init(0);
+    defer row.deinit(std.testing.allocator);
+
+    const wide = host.HostScreenCell{
+        .chars = [_]u32{ 0x4E2D, 0, 0, 0, 0, 0 },
+        .chars_len = 1,
+        .width = 2,
+        .attrs = .{},
+        .fg = .{ .kind = .default },
+        .bg = .{ .kind = .default },
+        .hyperlink = 0,
+    };
+    const narrow = host.HostScreenCell{
+        .chars = [_]u32{ 'A', 0, 0, 0, 0, 0 },
+        .chars_len = 1,
+        .width = 1,
+        .attrs = .{},
+        .fg = .{ .kind = .default },
+        .bg = .{ .kind = .default },
+        .hyperlink = 0,
+    };
+    const cells = [_]host.HostScreenCell{ wide, narrow };
+
+    try row.runs.append(std.testing.allocator, TextRun.init(0, 4, cells[0..]));
+    try patch.rows.append(std.testing.allocator, row);
+    _ = patch.rows.pop();
+
+    const snapshot = host.HostScreenSnapshot{
+        .rows = 1,
+        .cols = 4,
+        .cursor_row = 0,
+        .cursor_col = 0,
+        .cursor_visible = true,
+        .alt_screen = false,
+        .seq = 0,
+        .hyperlinks = &.{},
+        .lines = &.{},
+    };
+
+    adapter.emitPatch(&patch, &snapshot);
+
+    try std.testing.expect(std.mem.indexOf(u8, render_buf.items, "A") != null);
 }
