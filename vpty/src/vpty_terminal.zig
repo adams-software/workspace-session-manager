@@ -20,6 +20,7 @@ pub const TerminalMode = struct {
     stdout_fd: c_int,
     interactive: bool,
     raw_enabled: bool = false,
+    alt_screen_enabled: bool = false,
     saved_termios: c.struct_termios = undefined,
 
     pub fn init(stdin_fd: c_int, stdout_fd: c_int) TerminalMode {
@@ -40,7 +41,22 @@ pub const TerminalMode = struct {
         self.raw_enabled = true;
     }
 
+    pub fn enterAltScreen(self: *TerminalMode) Error!void {
+        if (!self.interactive or self.alt_screen_enabled) return;
+        const bytes = "\x1b[?1049h";
+        if (c.write(self.stdout_fd, bytes.ptr, bytes.len) < 0) return Error.IoError;
+        self.alt_screen_enabled = true;
+    }
+
+    pub fn leaveAltScreen(self: *TerminalMode) void {
+        if (!self.interactive or !self.alt_screen_enabled) return;
+        const bytes = "\x1b[?1049l";
+        _ = c.write(self.stdout_fd, bytes.ptr, bytes.len);
+        self.alt_screen_enabled = false;
+    }
+
     pub fn restore(self: *TerminalMode) void {
+        self.leaveAltScreen();
         if (!self.interactive or !self.raw_enabled) return;
         _ = c.tcsetattr(self.stdin_fd, c.TCSANOW, &self.saved_termios);
         self.raw_enabled = false;

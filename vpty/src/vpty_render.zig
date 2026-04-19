@@ -154,6 +154,11 @@ pub const Renderer = struct {
         self.replacePendingSnapshot(owned_product.snapshot);
     }
 
+    pub fn setViewport(self: *Renderer, viewport: Viewport) void {
+        self.viewport = viewport;
+        self.reset();
+    }
+
     pub fn reset(self: *Renderer) void {
         self.render_buf.clearRetainingCapacity();
         self.surface_state = .{};

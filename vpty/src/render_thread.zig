@@ -31,6 +31,7 @@ pub const SharedTerminalModel = struct {
 pub const RenderThread = struct {
     const PendingBatch = struct {
         latest_model_changed: ?actor_mailboxes.ModelChanged = null,
+        viewport_update: ?Viewport = null,
         reset_requested: bool = false,
         shutdown_requested: bool = false,
     };
@@ -85,6 +86,13 @@ pub const RenderThread = struct {
         self.wake();
     }
 
+    pub fn setViewport(self: *RenderThread, viewport: Viewport) void {
+        self.pending.mutex.lock();
+        self.pending.batch.viewport_update = viewport;
+        self.pending.mutex.unlock();
+        self.wake();
+    }
+
     pub fn reset(self: *RenderThread) void {
         self.pending.mutex.lock();
         self.pending.batch.reset_requested = true;
@@ -125,6 +133,9 @@ pub const RenderThread = struct {
     fn applyPendingRequests(self: *RenderThread) void {
         const pending = self.takePendingRequests();
 
+        if (pending.viewport_update) |viewport| {
+            self.renderer.setViewport(viewport);
+        }
         if (pending.reset_requested) {
             self.renderer.reset();
         }

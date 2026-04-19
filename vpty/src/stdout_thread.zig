@@ -65,6 +65,32 @@ pub const StdoutThread = struct {
         self.wake_pipe.deinit();
     }
 
+    pub fn stopDiscardPending(self: *StdoutThread) void {
+        self.render_mutex.lock();
+        if (self.pending_render_publish) |publish| {
+            _ = self.shared.pending_bytes.fetchSub(publish.bytes.len, .seq_cst);
+            self.allocator.free(publish.bytes);
+            self.pending_render_publish = null;
+        }
+        self.render_mutex.unlock();
+
+        const before = self.buffer.pendingBytes();
+        self.buffer.invalidatePendingRenders();
+        const after = self.buffer.pendingBytes();
+        if (before > after) {
+            _ = self.shared.pending_bytes.fetchSub(before - after, .seq_cst);
+        }
+        _ = self.shared.latest_commit_notice.swap(0, .seq_cst);
+
+        self.shutdown_requested.store(true, .seq_cst);
+        self.wake();
+        if (self.thread) |thread| {
+            thread.join();
+            self.thread = null;
+        }
+        self.wake_pipe.deinit();
+    }
+
     pub fn enqueueControl(self: *StdoutThread, chunk: actor_mailboxes.ControlChunk) !void {
         const owned = try self.allocator.dupe(u8, chunk.bytes);
         errdefer self.allocator.free(owned);
@@ -84,6 +110,26 @@ pub const StdoutThread = struct {
         }
         self.pending_render_publish = .{ .version = publish.version, .bytes = owned };
         _ = self.shared.pending_bytes.fetchAdd(owned.len, .seq_cst);
+        self.wake();
+    }
+
+    pub fn invalidatePendingRenders(self: *StdoutThread) void {
+        self.render_mutex.lock();
+        defer self.render_mutex.unlock();
+
+        if (self.pending_render_publish) |publish| {
+            _ = self.shared.pending_bytes.fetchSub(publish.bytes.len, .seq_cst);
+            self.allocator.free(publish.bytes);
+            self.pending_render_publish = null;
+        }
+
+        const before = self.buffer.pendingBytes();
+        self.buffer.invalidatePendingRenders();
+        const after = self.buffer.pendingBytes();
+        if (before > after) {
+            _ = self.shared.pending_bytes.fetchSub(before - after, .seq_cst);
+        }
+        _ = self.shared.latest_commit_notice.swap(0, .seq_cst);
         self.wake();
     }
 

@@ -278,7 +278,15 @@ pub const PtyChildHost = struct {
                 const pid = self.pid orelse return Error.InvalidState;
                 var wait_status: c_int = 0;
                 const got = c.waitpid(pid, &wait_status, c.WNOHANG);
-                if (got < 0) return Error.IoError;
+                if (got < 0) {
+                    const e = std.posix.errno(-1);
+                    if (e == .CHILD) {
+                        self.exit_status = self.exit_status orelse ExitStatus{};
+                        self.state = .exited;
+                        return;
+                    }
+                    return Error.IoError;
+                }
                 if (got == 0) return;
 
                 var out = ExitStatus{};

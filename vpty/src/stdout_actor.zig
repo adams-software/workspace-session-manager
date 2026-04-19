@@ -108,6 +108,17 @@ pub const StdoutBuffer = struct {
         return control_pending + render_pending + deferred_pending;
     }
 
+    pub fn invalidatePendingRenders(self: *StdoutBuffer) void {
+        if (self.pending_render) |*candidate| {
+            candidate.storage.deinit(self.allocator);
+            self.pending_render = null;
+        }
+        if (self.deferred_render) |*candidate| {
+            candidate.storage.deinit(self.allocator);
+            self.deferred_render = null;
+        }
+    }
+
     pub fn flushSome(self: *StdoutBuffer, max_bytes: usize) Error!FlushStatus {
         var total_written: usize = 0;
 
