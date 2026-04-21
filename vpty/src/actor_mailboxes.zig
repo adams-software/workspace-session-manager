@@ -73,9 +73,16 @@ pub const ControlChunk = struct {
     bytes: []u8,
 };
 
+pub const FinalCursor = struct {
+    visible: bool,
+    row: u16,
+    col: u16,
+};
+
 pub const RenderPublish = struct {
     version: u64,
     bytes: []u8,
+    final_cursor: FinalCursor,
 };
 
 pub const ModelChanged = struct {
