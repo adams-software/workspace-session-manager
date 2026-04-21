@@ -169,6 +169,7 @@ pub const SingleViewportAdapter = struct {
         style_state.reset(self);
 
         for (patch.rows.items) |row_patch| {
+            style_state.reset(self);
             var written_cols: usize = 0;
             for (row_patch.runs.items) |run| {
                 self.moveCursor(row_patch.row, run.start_col);
@@ -312,6 +313,69 @@ test "emitPatch applies visible final cursor state" {
     try std.testing.expect(std.mem.indexOf(u8, render_buf.items, "\x1b[?25l") != null);
     try std.testing.expect(std.mem.indexOf(u8, render_buf.items, "\x1b[?25h") != null);
     try std.testing.expect(std.mem.endsWith(u8, render_buf.items, "\x1b[4;6H"));
+}
+
+test "emitPatch resets style at the start of each patched row" {
+    var render_buf = std.ArrayList(u8){};
+    defer render_buf.deinit(std.testing.allocator);
+
+    var adapter = SingleViewportAdapter{
+        .viewport = Viewport.init(0, 0, 4, 4),
+        .render_buf = &render_buf,
+    };
+    var patch = ViewportPatch.init(false, std.testing.allocator);
+    defer patch.deinit(std.testing.allocator);
+
+    var row0 = RowPatch.init(0);
+    var row1 = RowPatch.init(1);
+
+    const highlighted = [_]host.HostScreenCell{.{
+        .chars = [_]u32{ 'a', 0, 0, 0, 0, 0 },
+        .chars_len = 1,
+        .width = 1,
+        .attrs = .{ .reverse = true },
+        .fg = .{ .kind = .default },
+        .bg = .{ .kind = .default },
+        .hyperlink = 0,
+    }};
+    const plain = [_]host.HostScreenCell{.{
+        .chars = [_]u32{ 'b', 0, 0, 0, 0, 0 },
+        .chars_len = 1,
+        .width = 1,
+        .attrs = .{},
+        .fg = .{ .kind = .default },
+        .bg = .{ .kind = .default },
+        .hyperlink = 0,
+    }};
+
+    try row0.runs.append(std.testing.allocator, TextRun.init(0, 1, highlighted[0..]));
+    try row1.runs.append(std.testing.allocator, TextRun.init(0, 1, plain[0..]));
+    try patch.rows.append(std.testing.allocator, row0);
+    patch.rows.items[0].runs = .{};
+    try patch.rows.append(std.testing.allocator, row1);
+    patch.rows.items[1].runs = .{};
+
+    const lines = [_]host.HostScreenLine{
+        .{ .cells = highlighted[0..], .eol = true },
+        .{ .cells = plain[0..], .eol = true },
+    };
+    const snapshot = host.HostScreenSnapshot{
+        .rows = 2,
+        .cols = 4,
+        .cursor_row = 0,
+        .cursor_col = 0,
+        .cursor_visible = true,
+        .alt_screen = false,
+        .seq = 0,
+        .hyperlinks = &.{},
+        .lines = lines[0..],
+    };
+
+    adapter.emitPatch(&patch, &snapshot);
+
+    const second_row_cursor = std.mem.indexOf(u8, render_buf.items, "\x1b[2;1H") orelse return error.TestUnexpectedResult;
+    const after_second_row = render_buf.items[second_row_cursor..];
+    try std.testing.expect(std.mem.startsWith(u8, after_second_row, "\x1b[2;1H\x1b[0m"));
 }
 
 test "emitPatch preserves hidden final cursor state" {

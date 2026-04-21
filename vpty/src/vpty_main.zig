@@ -570,10 +570,12 @@ const VptyRuntime = struct {
         self.render_thread.stop();
         if (self.mode == .fullscreen) {
             self.stdout_actor.stopDiscardPending();
+            self.terminal.restore();
         } else {
             self.stdout_actor.stop();
+            self.terminal.restore();
         }
-        self.terminal.restore();
+        pending_resize = null;
         _ = self.session_host.close() catch {};
         return childExitCode(status);
     }
