@@ -13,7 +13,6 @@ const OwnedControlChunk = struct {
 const OwnedRenderPublish = struct {
     version: u64,
     bytes: []u8,
-    final_cursor: actor_mailboxes.FinalCursor,
 };
 
 const SharedState = struct {
@@ -109,7 +108,7 @@ pub const StdoutThread = struct {
             _ = self.shared.pending_bytes.fetchSub(previous.bytes.len, .seq_cst);
             self.allocator.free(previous.bytes);
         }
-        self.pending_render_publish = .{ .version = publish.version, .bytes = owned, .final_cursor = publish.final_cursor };
+        self.pending_render_publish = .{ .version = publish.version, .bytes = owned };
         _ = self.shared.pending_bytes.fetchAdd(owned.len, .seq_cst);
         self.wake();
     }
@@ -206,7 +205,7 @@ pub const StdoutThread = struct {
 
         if (publish) |owned| {
             const before = self.buffer.pendingBytes();
-            self.buffer.publishOwnedRenderCandidate(owned.version, owned.bytes, owned.final_cursor);
+            self.buffer.publishOwnedRenderCandidate(owned.version, owned.bytes);
             const after = self.buffer.pendingBytes();
             if (before > after) {
                 _ = self.shared.pending_bytes.fetchSub(before - after, .seq_cst);

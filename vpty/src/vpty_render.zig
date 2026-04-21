@@ -146,11 +146,6 @@ pub const Renderer = struct {
         self.stdout_thread.publishRenderCandidate(actor_mailboxes.RenderPublish{
             .version = self.last_generated_version,
             .bytes = self.render_buf.items,
-            .final_cursor = .{
-                .visible = owned_product.patch.cursor.visible,
-                .row = owned_product.patch.cursor.row,
-                .col = owned_product.patch.cursor.col,
-            },
         }) catch return;
 
         owned_product.patch.deinit(std.heap.page_allocator);

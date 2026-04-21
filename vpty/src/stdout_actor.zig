@@ -64,15 +64,15 @@ pub const StdoutBuffer = struct {
         errdefer buf.deinit(self.allocator);
         try buf.appendSlice(self.allocator, publish.bytes);
         self.installRenderCandidate(.{
-            .publish = .{ .version = publish.version, .bytes = buf.items, .final_cursor = publish.final_cursor },
+            .publish = .{ .version = publish.version, .bytes = buf.items },
             .storage = buf,
             .offset = 0,
         });
     }
 
-    pub fn publishOwnedRenderCandidate(self: *StdoutBuffer, version: u64, bytes: []u8, final_cursor: actor_mailboxes.FinalCursor) void {
+    pub fn publishOwnedRenderCandidate(self: *StdoutBuffer, version: u64, bytes: []u8) void {
         self.installRenderCandidate(.{
-            .publish = .{ .version = version, .bytes = bytes, .final_cursor = final_cursor },
+            .publish = .{ .version = version, .bytes = bytes },
             .storage = std.ArrayList(u8).fromOwnedSlice(bytes),
             .offset = 0,
         });
@@ -209,8 +209,8 @@ test "replaces unstarted render candidate atomically with newer render" {
     var buffer = StdoutBuffer.init(std.testing.allocator);
     defer buffer.deinit();
 
-    buffer.publishOwnedRenderCandidate(1, try std.testing.allocator.dupe(u8, "old"), .{ .visible = true, .row = 0, .col = 0 });
-    buffer.publishOwnedRenderCandidate(2, try std.testing.allocator.dupe(u8, "new"), .{ .visible = true, .row = 0, .col = 0 });
+    buffer.publishOwnedRenderCandidate(1, try std.testing.allocator.dupe(u8, "old"));
+    buffer.publishOwnedRenderCandidate(2, try std.testing.allocator.dupe(u8, "new"));
 
     try std.testing.expect(buffer.pending_render != null);
     try std.testing.expectEqual(@as(u64, 2), buffer.pending_render.?.publish.version);
@@ -222,9 +222,9 @@ test "started render candidate defers newer render until current batch completes
     var buffer = StdoutBuffer.init(std.testing.allocator);
     defer buffer.deinit();
 
-    buffer.publishOwnedRenderCandidate(1, try std.testing.allocator.dupe(u8, "first"), .{ .visible = true, .row = 0, .col = 0 });
+    buffer.publishOwnedRenderCandidate(1, try std.testing.allocator.dupe(u8, "first"));
     buffer.pending_render.?.offset = 2;
-    buffer.publishOwnedRenderCandidate(2, try std.testing.allocator.dupe(u8, "second"), .{ .visible = true, .row = 0, .col = 0 });
+    buffer.publishOwnedRenderCandidate(2, try std.testing.allocator.dupe(u8, "second"));
 
     try std.testing.expect(buffer.pending_render != null);
     try std.testing.expectEqual(@as(u64, 1), buffer.pending_render.?.publish.version);
