@@ -1,12 +1,7 @@
 const std = @import("std");
 const host = @import("host");
-const core = @import("session_core");
-const wire = @import("session_wire");
-const client = @import("client");
-
-const ByteQueue = @import("byte_queue").ByteQueue;
 const fd_stream = @import("fd_stream");
-const streaming = @import("session_stream_transport");
+const ByteQueue = @import("byte_queue").ByteQueue;
 
 const c = @cImport({
     @cInclude("sys/socket.h");
@@ -24,17 +19,12 @@ pub const Error = error{
     PathTooLong,
     AlreadyExists,
     PermissionDenied,
-    Unsupported,
-} || host.Error || fd_stream.Error || streaming.Error;
+} || host.Error || fd_stream.Error;
 
 pub const ServerState = enum {
     created,
     listening,
     stopped,
-};
-
-pub const Connection = struct {
-    fd: c_int,
 };
 
 pub const SessionServer = struct {
@@ -43,12 +33,11 @@ pub const SessionServer = struct {
     state: ServerState = .created,
     listener_fd: ?c_int = null,
     socket_path: ?[]u8 = null,
-    core_state: core.Core = .{},
-
-    owner_transport: ?streaming.FramedTransport = null,
-    pty_input_tx: ByteQueue = ByteQueue.init(),
+    owner_fd: ?c_int = null,
+    owner_rx: ByteQueue = ByteQueue.init(),
+    owner_tx: ByteQueue = ByteQueue.init(),
+    pty_tx: ByteQueue = ByteQueue.init(),
     pty_nonblocking_configured: bool = false,
-    owner_detach_after_flush: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, session_host: *host.PtyChildHost) SessionServer {
         return .{
@@ -58,10 +47,10 @@ pub const SessionServer = struct {
     }
 
     pub fn deinit(self: *SessionServer) void {
-        self.dropOwner(false);
-        self.clearOwnerTransport();
-        self.pty_input_tx.deinit(self.allocator);
-        self.core_state.deinit(self.allocator);
+        self.dropOwner();
+        self.owner_rx.deinit(self.allocator);
+        self.owner_tx.deinit(self.allocator);
+        self.pty_tx.deinit(self.allocator);
 
         if (self.listener_fd) |fd| {
             _ = c.close(fd);
@@ -77,21 +66,6 @@ pub const SessionServer = struct {
 
     pub fn getState(self: *const SessionServer) ServerState {
         return self.state;
-    }
-
-    pub fn hasOwner(self: *const SessionServer) bool {
-        return self.core_state.hasOwner();
-    }
-
-    pub fn ownerFd(self: *const SessionServer) ?c_int {
-        return self.core_state.ownerFd();
-    }
-
-    pub fn ownerIsReady(self: *const SessionServer) bool {
-        return switch (self.core_state.owner) {
-            .attached_ready => true,
-            else => false,
-        };
     }
 
     pub fn listen(self: *SessionServer, socket_path: []const u8) Error!void {
@@ -110,73 +84,27 @@ pub const SessionServer = struct {
         switch (self.state) {
             .created => return Error.InvalidState,
             .listening => {
-                self.dropOwner(false);
-
+                self.dropOwner();
                 if (self.listener_fd) |fd| {
                     _ = c.close(fd);
                     self.listener_fd = null;
                 }
-
-                if (self.socket_path) |path| {
-                    unlinkBestEffort(path);
-                }
-
+                if (self.socket_path) |path| unlinkBestEffort(path);
                 self.state = .stopped;
             },
             .stopped => {},
         }
     }
 
-    pub fn serveControlOnce(self: *SessionServer, timeout_ms: i32) Error!bool {
-        if (self.state != .listening) return Error.InvalidState;
-        const listener_fd = self.listener_fd orelse return Error.InvalidState;
-
-        var pfd = c.struct_pollfd{
-            .fd = listener_fd,
-            .events = c.POLLIN,
-            .revents = 0,
-        };
-
-        while (true) {
-            const pr = c.poll(&pfd, 1, timeout_ms);
-            if (pr > 0) break;
-            if (pr == 0) return false;
-
-            const e = std.posix.errno(-1);
-            if (e == .INTR) continue;
-            return Error.IoError;
-        }
-
-        return self.step();
-    }
-
     pub fn step(self: *SessionServer) Error!bool {
         if (self.state != .listening) return Error.InvalidState;
-
         try self.ensurePtyNonBlocking();
 
-        var any_progress = false;
-        var spins: usize = 0;
-
-        // Drain a bounded amount of ready work per outer host tick. A single pass was
-        // noticeably sluggish for large streamed bursts, but an unbounded loop would
-        // risk busy-spinning under pathological readiness patterns.
-        while (spins < 16) : (spins += 1) {
-            var progressed = false;
-
-            if (try self.acceptConnection()) |conn| {
-                try self.handleAcceptedConnection(conn);
-                progressed = true;
-            }
-
-            if (try self.pumpOwnerIo()) progressed = true;
-            if (try self.pumpPtyIo()) progressed = true;
-
-            any_progress = any_progress or progressed;
-            if (!progressed) break;
-        }
-
-        return any_progress;
+        var progressed = false;
+        if (try self.acceptLatestConnection()) progressed = true;
+        if (try self.pumpOwnerToPty()) progressed = true;
+        if (try self.pumpPtyToOwner()) progressed = true;
+        return progressed;
     }
 
     fn validateSocketPath(path: []const u8) Error!void {
@@ -246,760 +174,114 @@ pub const SessionServer = struct {
         return fd;
     }
 
-    fn acceptConnection(self: *SessionServer) Error!?Connection {
-        const listener_fd = self.listener_fd orelse return Error.InvalidState;
-
-        var pfd = c.struct_pollfd{
-            .fd = listener_fd,
-            .events = c.POLLIN,
-            .revents = 0,
-        };
-
-        const pr = c.poll(&pfd, 1, 0);
-        if (pr < 0) return Error.IoError;
-        if (pr == 0) return null;
-
-        const fd = c.accept(listener_fd, null, null);
-        if (fd < 0) return Error.IoError;
-
-        return .{ .fd = fd };
-    }
-
-    fn mapHostState(st: @TypeOf(@as(*host.PtyChildHost, undefined).currentState())) wire.SessionStatus {
-        return switch (st) {
-            .starting => .starting,
-            .running => .running,
-            .exited => .exited,
-            .idle => .idle,
-            .closed => .closed,
-        };
-    }
-
-    fn signalName(sig: wire.Signal) []const u8 {
-        return switch (sig) {
-            .term => "TERM",
-            .int => "INT",
-            .kill => "KILL",
-        };
-    }
-
     fn ensurePtyNonBlocking(self: *SessionServer) Error!void {
         if (self.pty_nonblocking_configured) return;
-
         const fd = self.session_host.masterFd() orelse return;
         try fd_stream.setNonBlocking(fd);
         self.pty_nonblocking_configured = true;
     }
 
-    fn clearOwnerTransport(self: *SessionServer) void {
-        if (self.owner_transport) |*transport| {
-            transport.deinit();
+    fn dropOwner(self: *SessionServer) void {
+        if (self.owner_fd) |fd| {
+            _ = c.shutdown(fd, c.SHUT_RDWR);
+            _ = c.close(fd);
+            self.owner_fd = null;
         }
-        self.owner_transport = null;
-        self.owner_detach_after_flush = false;
+        self.owner_rx.clear();
+        self.owner_tx.clear();
+        self.pty_tx.clear();
     }
 
-    fn queueMessageToFd(self: *SessionServer, fd: c_int, msg: wire.Message) void {
-        if (self.core_state.ownerFd()) |owner_fd| {
-            if (owner_fd == fd) {
-                if (self.owner_transport) |*transport| {
-                    transport.queueMessage(msg) catch {
-                        self.handleWriteFailure(fd);
-                    };
-                    return;
-                }
-                self.handleWriteFailure(fd);
-                return;
-            }
-        }
-
-        wire.writeMessage(self.allocator, fd, msg) catch {
-            self.handleWriteFailure(fd);
-        };
+    fn installOwner(self: *SessionServer, fd: c_int) Error!void {
+        self.dropOwner();
+        try fd_stream.setNonBlocking(fd);
+        self.owner_fd = fd;
     }
 
-    fn writeControlRes(self: *SessionServer, fd: c_int, res: wire.ControlRes) void {
-        self.queueMessageToFd(fd, .{ .control_res = res });
-    }
+    fn acceptLatestConnection(self: *SessionServer) Error!bool {
+        const listener_fd = self.listener_fd orelse return Error.InvalidState;
+        var accepted_any = false;
 
-    fn writeOwnerReq(self: *SessionServer, fd: c_int, req: wire.ForwardRequest) void {
-        self.queueMessageToFd(fd, .{ .owner_req = req });
-    }
-
-    fn writeStdoutBytes(self: *SessionServer, fd: c_int, bytes: []const u8) void {
-        const owned = self.allocator.dupe(u8, bytes) catch {
-            self.handleWriteFailure(fd);
-            return;
-        };
-        defer self.allocator.free(owned);
-
-        self.queueMessageToFd(fd, .{ .stdout_bytes = owned });
-    }
-
-    fn handleWriteFailure(self: *SessionServer, fd: c_int) void {
-        if (self.core_state.ownerFd()) |owner_fd| {
-            if (owner_fd == fd) {
-                self.clearOwnerTransport();
-                self.dropOwner(false);
-                return;
-            }
-        }
-        _ = c.close(fd);
-    }
-
-    fn applyCoreOp(self: *SessionServer, op: core.Op) Error!void {
-        switch (op) {
-            .reply => |reply| {
-                const res: wire.ControlRes = if (reply.ok)
-                    .ok
-                else
-                    .{ .err = reply.code orelse .invalid_args };
-                self.writeControlRes(reply.fd, res);
-            },
-            .send_owner_request => |req| {
-                self.writeOwnerReq(req.fd, .{
-                    .request_id = req.request_id,
-                    .action = req.action,
-                });
-            },
-            .close_fd => |fd| {
-                if (self.core_state.ownerFd()) |owner_fd| {
-                    if (owner_fd == fd) {
-                        self.clearOwnerTransport();
-                    }
-                }
-                _ = c.close(fd);
-            },
-            .resize_pty => |size| {
-                self.session_host.resize(size.cols, size.rows) catch |e| switch (e) {
-                    host.Error.InvalidArgs,
-                    host.Error.InvalidState,
-                    host.Error.NotStarted,
-                    host.Error.Closed,
-                    => {},
-                    else => {},
-                };
-                self.session_host.signalWinch() catch |e| switch (e) {
-                    host.Error.InvalidArgs,
-                    host.Error.InvalidState,
-                    host.Error.NotStarted,
-                    host.Error.Closed,
-                    => {},
-                    else => {},
-                };
-            },
-            .install_owner => |fd| {
-                self.clearOwnerTransport();
-                self.owner_transport = streaming.FramedTransport.init(
-                    self.allocator,
-                    fd,
-                    client.DEFAULT_STREAM_FRAME_MAX,
-                ) catch return Error.IoError;
-            },
-            .clear_owner => {
-                self.clearOwnerTransport();
-            },
-        }
-    }
-
-    fn applyCoreOps(self: *SessionServer, ops: *core.OpList) Error!void {
-        for (ops.items) |*op| {
-            try self.applyCoreOp(op.*);
-        }
-    }
-
-    fn dropOwner(self: *SessionServer, pty_closed: bool) void {
-        var ops = core.OpList{};
-        defer core.deinitOpList(self.allocator, &ops);
-
-        if (pty_closed) {
-            self.core_state.handlePtyClosed(self.allocator, &ops) catch return;
-        } else {
-            if (self.core_state.ownerFd()) |fd| {
-                self.core_state.handleOwnerClosed(self.allocator, fd, &ops) catch return;
-            } else {
-                return;
-            }
-        }
-
-        self.applyCoreOps(&ops) catch {};
-    }
-
-    fn handleRegularControlReq(self: *SessionServer, req: wire.ControlReq, client_fd: c_int) wire.ControlRes {
-        _ = client_fd;
-
-        return switch (req) {
-            .status => .{ .status = mapHostState(self.session_host.currentState()) },
-            .wait => blk: {
-                switch (self.session_host.currentState()) {
-                    .exited => {
-                        const st = self.session_host.wait() catch {
-                            break :blk .{ .err = .invalid_args };
-                        };
-                        if (st.code) |code| break :blk .{ .exit = .{ .code = code } };
-                        break :blk .{ .exit = .{ .signal_text = @constCast(st.signal orelse "unknown") } };
-                    },
-                    else => break :blk .{ .err = .invalid_args },
-                }
-            },
-            .terminate => |sig| blk: {
-                switch (self.session_host.currentState()) {
-                    .idle => {
-                        self.stop() catch {
-                            break :blk .{ .err = .invalid_args };
-                        };
-                        _ = self.session_host.close() catch {};
-                        break :blk .ok;
-                    },
-                    .starting, .running, .exited => {
-                        self.session_host.terminate(signalName(sig)) catch {
-                            break :blk .{ .err = .invalid_args };
-                        };
-                        break :blk .ok;
-                    },
-                    .closed => break :blk .{ .err = .invalid_args },
-                }
-            },
-            .attach => .{ .err = .invalid_args },
-            .detach => .{ .err = .invalid_args },
-            .resize => .{ .err = .invalid_args },
-            .owner_forward => .{ .err = .invalid_args },
-        };
-    }
-
-    fn handleAcceptedConnection(self: *SessionServer, conn: Connection) Error!void {
-        var msg = wire.readMessage(self.allocator, conn.fd, client.DEFAULT_CONTROL_FRAME_MAX) catch {
-            _ = c.close(conn.fd);
-            return Error.Unsupported;
-        };
-        defer msg.deinit(self.allocator);
-
-        switch (msg) {
-            .control_req => |req| {
-                switch (req) {
-                    .attach => |mode| {
-                        var ops = core.OpList{};
-                        defer core.deinitOpList(self.allocator, &ops);
-
-                        self.core_state.handleAttach(self.allocator, conn.fd, mode, &ops) catch {
-                            self.writeControlRes(conn.fd, .{ .err = .invalid_args });
-                            _ = c.close(conn.fd);
-                            return;
-                        };
-
-                        var reply_ok = false;
-                        var filtered = core.OpList{};
-                        defer core.deinitOpList(self.allocator, &filtered);
-
-                        for (ops.items) |op| {
-                            switch (op) {
-                                .reply => |reply| {
-                                    if (reply.fd == conn.fd and reply.ok) {
-                                        reply_ok = true;
-                                    } else {
-                                        try filtered.append(self.allocator, op);
-                                    }
-                                },
-                                else => try filtered.append(self.allocator, op),
-                            }
-                        }
-
-                        if (reply_ok) {
-                            wire.writeMessage(self.allocator, conn.fd, .{ .control_res = .ok }) catch {
-                                _ = c.close(conn.fd);
-                                return;
-                            };
-                        }
-
-                        try self.applyCoreOps(&filtered);
-                        return;
-                    },
-                    .owner_forward => |forward| {
-                        var ops = core.OpList{};
-                        defer core.deinitOpList(self.allocator, &ops);
-
-                        self.core_state.handleForward(self.allocator, conn.fd, forward.request_id, forward.action, &ops) catch {
-                            self.writeControlRes(conn.fd, .{ .err = .invalid_args });
-                            _ = c.close(conn.fd);
-                            return;
-                        };
-
-                        try self.applyCoreOps(&ops);
-                        return;
-                    },
-                    else => {
-                        const res = self.handleRegularControlReq(req, conn.fd);
-                        self.writeControlRes(conn.fd, res);
-                        _ = c.close(conn.fd);
-                        return;
-                    },
-                }
-            },
-            else => {
-                _ = c.close(conn.fd);
-                return Error.Unsupported;
-            },
-        }
-    }
-
-    fn maybeFinalizePendingOwnerDetach(self: *SessionServer) Error!bool {
-        if (!self.owner_detach_after_flush) return false;
-
-        const owner_fd = self.core_state.ownerFd() orelse {
-            self.owner_detach_after_flush = false;
-            return false;
-        };
-
-        if (self.owner_transport) |*transport| {
-            if (!transport.tx.isEmpty()) return false;
-        } else {
-            self.owner_detach_after_flush = false;
-            return false;
-        }
-
-        var ops = core.OpList{};
-        defer core.deinitOpList(self.allocator, &ops);
-
-        self.core_state.handleOwnerDetach(self.allocator, owner_fd, &ops) catch {};
-        try self.applyCoreOps(&ops);
-
-        _ = c.close(owner_fd);
-        self.owner_detach_after_flush = false;
-        return true;
-    }
-
-    fn pumpOwnerIo(self: *SessionServer) Error!bool {
-        const owner_fd = self.core_state.ownerFd() orelse return false;
-        if (self.owner_transport == null) return false;
-
-        if (try self.maybeFinalizePendingOwnerDetach()) return true;
-
-        var progressed = false;
-
-        if (self.owner_transport) |*transport| {
-            const events: c_short = if (self.owner_detach_after_flush)
-                (if (transport.wantsWrite()) c.POLLOUT else 0)
-            else
-                transport.pollEvents();
-
-            if (events == 0) return false;
-
-            var pfd = c.struct_pollfd{
-                .fd = owner_fd,
-                .events = events,
-                .revents = 0,
-            };
-
+        while (true) {
+            var pfd = c.struct_pollfd{ .fd = listener_fd, .events = c.POLLIN, .revents = 0 };
             const pr = c.poll(&pfd, 1, 0);
             if (pr < 0) return Error.IoError;
-            if (pr == 0) return false;
+            if (pr == 0) break;
 
-            if ((pfd.revents & c.POLLIN) != 0 and !self.owner_detach_after_flush) {
-                const read_result = transport.pumpRead(64 * 1024) catch {
-                    self.dropOwner(false);
-                    return true;
-                };
-                progressed = progressed or (read_result.bytes_read > 0);
-
-                if (read_result.hit_eof) {
-                    self.dropOwner(false);
-                    return true;
-                }
-
-                message_loop: while (true) {
-                    var msg = transport.nextMessage() catch {
-                        self.dropOwner(false);
-                        return true;
-                    } orelse break;
-                    defer msg.deinit(self.allocator);
-
-                    switch (msg) {
-                        .stdin_bytes => |bytes| {
-                            try self.pty_input_tx.append(self.allocator, bytes);
-                            progressed = true;
-                        },
-                        .owner_ready => {
-                            self.core_state.handleOwnerReady(owner_fd) catch {};
-                            progressed = true;
-                        },
-                        .owner_resize => |size| {
-                            var ops = core.OpList{};
-                            defer core.deinitOpList(self.allocator, &ops);
-
-                            self.core_state.handleOwnerResize(self.allocator, owner_fd, size.cols, size.rows, &ops) catch {};
-                            try self.applyCoreOps(&ops);
-                            progressed = true;
-                        },
-                        .owner_res => |res| {
-                            var ops = core.OpList{};
-                            defer core.deinitOpList(self.allocator, &ops);
-
-                            self.core_state.handleForwardResponse(self.allocator, owner_fd, res.request_id, res.ok, res.code, &ops) catch {};
-                            try self.applyCoreOps(&ops);
-                            progressed = true;
-                        },
-                        .control_req => |req| {
-                            switch (req) {
-                                .detach => {
-                                    self.writeControlRes(owner_fd, .ok);
-                                    self.owner_detach_after_flush = true;
-                                    progressed = true;
-                                    break :message_loop;
-                                },
-                                .resize => |size| {
-                                    var ops = core.OpList{};
-                                    defer core.deinitOpList(self.allocator, &ops);
-
-                                    self.core_state.handleOwnerResize(self.allocator, owner_fd, size.cols, size.rows, &ops) catch {};
-                                    try self.applyCoreOps(&ops);
-
-                                    self.writeControlRes(owner_fd, .ok);
-                                    progressed = true;
-                                },
-                                .status => {
-                                    const res = self.handleRegularControlReq(req, owner_fd);
-                                    self.writeControlRes(owner_fd, res);
-                                    progressed = true;
-                                },
-                                .terminate => {
-                                    const res = self.handleRegularControlReq(req, owner_fd);
-                                    self.writeControlRes(owner_fd, res);
-                                    progressed = true;
-                                },
-                                .wait,
-                                .attach,
-                                .owner_forward,
-                                => {
-                                    self.writeControlRes(owner_fd, .{ .err = .invalid_args });
-                                    progressed = true;
-                                },
-                            }
-                        },
-                        else => {
-                            self.dropOwner(false);
-                            return true;
-                        },
-                    }
-                }
-            }
-
-            if ((pfd.revents & c.POLLOUT) != 0) {
-                const wr = transport.pumpWrite(64 * 1024) catch {
-                    self.dropOwner(false);
-                    return true;
-                };
-                progressed = progressed or (wr.bytes_written > 0);
-            }
-
-            if ((pfd.revents & (c.POLLHUP | c.POLLERR | c.POLLNVAL)) != 0 and
-                (pfd.revents & c.POLLIN) == 0)
-            {
-                self.dropOwner(false);
-                return true;
-            }
+            const fd = c.accept(listener_fd, null, null);
+            if (fd < 0) return Error.IoError;
+            try self.installOwner(fd);
+            accepted_any = true;
         }
 
-        if (try self.maybeFinalizePendingOwnerDetach()) return true;
-        return progressed;
+        return accepted_any;
     }
 
-    fn pumpPtyIo(self: *SessionServer) Error!bool {
-        const master_fd = self.session_host.masterFd() orelse {
-            switch (self.session_host.currentState()) {
-                .idle, .starting => return false,
-                .running, .exited, .closed => {
-                    if (self.core_state.hasOwner()) self.dropOwner(true);
-                    return false;
-                },
-            }
-        };
-
+    fn pumpOwnerToPty(self: *SessionServer) Error!bool {
+        const owner_fd = self.owner_fd orelse return false;
+        const master_fd = self.session_host.masterFd() orelse return false;
         var progressed = false;
 
-        if (!self.pty_input_tx.isEmpty()) {
-            const wr = try fd_stream.writeFromQueue(master_fd, &self.pty_input_tx, 64 * 1024);
+        const rd = fd_stream.readIntoQueue(self.allocator, owner_fd, &self.owner_rx, 64 * 1024) catch {
+            self.dropOwner();
+            return true;
+        };
+        switch (rd) {
+            .progress => |n| progressed = progressed or (n > 0),
+            .would_block => {},
+            .eof => {
+                self.dropOwner();
+                return true;
+            },
+        }
+
+        if (!self.owner_rx.isEmpty()) {
+            try self.pty_tx.append(self.allocator, self.owner_rx.readableSlice());
+            self.owner_rx.clear();
+        }
+
+        if (!self.pty_tx.isEmpty()) {
+            const wr = fd_stream.writeFromQueue(master_fd, &self.pty_tx, 64 * 1024) catch {
+                return Error.IoError;
+            };
             switch (wr) {
-                .progress => |n| {
-                    if (n > 0) progressed = true;
-                },
+                .progress => |n| progressed = progressed or (n > 0),
                 .would_block => {},
             }
         }
 
-        var output_budget: usize = 64 * 1024;
-        while (output_budget > 0) {
-            const max_chunk = @min(output_budget, 4096);
-            const chunk = self.session_host.readOutput(self.allocator, max_chunk, 0) catch |e| switch (e) {
-                host.Error.InvalidState,
-                host.Error.NotStarted,
-                host.Error.Closed,
-                => return progressed,
-                host.Error.IoError => {
-                    if (self.core_state.hasOwner()) self.dropOwner(true);
-                    return progressed;
-                },
-                else => return Error.IoError,
-            };
-            defer self.allocator.free(chunk);
+        return progressed;
+    }
 
-            if (chunk.len == 0) break;
+    fn pumpPtyToOwner(self: *SessionServer) Error!bool {
+        const master_fd = self.session_host.masterFd() orelse return false;
+        const owner_fd = self.owner_fd;
+        var progressed = false;
 
-            output_budget -= chunk.len;
-            progressed = true;
+        const rd = fd_stream.readIntoQueue(self.allocator, master_fd, &self.owner_tx, 64 * 1024) catch {
+            return false;
+        };
+        switch (rd) {
+            .progress => |n| progressed = progressed or (n > 0),
+            .would_block => {},
+            .eof => return false,
+        }
 
-            if (self.core_state.ownerFd()) |fd| {
-                self.writeStdoutBytes(fd, chunk);
+        if (owner_fd) |fd| {
+            if (!self.owner_tx.isEmpty()) {
+                const wr = fd_stream.writeFromQueue(fd, &self.owner_tx, 64 * 1024) catch {
+                    self.dropOwner();
+                    return true;
+                };
+                switch (wr) {
+                    .progress => |n| progressed = progressed or (n > 0),
+                    .would_block => {},
+                }
             }
+        } else {
+            self.owner_tx.clear();
         }
 
         return progressed;
     }
-    pub fn installInitialOwner(self: *SessionServer, fd: c_int) Error!void {
-        if (self.state != .listening) return Error.InvalidState;
-
-        var ops = core.OpList{};
-        defer core.deinitOpList(self.allocator, &ops);
-
-        try self.core_state.installInitialOwner(self.allocator, fd, &ops);
-        try self.applyCoreOps(&ops);
-    }
 };
-
-test "server starts created" {
-    var h = try host.PtyChildHost.init(std.testing.allocator, .{ .argv = &.{"/bin/sh"} });
-    defer h.deinit();
-
-    var s = SessionServer.init(std.testing.allocator, &h);
-    defer s.deinit();
-
-    try std.testing.expectEqual(ServerState.created, s.getState());
-}
-
-test "server listens" {
-    var h = try host.PtyChildHost.init(std.testing.allocator, .{ .argv = &.{"/bin/sh"} });
-    defer h.deinit();
-
-    var s = SessionServer.init(std.testing.allocator, &h);
-    defer s.deinit();
-
-    const path = "/tmp/msr-server-listen-test.sock";
-    SessionServer.unlinkBestEffort(path);
-    defer SessionServer.unlinkBestEffort(path);
-
-    try s.listen(path);
-    try std.testing.expectEqual(ServerState.listening, s.getState());
-}
-
-test "server step handles status request" {
-    var h = try host.PtyChildHost.init(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "sleep 1" } });
-    defer h.deinit();
-    try h.start();
-
-    var s = SessionServer.init(std.testing.allocator, &h);
-    defer s.deinit();
-
-    const path = "/tmp/msr-server-status-test.sock";
-    SessionServer.unlinkBestEffort(path);
-    defer SessionServer.unlinkBestEffort(path);
-    try s.listen(path);
-
-    const fd = try client.connectUnix(path);
-    defer _ = c.close(fd);
-
-    try wire.writeMessage(std.testing.allocator, fd, .{ .control_req = .status });
-
-    _ = try s.step();
-
-    var msg = try wire.readMessage(std.testing.allocator, fd, client.DEFAULT_CONTROL_FRAME_MAX);
-    defer msg.deinit(std.testing.allocator);
-
-    switch (msg) {
-        .control_res => |res| switch (res) {
-            .status => |st| try std.testing.expect(st == .running),
-            else => return error.TestUnexpectedResult,
-        },
-        else => return error.TestUnexpectedResult,
-    }
-
-    try h.terminate("KILL");
-    _ = try h.wait();
-    try h.close();
-}
-
-test "server attach installs owner" {
-    var h = try host.PtyChildHost.init(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "sleep 1" } });
-    defer h.deinit();
-    try h.start();
-
-    var s = SessionServer.init(std.testing.allocator, &h);
-    defer s.deinit();
-
-    const path = "/tmp/msr-server-attach-test.sock";
-    SessionServer.unlinkBestEffort(path);
-    defer SessionServer.unlinkBestEffort(path);
-    try s.listen(path);
-
-    const fd = try client.connectUnix(path);
-    defer _ = c.close(fd);
-
-    try wire.writeMessage(std.testing.allocator, fd, .{ .control_req = .{ .attach = .exclusive } });
-
-    _ = try s.step();
-
-    var msg = try wire.readMessage(std.testing.allocator, fd, client.DEFAULT_CONTROL_FRAME_MAX);
-    defer msg.deinit(std.testing.allocator);
-
-    switch (msg) {
-        .control_res => |res| try std.testing.expect(res == .ok),
-        else => return error.TestUnexpectedResult,
-    }
-
-    try std.testing.expect(s.hasOwner());
-    try std.testing.expect(s.ownerFd() != null);
-    try std.testing.expect(s.ownerFd().? != fd);
-
-    try h.terminate("KILL");
-    _ = try h.wait();
-    try h.close();
-}
-
-test "server owner_forward with no owner returns no_owner" {
-    var h = try host.PtyChildHost.init(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "sleep 1" } });
-    defer h.deinit();
-    try h.start();
-
-    var s = SessionServer.init(std.testing.allocator, &h);
-    defer s.deinit();
-
-    const path = "/tmp/msr-server-no-owner-forward-test.sock";
-    SessionServer.unlinkBestEffort(path);
-    defer SessionServer.unlinkBestEffort(path);
-    try s.listen(path);
-
-    const fd = try client.connectUnix(path);
-    defer _ = c.close(fd);
-
-    try wire.writeMessage(std.testing.allocator, fd, .{
-        .control_req = .{
-            .owner_forward = .{
-                .request_id = 1,
-                .action = .detach,
-            },
-        },
-    });
-
-    _ = try s.step();
-
-    var msg = try wire.readMessage(std.testing.allocator, fd, client.DEFAULT_CONTROL_FRAME_MAX);
-    defer msg.deinit(std.testing.allocator);
-
-    switch (msg) {
-        .control_res => |res| switch (res) {
-            .err => |code| try std.testing.expectEqual(core.ErrorCode.no_owner, code),
-            else => return error.TestUnexpectedResult,
-        },
-        else => return error.TestUnexpectedResult,
-    }
-
-    try h.terminate("KILL");
-    _ = try h.wait();
-    try h.close();
-}
-
-
-test "server malformed client message does not kill session" {
-    var h = try host.PtyChildHost.init(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "sleep 1" } });
-    defer h.deinit();
-    try h.start();
-
-    var s = SessionServer.init(std.testing.allocator, &h);
-    defer s.deinit();
-
-    const path = "/tmp/msr-server-malformed-client-test.sock";
-    SessionServer.unlinkBestEffort(path);
-    defer SessionServer.unlinkBestEffort(path);
-    try s.listen(path);
-
-    const bad_fd = try client.connectUnix(path);
-    defer _ = c.close(bad_fd);
-    try wire.writeFrameParts(bad_fd, .stdout_bytes, &.{"junk"});
-
-    try std.testing.expectError(Error.Unsupported, s.step());
-    try std.testing.expectEqual(ServerState.listening, s.getState());
-
-    const good_fd = try client.connectUnix(path);
-    defer _ = c.close(good_fd);
-    try wire.writeMessage(std.testing.allocator, good_fd, .{ .control_req = .status });
-    _ = try s.step();
-
-    var msg = try wire.readMessage(std.testing.allocator, good_fd, client.DEFAULT_CONTROL_FRAME_MAX);
-    defer msg.deinit(std.testing.allocator);
-    switch (msg) {
-        .control_res => |res| switch (res) {
-            .status => |st| try std.testing.expect(st == .running),
-            else => return error.TestUnexpectedResult,
-        },
-        else => return error.TestUnexpectedResult,
-    }
-
-    try h.terminate("KILL");
-    _ = try h.wait();
-    try h.close();
-}
-
-test "server detach-after-flush preserves queued pty output" {
-    if (false) {
-    var h = try host.PtyChildHost.init(std.testing.allocator, .{ .argv = &.{ "/bin/sh", "-c", "printf hello; sleep 1" } });
-    defer h.deinit();
-    try h.start();
-
-    var s = SessionServer.init(std.testing.allocator, &h);
-    defer s.deinit();
-
-    const path = "/tmp/msr-server-detach-flush-test.sock";
-    SessionServer.unlinkBestEffort(path);
-    defer SessionServer.unlinkBestEffort(path);
-    try s.listen(path);
-
-    const fd = try client.connectUnix(path);
-    defer _ = c.close(fd);
-
-    try wire.writeMessage(std.testing.allocator, fd, .{ .control_req = .{ .attach = .exclusive } });
-    _ = try s.step();
-    var attach_msg = try wire.readMessage(std.testing.allocator, fd, client.DEFAULT_CONTROL_FRAME_MAX);
-    defer attach_msg.deinit(std.testing.allocator);
-
-    try wire.writeMessage(std.testing.allocator, fd, .owner_ready);
-    _ = try s.step();
-
-    try wire.writeMessage(std.testing.allocator, fd, .{ .control_req = .detach });
-
-    var saw_ok = false;
-    var saw_stdout = false;
-    var loops: usize = 0;
-    while (loops < 50 and (!saw_ok or !saw_stdout)) : (loops += 1) {
-        _ = try s.step();
-        var msg = wire.readMessage(std.testing.allocator, fd, client.DEFAULT_CONTROL_FRAME_MAX) catch |e| switch (e) {
-            wire.Error.ReadFailed, wire.Error.UnexpectedEof => break,
-            else => return e,
-        };
-        defer msg.deinit(std.testing.allocator);
-        switch (msg) {
-            .control_res => |res| {
-                if (res == .ok) saw_ok = true;
-            },
-            .stdout_bytes => |bytes| {
-                if (std.mem.indexOf(u8, bytes, "hello") != null) saw_stdout = true;
-            },
-            else => {},
-        }
-    }
-
-    try std.testing.expect(saw_ok);
-    try std.testing.expect(saw_stdout);
-
-    try h.terminate("KILL");
-    _ = try h.wait();
-    try h.close();
-    }
-}

@@ -138,18 +138,37 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     exe_root.linkSystemLibrary("util", .{});
-    exe_root.addImport("client", client_mod);
     exe_root.addImport("host", host_mod);
     exe_root.addImport("server", server_mod);
-    exe_root.addImport("attach_bridge", attach_bridge_mod);
-    exe_root.addImport("cli_parse", cli_parse_mod);
-    exe_root.addImport("command_spec", command_spec_mod);
 
     const exe = b.addExecutable(.{
         .name = "msr",
         .root_module = exe_root,
     });
     b.installArtifact(exe);
+
+    const raw_mode_mod = b.addModule("ptyio_raw_mode", .{
+        .root_source_file = b.path("../ptyio/src/tty/raw_mode.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+
+    const attach_root = b.createModule(.{
+        .root_source_file = b.path("src/attach_raw.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    attach_root.addImport("byte_queue", byte_queue_mod);
+    attach_root.addImport("fd_stream", fd_stream_mod);
+    attach_root.addImport("ptyio_raw_mode", raw_mode_mod);
+
+    const attach_exe = b.addExecutable(.{
+        .name = "msr-attach",
+        .root_module = attach_root,
+    });
+    b.installArtifact(attach_exe);
 
     const run_cmd = b.addRunArtifact(exe);
     if (b.args) |args| run_cmd.addArgs(args);

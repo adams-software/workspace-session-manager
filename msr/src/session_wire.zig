@@ -264,15 +264,13 @@ fn readExact(fd: c_int, dst: []u8) !void {
 
 fn encodeAttachMode(mode: core.AttachMode) u8 {
     return switch (mode) {
-        .exclusive => 1,
-        .takeover => 2,
+        .takeover => 1,
     };
 }
 
 fn decodeAttachMode(v: u8) !core.AttachMode {
     return switch (v) {
-        1 => .exclusive,
-        2 => .takeover,
+        1 => .takeover,
         else => Error.InvalidEnumValue,
     };
 }
@@ -280,26 +278,24 @@ fn decodeAttachMode(v: u8) !core.AttachMode {
 fn encodeErrorCode(code: core.ErrorCode) u8 {
     return switch (code) {
         .invalid_args => 1,
-        .attach_conflict => 2,
-        .no_owner => 3,
-        .owner_not_ready => 4,
-        .owner_busy => 5,
-        .owner_disconnected => 6,
-        .owner_replaced => 7,
-        .pty_closed => 8,
+        .no_owner => 2,
+        .owner_not_ready => 3,
+        .owner_busy => 4,
+        .owner_disconnected => 5,
+        .owner_replaced => 6,
+        .pty_closed => 7,
     };
 }
 
 fn decodeErrorCode(v: u8) !core.ErrorCode {
     return switch (v) {
         1 => .invalid_args,
-        2 => .attach_conflict,
-        3 => .no_owner,
-        4 => .owner_not_ready,
-        5 => .owner_busy,
-        6 => .owner_disconnected,
-        7 => .owner_replaced,
-        8 => .pty_closed,
+        2 => .no_owner,
+        3 => .owner_not_ready,
+        4 => .owner_busy,
+        5 => .owner_disconnected,
+        6 => .owner_replaced,
+        7 => .pty_closed,
         else => Error.InvalidEnumValue,
     };
 }

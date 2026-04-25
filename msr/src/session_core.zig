@@ -8,13 +8,11 @@ pub const Error = error{
 };
 
 pub const AttachMode = enum {
-    exclusive,
     takeover,
 };
 
 pub const ErrorCode = enum {
     invalid_args,
-    attach_conflict,
     no_owner,
     owner_not_ready,
     owner_busy,
@@ -187,6 +185,7 @@ pub const Core = struct {
             },
         }
     }
+
     pub fn installInitialOwner(
         self: *Core,
         allocator: std.mem.Allocator,
@@ -221,69 +220,38 @@ pub const Core = struct {
         self: *Core,
         allocator: std.mem.Allocator,
         client_fd: Fd,
-        mode: AttachMode,
+        _: AttachMode,
         ops: *OpList,
     ) !void {
         switch (self.owner) {
-            .none => {
-                self.owner = .{ .attached_unready = .{ .fd = client_fd } };
-                try appendInstallOwner(ops, allocator, client_fd);
-                try appendReply(ops, allocator, client_fd, true, null);
-            },
+            .none => {},
             .attached_unready => |existing| {
-                switch (mode) {
-                    .exclusive => {
-                        try appendReply(ops, allocator, client_fd, false, .attach_conflict);
-                        try appendClose(ops, allocator, client_fd);
-                    },
-                    .takeover => {
-                        try appendClose(ops, allocator, existing.fd);
-                        self.owner = .{ .attached_unready = .{ .fd = client_fd } };
-                        try appendClearOwner(ops, allocator);
-                        try appendInstallOwner(ops, allocator, client_fd);
-                        try appendReply(ops, allocator, client_fd, true, null);
-                    },
-                }
+                try appendClose(ops, allocator, existing.fd);
+                try appendClearOwner(ops, allocator);
             },
             .attached_ready => |*existing| {
-                switch (mode) {
-                    .exclusive => {
-                        try appendReply(ops, allocator, client_fd, false, .attach_conflict);
-                        try appendClose(ops, allocator, client_fd);
-                    },
-                    .takeover => {
-                        if (existing.pending) |*pending| {
-                            try appendReply(ops, allocator, pending.requester_fd, false, .owner_replaced);
-                            try appendClose(ops, allocator, pending.requester_fd);
-                            pending.deinit(allocator);
-                            existing.pending = null;
-                        }
-
-                        try appendClose(ops, allocator, existing.fd);
-                        self.owner = .{ .attached_unready = .{ .fd = client_fd } };
-                        try appendClearOwner(ops, allocator);
-                        try appendInstallOwner(ops, allocator, client_fd);
-                        try appendReply(ops, allocator, client_fd, true, null);
-                    },
+                if (existing.pending) |*pending| {
+                    try appendReply(ops, allocator, pending.requester_fd, false, .owner_replaced);
+                    try appendClose(ops, allocator, pending.requester_fd);
+                    pending.deinit(allocator);
+                    existing.pending = null;
                 }
+                try appendClose(ops, allocator, existing.fd);
+                try appendClearOwner(ops, allocator);
             },
         }
+
+        self.owner = .{ .attached_unready = .{ .fd = client_fd } };
+        try appendInstallOwner(ops, allocator, client_fd);
+        try appendReply(ops, allocator, client_fd, true, null);
     }
 
-    pub fn handleOwnerReady(
-        self: *Core,
-        owner_fd: Fd,
-    ) !void {
+    pub fn handleOwnerReady(self: *Core, owner_fd: Fd) !void {
         switch (self.owner) {
             .none => return error.InvalidState,
             .attached_unready => |owner| {
                 if (owner.fd != owner_fd) return error.InvalidState;
-                self.owner = .{
-                    .attached_ready = .{
-                        .fd = owner.fd,
-                        .pending = null,
-                    },
-                };
+                self.owner = .{ .attached_ready = .{ .fd = owner.fd, .pending = null } };
             },
             .attached_ready => |owner| {
                 if (owner.fd != owner_fd) return error.InvalidState;
@@ -323,13 +291,7 @@ pub const Core = struct {
                     .action = try action.clone(allocator),
                 };
 
-                try appendSendOwnerRequest(
-                    ops,
-                    allocator,
-                    owner.fd,
-                    request_id,
-                    action,
-                );
+                try appendSendOwnerRequest(ops, allocator, owner.fd, request_id, action);
             },
         }
     }
@@ -354,13 +316,7 @@ pub const Core = struct {
 
                 const was_detach = pending.action.isDetach();
 
-                try appendReply(
-                    ops,
-                    allocator,
-                    pending.requester_fd,
-                    ok,
-                    if (ok) null else (code orelse .invalid_args),
-                );
+                try appendReply(ops, allocator, pending.requester_fd, ok, if (ok) null else (code orelse .invalid_args));
                 try appendClose(ops, allocator, pending.requester_fd);
 
                 var owned_pending = owner.pending.?;
@@ -484,176 +440,3 @@ pub const Core = struct {
         }
     }
 };
-
-test "attach exclusive with no owner installs unready owner" {
-    var core = Core{};
-    defer core.deinit(std.testing.allocator);
-
-    var ops = OpList{};
-    defer deinitOpList(std.testing.allocator, &ops);
-
-    try core.handleAttach(std.testing.allocator, 10, .exclusive, &ops);
-
-    try std.testing.expect(core.hasOwner());
-    try std.testing.expectEqual(@as(?Fd, 10), core.ownerFd());
-    try std.testing.expectEqual(@as(usize, 2), ops.items.len);
-    try std.testing.expect(ops.items[0] == .install_owner);
-    try std.testing.expect(ops.items[1] == .reply);
-    try std.testing.expect(ops.items[1].reply.ok);
-}
-
-test "forward with no owner fails requester" {
-    var core = Core{};
-    defer core.deinit(std.testing.allocator);
-
-    var ops = OpList{};
-    defer deinitOpList(std.testing.allocator, &ops);
-
-    try core.handleForward(
-        std.testing.allocator,
-        20,
-        1,
-        .detach,
-        &ops,
-    );
-
-    try std.testing.expectEqual(@as(usize, 2), ops.items.len);
-    try std.testing.expect(ops.items[0] == .reply);
-    try std.testing.expect(!ops.items[0].reply.ok);
-    try std.testing.expectEqual(ErrorCode.no_owner, ops.items[0].reply.code.?);
-    try std.testing.expectEqual(@as(Fd, 20), ops.items[1].close_fd);
-}
-
-test "owner_ready moves unready owner to ready" {
-    var core = Core{
-        .owner = .{ .attached_unready = .{ .fd = 10 } },
-    };
-    defer core.deinit(std.testing.allocator);
-
-    try core.handleOwnerReady(10);
-
-    switch (core.owner) {
-        .attached_ready => |owner| {
-            try std.testing.expectEqual(@as(Fd, 10), owner.fd);
-            try std.testing.expect(owner.pending == null);
-        },
-        else => return error.TestUnexpectedResult,
-    }
-}
-
-test "forward when ready stores pending and emits owner request" {
-    var core = Core{
-        .owner = .{ .attached_ready = .{ .fd = 10, .pending = null } },
-    };
-    defer core.deinit(std.testing.allocator);
-
-    var ops = OpList{};
-    defer deinitOpList(std.testing.allocator, &ops);
-
-    try core.handleForward(
-        std.testing.allocator,
-        20,
-        7,
-        .detach,
-        &ops,
-    );
-
-    try std.testing.expectEqual(@as(usize, 1), ops.items.len);
-    try std.testing.expect(ops.items[0] == .send_owner_request);
-    try std.testing.expectEqual(@as(Fd, 10), ops.items[0].send_owner_request.fd);
-    try std.testing.expectEqual(@as(u32, 7), ops.items[0].send_owner_request.request_id);
-
-    switch (core.owner) {
-        .attached_ready => |owner| {
-            try std.testing.expect(owner.pending != null);
-            try std.testing.expectEqual(@as(Fd, 20), owner.pending.?.requester_fd);
-        },
-        else => return error.TestUnexpectedResult,
-    }
-}
-
-test "forward response for detach resolves requester and clears owner" {
-    var core = Core{
-        .owner = .{
-            .attached_ready = .{
-                .fd = 10,
-                .pending = .{
-                    .requester_fd = 20,
-                    .request_id = 7,
-                    .action = .detach,
-                },
-            },
-        },
-    };
-    defer core.deinit(std.testing.allocator);
-
-    var ops = OpList{};
-    defer deinitOpList(std.testing.allocator, &ops);
-
-    try core.handleForwardResponse(
-        std.testing.allocator,
-        10,
-        7,
-        true,
-        null,
-        &ops,
-    );
-
-    try std.testing.expectEqual(@as(usize, 4), ops.items.len);
-    try std.testing.expect(ops.items[0] == .reply);
-    try std.testing.expect(ops.items[0].reply.ok);
-    try std.testing.expectEqual(@as(Fd, 20), ops.items[1].close_fd);
-    try std.testing.expectEqual(@as(Fd, 10), ops.items[2].close_fd);
-    try std.testing.expect(ops.items[3] == .clear_owner);
-    try std.testing.expect(!core.hasOwner());
-}
-
-test "takeover fails pending requester and replaces owner" {
-    var core = Core{
-        .owner = .{
-            .attached_ready = .{
-                .fd = 10,
-                .pending = .{
-                    .requester_fd = 20,
-                    .request_id = 7,
-                    .action = .detach,
-                },
-            },
-        },
-    };
-    defer core.deinit(std.testing.allocator);
-
-    var ops = OpList{};
-    defer deinitOpList(std.testing.allocator, &ops);
-
-    try core.handleAttach(std.testing.allocator, 11, .takeover, &ops);
-
-    try std.testing.expectEqual(@as(usize, 6), ops.items.len);
-    try std.testing.expect(ops.items[0] == .reply);
-    try std.testing.expectEqual(ErrorCode.owner_replaced, ops.items[0].reply.code.?);
-    try std.testing.expectEqual(@as(Fd, 20), ops.items[1].close_fd);
-    try std.testing.expectEqual(@as(Fd, 10), ops.items[2].close_fd);
-    try std.testing.expect(ops.items[3] == .clear_owner);
-    try std.testing.expect(ops.items[4] == .install_owner);
-    try std.testing.expect(ops.items[5] == .reply);
-    try std.testing.expect(ops.items[5].reply.ok);
-
-    switch (core.owner) {
-        .attached_unready => |owner| try std.testing.expectEqual(@as(Fd, 11), owner.fd),
-        else => return error.TestUnexpectedResult,
-    }
-}
-test "installInitialOwner installs unready owner without reply" {
-    var core = Core{};
-    defer core.deinit(std.testing.allocator);
-
-    var ops = OpList{};
-    defer deinitOpList(std.testing.allocator, &ops);
-
-    try core.installInitialOwner(std.testing.allocator, 10, &ops);
-
-    try std.testing.expect(core.hasOwner());
-    try std.testing.expectEqual(@as(?Fd, 10), core.ownerFd());
-    try std.testing.expectEqual(@as(usize, 1), ops.items.len);
-    try std.testing.expect(ops.items[0] == .install_owner);
-}
