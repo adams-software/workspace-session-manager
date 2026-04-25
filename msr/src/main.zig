@@ -1,5 +1,7 @@
 const std = @import("std");
 const host = @import("host");
+const host_runtime = @import("host_runtime");
+const host_repl = @import("host_repl");
 const session_server = @import("server");
 
 const c = @cImport({
@@ -89,6 +91,14 @@ fn parseArgs(allocator: std.mem.Allocator, argv: []const []const u8) !Parsed {
     };
 }
 
+fn mapExitSignal(text: ?[]const u8) host_runtime.Signal {
+    if (text) |t| {
+        if (std.mem.eql(u8, t, "INT")) return .int;
+        if (std.mem.eql(u8, t, "KILL")) return .kill;
+    }
+    return .term;
+}
+
 fn runHost(allocator: std.mem.Allocator, parsed: Parsed) !u8 {
     var child = try host.PtyChildHost.init(allocator, .{
         .argv = parsed.child_argv,
@@ -102,6 +112,14 @@ fn runHost(allocator: std.mem.Allocator, parsed: Parsed) !u8 {
     var server = session_server.SessionServer.init(allocator, &child);
     defer server.deinit();
     try server.listen(parsed.socket_path);
+    if (server.runtime) |*runtime| {
+        if (parsed.size) |s| try runtime.resize(s.cols, s.rows);
+        if (child.pid) |pid| runtime.onChildStarted(pid);
+    }
+
+    if (server.runtime) |*runtime| {
+        try host_repl.run(allocator, runtime);
+    }
 
     while (true) {
         _ = try server.step();
@@ -110,8 +128,23 @@ fn runHost(allocator: std.mem.Allocator, parsed: Parsed) !u8 {
         switch (child.currentState()) {
             .running, .starting => {},
             .idle => {},
-            .exited => return 0,
+            .exited => {
+                if (server.runtime) |*runtime| {
+                    if (child.exitStatus()) |st| {
+                        if (st.code) |code| runtime.onChildExitedCode(code) else runtime.onChildExitedSignal(mapExitSignal(st.signal));
+                    } else {
+                        runtime.onChildExitedCode(0);
+                    }
+                }
+                return 0;
+            },
             .closed => return 0,
+        }
+
+        if (server.runtime) |runtime| {
+            if (runtime.state().host_phase == .exiting) {
+                return 0;
+            }
         }
 
         var pfd = [_]c.struct_pollfd{.{

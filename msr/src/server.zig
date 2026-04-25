@@ -1,5 +1,6 @@
 const std = @import("std");
 const host = @import("host");
+const host_runtime = @import("host_runtime");
 const fd_stream = @import("fd_stream");
 const ByteQueue = @import("byte_queue").ByteQueue;
 
@@ -33,6 +34,7 @@ pub const SessionServer = struct {
     state: ServerState = .created,
     listener_fd: ?c_int = null,
     socket_path: ?[]u8 = null,
+    runtime: ?host_runtime.HostRuntime = null,
     owner_fd: ?c_int = null,
     owner_rx: ByteQueue = ByteQueue.init(),
     owner_tx: ByteQueue = ByteQueue.init(),
@@ -57,6 +59,11 @@ pub const SessionServer = struct {
             self.listener_fd = null;
         }
 
+        if (self.runtime) |*runtime| {
+            runtime.deinit();
+            self.runtime = null;
+        }
+
         if (self.socket_path) |path| {
             unlinkBestEffort(path);
             self.allocator.free(path);
@@ -77,6 +84,8 @@ pub const SessionServer = struct {
 
         self.listener_fd = fd;
         self.socket_path = try self.allocator.dupe(u8, socket_path);
+        self.runtime = try host_runtime.HostRuntime.init(self.allocator, socket_path, null);
+        self.runtime.?.onSocketListening();
         self.state = .listening;
     }
 
@@ -186,6 +195,7 @@ pub const SessionServer = struct {
             _ = c.shutdown(fd, c.SHUT_RDWR);
             _ = c.close(fd);
             self.owner_fd = null;
+            if (self.runtime) |*runtime| runtime.onClientDisconnected();
         }
         self.owner_rx.clear();
         self.owner_tx.clear();
@@ -193,9 +203,13 @@ pub const SessionServer = struct {
     }
 
     fn installOwner(self: *SessionServer, fd: c_int) Error!void {
+        const had_owner = self.owner_fd != null;
         self.dropOwner();
         try fd_stream.setNonBlocking(fd);
         self.owner_fd = fd;
+        if (self.runtime) |*runtime| {
+            if (had_owner) runtime.onClientReplaced() else runtime.onClientConnected();
+        }
     }
 
     fn acceptLatestConnection(self: *SessionServer) Error!bool {
