@@ -11,9 +11,10 @@ pub fn run(
     var line_buf = std.ArrayList(u8){};
     defer line_buf.deinit(allocator);
 
+    try stdout.interface.writeAll("event ready\n");
+
     var byte_buf: [1]u8 = undefined;
     while (true) {
-        try stdout.interface.writeAll("> ");
         line_buf.clearRetainingCapacity();
 
         while (true) {
@@ -29,7 +30,7 @@ pub fn run(
         if (trimmed.len == 0) continue;
 
         if (std.mem.eql(u8, trimmed, "help")) {
-            try stdout.interface.writeAll("commands: state | resize <cols> <rows> | signal <term|int|kill> | exit\n");
+            try stdout.interface.writeAll("ok commands=state,resize,signal,exit\n");
             continue;
         }
 
@@ -51,7 +52,7 @@ fn printResult(writer: anytype, result: host_control.Result) !void {
         .err => |err| try writer.print("err {s}\n", .{@tagName(err)}),
         .state => |state| {
             try writer.print(
-                "state host={s} child={s} client_attached={} pid={any} size=",
+                "ok host={s} child={s} client_attached={} pid={any} size=",
                 .{ @tagName(state.host_phase), @tagName(state.child_phase), state.client_attached, state.child_pid },
             );
             if (state.size) |size| {
@@ -62,8 +63,8 @@ fn printResult(writer: anytype, result: host_control.Result) !void {
             try writer.writeAll(" exit=");
             switch (state.exit_info) {
                 .none => try writer.writeAll("none"),
-                .code => |code| try writer.print("code:{d}", .{code}),
-                .signal => |sig| try writer.print("signal:{s}", .{@tagName(sig)}),
+                .code => |code| try writer.print("code={d}", .{code}),
+                .signal => |sig| try writer.print("signal={s}", .{@tagName(sig)}),
             }
             try writer.writeByte('\n');
         },

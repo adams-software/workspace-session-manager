@@ -99,6 +99,13 @@ fn mapExitSignal(text: ?[]const u8) host_runtime.Signal {
     return .term;
 }
 
+const StdoutEventSink = struct {
+    fn onEvent(_: ?*anyopaque, event: host_runtime.HostEvent) void {
+        var stdout = std.fs.File.stdout().writer(&.{});
+        host_runtime.writeEventLine(&stdout.interface, event) catch {};
+    }
+};
+
 fn runHost(allocator: std.mem.Allocator, parsed: Parsed) !u8 {
     var child = try host.PtyChildHost.init(allocator, .{
         .argv = parsed.child_argv,
@@ -111,7 +118,7 @@ fn runHost(allocator: std.mem.Allocator, parsed: Parsed) !u8 {
 
     var server = session_server.SessionServer.init(allocator, &child);
     defer server.deinit();
-    try server.listen(parsed.socket_path);
+    try server.listenWithEventSink(parsed.socket_path, .{ .ctx = null, .onEventFn = StdoutEventSink.onEvent });
     if (server.runtime) |*runtime| {
         if (parsed.size) |s| try runtime.resize(s.cols, s.rows);
         if (child.pid) |pid| runtime.onChildStarted(pid);

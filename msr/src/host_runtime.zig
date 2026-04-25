@@ -61,6 +61,22 @@ pub const EventSink = struct {
     }
 };
 
+pub fn writeEventLine(writer: anytype, event: HostEvent) !void {
+    switch (event) {
+        .socket_listening => |info| try writer.print("event socket_listening path={s}\n", .{info.path}),
+        .client_connected => try writer.writeAll("event client_connected\n"),
+        .client_disconnected => try writer.writeAll("event client_disconnected\n"),
+        .client_replaced => try writer.writeAll("event client_replaced\n"),
+        .resized => |size| try writer.print("event resized cols={d} rows={d}\n", .{ size.cols, size.rows }),
+        .child_exited => |exit_info| switch (exit_info) {
+            .none => try writer.writeAll("event child_exited exit=none\n"),
+            .code => |code| try writer.print("event child_exited code={d}\n", .{code}),
+            .signal => |sig| try writer.print("event child_exited signal={s}\n", .{@tagName(sig)}),
+        },
+        .host_exiting => try writer.writeAll("event host_exiting\n"),
+    }
+}
+
 pub const Error = error{
     InvalidArgs,
     InvalidState,

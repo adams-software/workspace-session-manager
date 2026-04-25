@@ -76,6 +76,14 @@ pub const SessionServer = struct {
     }
 
     pub fn listen(self: *SessionServer, socket_path: []const u8) Error!void {
+        return self.listenWithEventSink(socket_path, null);
+    }
+
+    pub fn listenWithEventSink(
+        self: *SessionServer,
+        socket_path: []const u8,
+        event_sink: ?host_runtime.EventSink,
+    ) Error!void {
         if (self.state != .created) return Error.InvalidState;
         try validateSocketPath(socket_path);
 
@@ -84,7 +92,7 @@ pub const SessionServer = struct {
 
         self.listener_fd = fd;
         self.socket_path = try self.allocator.dupe(u8, socket_path);
-        self.runtime = try host_runtime.HostRuntime.init(self.allocator, socket_path, null);
+        self.runtime = try host_runtime.HostRuntime.init(self.allocator, socket_path, event_sink);
         self.runtime.?.onSocketListening();
         self.state = .listening;
     }

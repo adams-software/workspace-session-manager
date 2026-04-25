@@ -42,6 +42,15 @@ pub fn build(b: *std.Build) void {
     });
     host_control_mod.addImport("host_runtime", host_runtime_mod);
 
+    const host_client_mod = b.addModule("host_client", .{
+        .root_source_file = b.path("src/host_client.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    host_client_mod.addImport("host_control", host_control_mod);
+    host_client_mod.addImport("host_runtime", host_runtime_mod);
+
     const host_repl_mod = b.addModule("host_repl", .{
         .root_source_file = b.path("src/host_repl.zig"),
         .target = target,
@@ -110,6 +119,9 @@ pub fn build(b: *std.Build) void {
     const host_control_tests = b.addTest(.{ .root_module = host_control_mod });
     const run_host_control_tests = b.addRunArtifact(host_control_tests);
 
+    const host_client_tests = b.addTest(.{ .root_module = host_client_mod });
+    const run_host_client_tests = b.addRunArtifact(host_client_tests);
+
     const run_cmd = b.addRunArtifact(exe);
     if (b.args) |args| run_cmd.addArgs(args);
     const run_step = b.step("run", "Run the msr executable");
@@ -118,4 +130,5 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run msr unit tests");
     test_step.dependOn(&run_host_runtime_tests.step);
     test_step.dependOn(&run_host_control_tests.step);
+    test_step.dependOn(&run_host_client_tests.step);
 }
