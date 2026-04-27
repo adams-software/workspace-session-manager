@@ -1,7 +1,9 @@
 const std = @import("std");
+const ctlwire = @import("ctlwire");
 const router_runtime = @import("router_runtime");
 
 pub const Command = union(enum) {
+    help,
     attach: router_runtime.AttachSpec,
     detach,
     state,
@@ -29,6 +31,7 @@ pub const Parsed = union(enum) {
 
 pub const Result = union(enum) {
     ok,
+    help: []const u8,
     err_parse: ParseError,
     err_runtime: RuntimeError,
     state: router_runtime.RouterState,
@@ -38,6 +41,7 @@ pub fn parse(line: []const u8) Parsed {
     var iter = std.mem.tokenizeScalar(u8, line, ' ');
     const head = iter.next() orelse return .{ .err = .invalid_command };
 
+    if (std.mem.eql(u8, head, "help")) return .{ .command = .help };
     if (std.mem.eql(u8, head, "detach")) return .{ .command = .detach };
     if (std.mem.eql(u8, head, "state")) return .{ .command = .state };
     if (std.mem.eql(u8, head, "exit")) return .{ .command = .exit };
@@ -64,38 +68,44 @@ pub fn parse(line: []const u8) Parsed {
     return .{ .err = .invalid_command };
 }
 
-pub fn execute(runtime: *router_runtime.RouterRuntime, command: Command) Result {
+pub const help_text =
+    "commands: help, state, attach data=<path> control=<path>, detach, exit";
+
+pub fn executeRuntimeOnly(runtime: *router_runtime.RouterRuntime, command: Command) Result {
     switch (command) {
-        .attach => |spec| {
-            runtime.attach(spec) catch |err| return .{ .err_runtime = mapRuntimeError(err) };
-            return .ok;
-        },
-        .detach => {
-            runtime.detach() catch |err| return .{ .err_runtime = mapRuntimeError(err) };
-            return .ok;
-        },
+        .help => return .{ .help = help_text },
         .state => return .{ .state = runtime.state() },
         .exit => {
             runtime.should_exit = true;
             return .ok;
         },
+        .attach, .detach => @panic("attach/detach require session coordination and must not use executeRuntimeOnly"),
     }
+}
+
+pub fn applyAttach(runtime: *router_runtime.RouterRuntime, spec: router_runtime.AttachSpec) Result {
+    runtime.attach(spec) catch |err| return .{ .err_runtime = mapRuntimeError(err) };
+    return .ok;
+}
+
+pub fn applyDetach(runtime: *router_runtime.RouterRuntime) Result {
+    runtime.detach() catch |err| return .{ .err_runtime = mapRuntimeError(err) };
+    return .ok;
 }
 
 pub fn printResult(writer: anytype, result: Result) !void {
     switch (result) {
-        .ok => try writer.writeAll("ok\n"),
-        .err_parse => |err| try writer.print("err {s}\n", .{@tagName(err)}),
-        .err_runtime => |err| try writer.print("err {s}\n", .{@tagName(err)}),
+        .ok => try ctlwire.message.writeOk(writer),
+        .help => |text| try ctlwire.message.writeOkPayload(writer, text),
+        .err_parse => |err| try ctlwire.message.writeErr(writer, .{ .kind = @tagName(err) }),
+        .err_runtime => |err| try ctlwire.message.writeErr(writer, .{ .kind = @tagName(err) }),
         .state => |state| {
-            if (!state.attached) {
-                try writer.print("ok attached=false control={s}\n", .{state.control_path});
-            } else {
-                try writer.print(
-                    "ok attached=true control={s} data={s} target_control={s}\n",
-                    .{ state.control_path, state.data_path.?, state.target_control_path.? },
-                );
-            }
+            var buf: [256]u8 = undefined;
+            const payload = if (!state.attached)
+                try std.fmt.bufPrint(&buf, "attached=false control={s}", .{state.control_path})
+            else
+                try std.fmt.bufPrint(&buf, "attached=true control={s} data={s} target_control={s}", .{ state.control_path, state.data_path.?, state.target_control_path.? });
+            try ctlwire.message.writeOkPayload(writer, payload);
         },
     }
 }
@@ -127,6 +137,6 @@ test "router_control execute state shows unattached" {
     defer buf.deinit(std.testing.allocator);
     var writer = buf.writer(std.testing.allocator);
 
-    try printResult(&writer, execute(&runtime, .state));
+    try printResult(&writer, executeRuntimeOnly(&runtime, .state));
     try std.testing.expectEqualStrings("ok attached=false control=/tmp/router.sock\n", buf.items);
 }

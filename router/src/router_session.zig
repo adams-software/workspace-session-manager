@@ -2,9 +2,11 @@ const std = @import("std");
 const ByteQueue = @import("byte_queue").ByteQueue;
 const fd_stream = @import("fd_stream");
 const enterRawMode = @import("ptyio_raw_mode").enterRawMode;
+const getTtySize = @import("ptyio_tty_size").getTtySize;
 const router_runtime = @import("router_runtime");
 
 const c = @cImport({
+    @cInclude("signal.h");
     @cInclude("sys/socket.h");
     @cInclude("sys/un.h");
     @cInclude("unistd.h");
@@ -23,6 +25,7 @@ pub const Session = struct {
     sock_rx: ByteQueue,
     stdout_tx: ByteQueue,
     active: ?DataAttach,
+    attached_control_fd: ?c_int,
 
     pub fn init(allocator: std.mem.Allocator, stdin_is_tty: bool) Session {
         return .{
@@ -34,6 +37,7 @@ pub const Session = struct {
             .sock_rx = ByteQueue.init(),
             .stdout_tx = ByteQueue.init(),
             .active = null,
+            .attached_control_fd = null,
         };
     }
 
@@ -54,11 +58,15 @@ pub const Session = struct {
         }
         self.clearQueues();
         self.active = next;
+        self.attached_control_fd = try connectUnix(spec.control_path);
+        errdefer self.closeAttachedControl();
         try self.ensureRaw();
+        try self.sendInitialResize();
     }
 
     pub fn detach(self: *Session) void {
         self.closeAttach();
+        self.closeAttachedControl();
         self.clearQueues();
         self.restoreRaw();
     }
@@ -71,11 +79,13 @@ pub const Session = struct {
         const a = self.active orelse return false;
 
         if (self.stdin_is_tty) {
-            const in_status = try fd_stream.readIntoQueue(self.allocator, c.STDIN_FILENO, &self.stdin_rx, 64 * 1024);
-            switch (in_status) {
-                .progress => {},
-                .would_block => {},
-                .eof => {},
+            while (true) {
+                const in_status = try fd_stream.readIntoQueue(self.allocator, c.STDIN_FILENO, &self.stdin_rx, 64 * 1024);
+                switch (in_status) {
+                    .progress => {},
+                    .would_block => break,
+                    .eof => break,
+                }
             }
             if (!self.stdin_rx.isEmpty()) {
                 try self.sock_tx.append(self.allocator, self.stdin_rx.readableSlice());
@@ -83,21 +93,39 @@ pub const Session = struct {
             }
         }
 
-        _ = try fd_stream.writeFromQueue(a.data_fd, &self.sock_tx, 64 * 1024);
+        while (true) {
+            const write_status = try fd_stream.writeFromQueue(a.data_fd, &self.sock_tx, 64 * 1024);
+            switch (write_status) {
+                .progress => {
+                    if (self.sock_tx.isEmpty()) break;
+                },
+                .would_block => break,
+            }
+        }
 
-        const sock_status = try fd_stream.readIntoQueue(self.allocator, a.data_fd, &self.sock_rx, 64 * 1024);
-        switch (sock_status) {
-            .progress => {},
-            .would_block => {},
-            .eof => return true,
+        while (true) {
+            const sock_status = try fd_stream.readIntoQueue(self.allocator, a.data_fd, &self.sock_rx, 64 * 1024);
+            switch (sock_status) {
+                .progress => {},
+                .would_block => break,
+                .eof => return true,
+            }
         }
 
         if (!self.sock_rx.isEmpty()) {
-            try self.stdout_tx.append(self.allocator, self.sock_rx.readableSlice());
+            try appendForDisplay(self.allocator, &self.stdout_tx, self.sock_rx.readableSlice());
             self.sock_rx.clear();
         }
 
-        _ = try fd_stream.writeFromQueue(c.STDOUT_FILENO, &self.stdout_tx, 64 * 1024);
+        while (true) {
+            const out_status = try fd_stream.writeFromQueue(c.STDOUT_FILENO, &self.stdout_tx, 64 * 1024);
+            switch (out_status) {
+                .progress => {
+                    if (self.stdout_tx.isEmpty()) break;
+                },
+                .would_block => break,
+            }
+        }
         return false;
     }
 
@@ -126,7 +154,50 @@ pub const Session = struct {
             self.active = null;
         }
     }
+
+    fn closeAttachedControl(self: *Session) void {
+        if (self.attached_control_fd) |fd| {
+            _ = c.close(fd);
+            self.attached_control_fd = null;
+        }
+    }
+
+    fn sendInitialResize(self: *Session) !void {
+        if (!self.stdin_is_tty) return;
+        const fd = self.attached_control_fd orelse return;
+        const size = getTtySize(c.STDIN_FILENO) catch return;
+        var buf: [64]u8 = undefined;
+        const msg = try std.fmt.bufPrint(&buf, "resize {d} {d}\n", .{ size.cols, size.rows });
+        var sent: usize = 0;
+        while (sent < msg.len) {
+            const n = c.write(fd, msg.ptr + sent, msg.len - sent);
+            if (n > 0) {
+                sent += @intCast(n);
+                continue;
+            }
+            if (n == 0) return error.WriteFailed;
+            const e = std.posix.errno(-1);
+            if (e == .INTR) continue;
+            return error.WriteFailed;
+        }
+    }
 };
+
+fn appendForDisplay(allocator: std.mem.Allocator, queue: *ByteQueue, bytes: []const u8) !void {
+    var start: usize = 0;
+    for (bytes, 0..) |b, i| {
+        if (b == '\n') {
+            if (i > start) try queue.append(allocator, bytes[start..i]);
+            if (i == 0 or bytes[i - 1] != '\r') {
+                try queue.append(allocator, "\r\n");
+            } else {
+                try queue.append(allocator, "\n");
+            }
+            start = i + 1;
+        }
+    }
+    if (start < bytes.len) try queue.append(allocator, bytes[start..]);
+}
 
 fn connectUnix(path: []const u8) !c_int {
     var addr: c.struct_sockaddr_un = undefined;

@@ -46,6 +46,22 @@ fn connectUnix(path: []const u8) !c_int {
     return fd;
 }
 
+fn appendForDisplay(allocator: std.mem.Allocator, queue: *ByteQueue, bytes: []const u8) !void {
+    var start: usize = 0;
+    for (bytes, 0..) |b, i| {
+        if (b == '\n') {
+            if (i > start) try queue.append(allocator, bytes[start..i]);
+            if (i == 0 or bytes[i - 1] != '\r') {
+                try queue.append(allocator, "\r\n");
+            } else {
+                try queue.append(allocator, "\n");
+            }
+            start = i + 1;
+        }
+    }
+    if (start < bytes.len) try queue.append(allocator, bytes[start..]);
+}
+
 fn runAttach(allocator: std.mem.Allocator, path: []const u8) !u8 {
     const fd = try connectUnix(path);
     defer _ = c.close(fd);
@@ -102,7 +118,7 @@ fn runAttach(allocator: std.mem.Allocator, path: []const u8) !u8 {
         }
 
         if (!sock_rx.isEmpty()) {
-            try stdout_tx.append(allocator, sock_rx.readableSlice());
+            try appendForDisplay(allocator, &stdout_tx, sock_rx.readableSlice());
             sock_rx.clear();
         }
 

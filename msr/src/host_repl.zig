@@ -2,6 +2,7 @@ const std = @import("std");
 const host_control = @import("host_control");
 const host_runtime = @import("host_runtime");
 const fd_stream = @import("fd_stream");
+const ctlwire = @import("ctlwire");
 
 pub const Repl = struct {
     allocator: std.mem.Allocator,
@@ -27,7 +28,7 @@ pub const Repl = struct {
     pub fn setup(self: *Repl) !void {
         try fd_stream.setNonBlocking(std.posix.STDIN_FILENO);
         if (!self.ready_emitted) {
-            try self.stdout.interface.writeAll("event ready\n");
+            try ctlwire.message.writeEvent(&self.stdout.interface, .{ .kind = "ready", .payload = "app=msr version=1" });
             self.ready_emitted = true;
         }
     }
@@ -72,25 +73,28 @@ pub const Repl = struct {
 
 fn printResult(writer: anytype, result: host_control.Result) !void {
     switch (result) {
-        .ok => try writer.writeAll("ok\n"),
-        .err => |err| try writer.print("err {s}\n", .{@tagName(err)}),
+        .ok => try ctlwire.message.writeOk(writer),
+        .err => |err| try ctlwire.message.writeErr(writer, .{ .kind = @tagName(err) }),
         .state => |state| {
-            try writer.print(
-                "ok host={s} child={s} client_attached={} pid={any} size=",
+            var buf = std.ArrayList(u8){};
+            defer buf.deinit(std.heap.page_allocator);
+            var payload = buf.writer(std.heap.page_allocator);
+            try payload.print(
+                "host={s} child={s} client_attached={} pid={any} size=",
                 .{ @tagName(state.host_phase), @tagName(state.child_phase), state.client_attached, state.child_pid },
             );
             if (state.size) |size| {
-                try writer.print("{d}x{d}", .{ size.cols, size.rows });
+                try payload.print("{d}x{d}", .{ size.cols, size.rows });
             } else {
-                try writer.writeAll("none");
+                try payload.writeAll("none");
             }
-            try writer.writeAll(" exit=");
+            try payload.writeAll(" exit=");
             switch (state.exit_info) {
-                .none => try writer.writeAll("none"),
-                .code => |code| try writer.print("code={d}", .{code}),
-                .signal => |sig| try writer.print("signal={s}", .{@tagName(sig)}),
+                .none => try payload.writeAll("none"),
+                .code => |code| try payload.print("code={d}", .{code}),
+                .signal => |sig| try payload.print("signal={s}", .{@tagName(sig)}),
             }
-            try writer.writeByte('\n');
+            try ctlwire.message.writeOkPayload(writer, buf.items);
         },
     }
 }

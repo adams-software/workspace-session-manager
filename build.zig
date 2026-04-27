@@ -40,6 +40,13 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
 
+    const ctlwire_mod = b.addModule("ctlwire", .{
+        .root_source_file = b.path("ctlwire/src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+
     const fd_stream_mod = b.addModule("fd_stream", .{
         .root_source_file = b.path("ptyio/src/stream/fd_stream.zig"),
         .target = target,
@@ -71,6 +78,7 @@ pub fn build(b: *std.Build) void {
     });
     host_client_mod.addImport("host_control", host_control_mod);
     host_client_mod.addImport("host_runtime", host_runtime_mod);
+    host_client_mod.addImport("ctlwire", ctlwire_mod);
 
     const host_mod = b.addModule("host", .{
         .root_source_file = b.path("ptyio/src/pty/child_host.zig"),
@@ -90,6 +98,7 @@ pub fn build(b: *std.Build) void {
     host_repl_mod.addImport("host_control", host_control_mod);
     host_repl_mod.addImport("host_runtime", host_runtime_mod);
     host_repl_mod.addImport("fd_stream", fd_stream_mod);
+    host_repl_mod.addImport("ctlwire", ctlwire_mod);
 
     const server_mod = b.addModule("server", .{
         .root_source_file = b.path("msr/src/server.zig"),
@@ -130,6 +139,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     router_control_mod.addImport("router_runtime", router_runtime_mod);
+    router_control_mod.addImport("ctlwire", ctlwire_mod);
 
     const router_session_mod = b.addModule("router_session", .{
         .root_source_file = b.path("router/src/router_session.zig"),
@@ -141,6 +151,7 @@ pub fn build(b: *std.Build) void {
     router_session_mod.addImport("byte_queue", byte_queue_mod);
     router_session_mod.addImport("fd_stream", fd_stream_mod);
     router_session_mod.addImport("ptyio_raw_mode", raw_mode_mod);
+    router_session_mod.addImport("ptyio_tty_size", tty_size_mod);
 
     // msr
     const exe_root = b.createModule(.{
@@ -188,6 +199,7 @@ pub fn build(b: *std.Build) void {
     router_root.addImport("router_runtime", router_runtime_mod);
     router_root.addImport("router_control", router_control_mod);
     router_root.addImport("router_session", router_session_mod);
+    router_root.addImport("ctlwire", ctlwire_mod);
     router_root.addImport("byte_queue", byte_queue_mod);
     router_root.addImport("fd_stream", fd_stream_mod);
     router_root.addImport("ptyio_raw_mode", raw_mode_mod);

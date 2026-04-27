@@ -3,6 +3,7 @@ const fd_stream = @import("fd_stream");
 const router_runtime = @import("router_runtime");
 const router_control = @import("router_control");
 const router_session = @import("router_session");
+const ctlwire = @import("ctlwire");
 
 const c = @cImport({
     @cInclude("sys/socket.h");
@@ -13,19 +14,19 @@ const c = @cImport({
 
 const ControlConn = struct {
     fd: c_int,
-    file: std.fs.File,
-    line_buf: std.ArrayList(u8),
+    conn: ctlwire.server.Connection,
+    ready_emitted: bool,
 
     fn init(fd: c_int) ControlConn {
         return .{
             .fd = fd,
-            .file = .{ .handle = fd },
-            .line_buf = .{},
+            .conn = .init(fd),
+            .ready_emitted = false,
         };
     }
 
     fn deinit(self: *ControlConn, allocator: std.mem.Allocator) void {
-        self.line_buf.deinit(allocator);
+        self.conn.deinit(allocator);
         _ = c.close(self.fd);
     }
 };
@@ -74,62 +75,55 @@ fn acceptControlConn(listener_fd: c_int, allocator: std.mem.Allocator, current: 
     current.* = ControlConn.init(fd);
 }
 
+fn handleControlLine(
+    conn: *ControlConn,
+    runtime: *router_runtime.RouterRuntime,
+    session: *router_session.Session,
+    trimmed: []const u8,
+) !bool {
+    const parsed = router_control.parse(trimmed);
+    const result: router_control.Result = switch (parsed) {
+        .command => |cmd| blk: {
+            switch (cmd) {
+                .attach => |spec| {
+                    if (session.active != null) break :blk .{ .err_runtime = .already_attached };
+                    session.attach(spec) catch break :blk .{ .err_runtime = .connect_failed };
+                    const res = router_control.applyAttach(runtime, spec);
+                    if (res != .ok) session.detach();
+                    break :blk res;
+                },
+                .detach => {
+                    const res = router_control.applyDetach(runtime);
+                    if (res == .ok) session.detach();
+                    break :blk res;
+                },
+                else => break :blk router_control.executeRuntimeOnly(runtime, cmd),
+            }
+        },
+        .err => |err| router_control.Result{ .err_parse = err },
+    };
+    try printControlResponse(conn.conn.file, result);
+    return !runtime.should_exit;
+}
+
 fn stepControlConn(
     allocator: std.mem.Allocator,
     conn: *ControlConn,
     runtime: *router_runtime.RouterRuntime,
     session: *router_session.Session,
 ) !bool {
-    var byte_buf: [1]u8 = undefined;
+    if (!conn.ready_emitted) {
+        var writer = conn.conn.file.writer(&.{});
+        try ctlwire.message.writeEvent(&writer.interface, .{ .kind = "ready", .payload = "app=router version=1" });
+        conn.ready_emitted = true;
+    }
+
     var keep = true;
-
     while (true) {
-        const n = conn.file.read(byte_buf[0..]) catch |err| switch (err) {
-            error.WouldBlock => return keep,
-            else => return false,
-        };
-        if (n == 0) return false;
-
-        const b = byte_buf[0];
-        if (b != '\r' and b != '\n') {
-            try conn.line_buf.append(allocator, b);
-            continue;
-        }
-
-        const trimmed = std.mem.trim(u8, conn.line_buf.items, " \t\r\n");
-        defer conn.line_buf.clearRetainingCapacity();
-        if (trimmed.len == 0) continue;
-
-        const parsed = router_control.parse(trimmed);
-        const result: router_control.Result = switch (parsed) {
-            .command => |cmd| blk: {
-                switch (cmd) {
-                    .attach => |spec| {
-                        if (session.active != null) break :blk .{ .err_runtime = .already_attached };
-                        session.attach(spec) catch break :blk .{ .err_runtime = .connect_failed };
-                        runtime.attach(spec) catch |err| {
-                            session.detach();
-                            const mapped: router_control.RuntimeError = switch (err) {
-                                router_runtime.Error.AlreadyAttached => .already_attached,
-                                router_runtime.Error.NotAttached => .not_attached,
-                                router_runtime.Error.OutOfMemory => .out_of_memory,
-                            };
-                            break :blk .{ .err_runtime = mapped };
-                        };
-                        break :blk router_control.Result.ok;
-                    },
-                    .detach => {
-                        const res = router_control.execute(runtime, cmd);
-                        if (res == .ok) session.detach();
-                        break :blk res;
-                    },
-                    else => break :blk router_control.execute(runtime, cmd),
-                }
-            },
-            .err => |err| router_control.Result{ .err_parse = err },
-        };
-        try printControlResponse(conn.file, result);
-        keep = !runtime.should_exit;
+        const next = try conn.conn.nextLine(allocator);
+        const line_text = next orelse return keep;
+        keep = try handleControlLine(conn, runtime, session, line_text);
+        if (!keep) return false;
     }
 }
 

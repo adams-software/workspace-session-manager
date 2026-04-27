@@ -1,7 +1,9 @@
 const std = @import("std");
 const host_control = @import("host_control");
 const host_runtime = @import("host_runtime");
+const ctlwire = @import("ctlwire");
 
+// Typed msr facade over raw ctlwire message lines.
 pub const Line = union(enum) {
     ok: []const u8,
     err: []const u8,
@@ -56,6 +58,22 @@ pub const EventSink = struct {
     }
 };
 
+pub fn parseLine(line_text: []const u8) Error!Line {
+    const parsed = ctlwire.message.parseLine(line_text) catch return Error.InvalidLine;
+    return switch (parsed) {
+        .ok => |payload| .{ .ok = payload },
+        .err => |err_line| .{ .err = if (err_line.detail.len == 0) err_line.kind else err_line.detail },
+        .event => |event| .{ .event = .{ .kind = event.kind, .rest = event.payload } },
+    };
+}
+
+pub fn readLine(reader: anytype, buf: []u8) !?[]u8 {
+    return ctlwire.line.readLine(reader, buf) catch |err| switch (err) {
+        error.InvalidLine => Error.InvalidLine,
+        error.UnexpectedEof => Error.UnexpectedEof,
+    };
+}
+
 pub fn formatCommand(writer: anytype, command: host_control.Command) !void {
     switch (command) {
         .state => try writer.writeAll("state\n"),
@@ -63,25 +81,6 @@ pub fn formatCommand(writer: anytype, command: host_control.Command) !void {
         .signal => |sig| try writer.print("signal {s}\n", .{@tagName(sig)}),
         .exit => try writer.writeAll("exit\n"),
     }
-}
-
-pub fn parseLine(line: []const u8) Error!Line {
-    const trimmed = std.mem.trim(u8, line, " \t\r\n");
-    if (trimmed.len == 0) return Error.InvalidLine;
-
-    if (std.mem.eql(u8, trimmed, "ok")) return .{ .ok = "" };
-    if (std.mem.startsWith(u8, trimmed, "ok ")) return .{ .ok = trimmed[3..] };
-    if (std.mem.startsWith(u8, trimmed, "err ")) return .{ .err = trimmed[4..] };
-    if (std.mem.eql(u8, trimmed, "event")) return Error.InvalidLine;
-    if (std.mem.startsWith(u8, trimmed, "event ")) {
-        const rest = trimmed[6..];
-        const space = std.mem.indexOfScalar(u8, rest, ' ');
-        if (space) |i| {
-            return .{ .event = .{ .kind = rest[0..i], .rest = rest[(i + 1)..] } };
-        }
-        return .{ .event = .{ .kind = rest, .rest = "" } };
-    }
-    return Error.InvalidLine;
 }
 
 pub fn parseErrorInfo(payload: []const u8) ErrorInfo {
@@ -135,40 +134,6 @@ pub fn parseStateView(payload: []const u8) Error!StateView {
     };
 }
 
-pub fn readLine(reader: anytype, buf: []u8) !?[]u8 {
-    if (@hasDecl(@TypeOf(reader.*), "readUntilDelimiterOrEof")) {
-        return try reader.readUntilDelimiterOrEof(buf, '\n');
-    }
-    if (@hasField(@TypeOf(reader.*), "interface")) {
-        return try readLineFromStdIoReader(&reader.interface, buf);
-    }
-    return try readLineBytewise(reader, buf);
-}
-
-fn readLineFromStdIoReader(reader: *std.Io.Reader, _: []u8) !?[]u8 {
-    return reader.takeDelimiterExclusive('\n') catch |err| switch (err) {
-        error.EndOfStream => return null,
-        error.ReadFailed => return Error.UnexpectedEof,
-        error.StreamTooLong => return Error.InvalidLine,
-    };
-}
-
-fn readLineBytewise(reader: anytype, buf: []u8) !?[]u8 {
-    var used: usize = 0;
-    while (true) {
-        if (used >= buf.len) return Error.InvalidLine;
-        const n = try reader.read(buf[used .. used + 1]);
-        if (n == 0) {
-            if (used == 0) return null;
-            return buf[0..used];
-        }
-        const b = buf[used];
-        if (b == '\n') return buf[0..used];
-        if (b == '\r') continue;
-        used += 1;
-    }
-}
-
 pub fn roundTrip(
     writer: anytype,
     reader: anytype,
@@ -176,19 +141,34 @@ pub fn roundTrip(
     command: host_control.Command,
     buf: []u8,
 ) !Response {
-    try formatCommand(writer, command);
+    var cmd_buf: [128]u8 = undefined;
+    var cmd_stream = std.io.fixedBufferStream(&cmd_buf);
+    try formatCommand(cmd_stream.writer(), command);
+    const command_text = cmd_stream.getWritten();
 
-    while (true) {
-        const maybe_line = try readLine(reader, buf);
-        const line = maybe_line orelse return Error.UnexpectedEof;
-        switch (try parseLine(line)) {
-            .ok => |rest| return .{ .ok = rest },
-            .err => |rest| return .{ .err = rest },
-            .event => |event| {
-                if (event_sink) |sink| sink.emit(event);
-            },
+    const ForwardCtx = struct {
+        sink: EventSink,
+    };
+    const Bridge = struct {
+        fn onEvent(ctx: ?*anyopaque, event: ctlwire.message.EventLine) void {
+            const forward: *ForwardCtx = @ptrCast(@alignCast(ctx.?));
+            forward.sink.emit(.{ .kind = event.kind, .rest = event.payload });
         }
-    }
+    };
+    var forward_ctx: ?ForwardCtx = if (event_sink) |sink| .{ .sink = sink } else null;
+    const wire_event_sink = if (forward_ctx) |*ctx| ctlwire.client.EventSink{ .ctx = ctx, .onEventFn = Bridge.onEvent } else null;
+
+    const line_result = ctlwire.client.roundTrip(writer, reader, wire_event_sink, command_text, buf) catch |err| switch (err) {
+        error.InvalidLine => return Error.InvalidLine,
+        error.UnexpectedEof => return Error.UnexpectedEof,
+        else => return err,
+    };
+
+    return switch (line_result) {
+        .ok => |payload| .{ .ok = payload },
+        .err => |err_line| .{ .err = if (err_line.detail.len == 0) err_line.kind else err_line.detail },
+        .event => unreachable,
+    };
 }
 
 pub fn state(writer: anytype, reader: anytype, event_sink: ?EventSink, buf: []u8) !StateView {
@@ -331,7 +311,7 @@ test "host_client readLine supports plain read readers" {
         bytes: []const u8,
         index: usize = 0,
 
-        fn read(self: *@This(), out: []u8) !usize {
+        pub fn read(self: *@This(), out: []u8) !usize {
             if (self.index >= self.bytes.len) return 0;
             out[0] = self.bytes[self.index];
             self.index += 1;
@@ -356,7 +336,7 @@ test "host_client roundTrip tolerates interleaved events" {
         lines: []const []const u8,
         index: usize = 0,
 
-        fn readUntilDelimiterOrEof(self: *@This(), buf: []u8, delimiter: u8) !?[]u8 {
+        pub fn readUntilDelimiterOrEof(self: *@This(), buf: []u8, delimiter: u8) !?[]u8 {
             _ = delimiter;
             if (self.index >= self.lines.len) return null;
             const line = self.lines[self.index];
@@ -369,11 +349,11 @@ test "host_client roundTrip tolerates interleaved events" {
     const FakeWriter = struct {
         bytes: std.ArrayList(u8),
 
-        fn writeAll(self: *@This(), bytes: []const u8) !void {
+        pub fn writeAll(self: *@This(), bytes: []const u8) !void {
             try self.bytes.appendSlice(std.testing.allocator, bytes);
         }
 
-        fn print(self: *@This(), comptime fmt: []const u8, args: anytype) !void {
+        pub fn print(self: *@This(), comptime fmt: []const u8, args: anytype) !void {
             const text = try std.fmt.allocPrint(std.testing.allocator, fmt, args);
             defer std.testing.allocator.free(text);
             try self.bytes.appendSlice(std.testing.allocator, text);
@@ -423,7 +403,7 @@ test "host_client state helper parses typed state through interleaved events" {
         lines: []const []const u8,
         index: usize = 0,
 
-        fn readUntilDelimiterOrEof(self: *@This(), buf: []u8, delimiter: u8) !?[]u8 {
+        pub fn readUntilDelimiterOrEof(self: *@This(), buf: []u8, delimiter: u8) !?[]u8 {
             _ = delimiter;
             if (self.index >= self.lines.len) return null;
             const line = self.lines[self.index];
@@ -436,11 +416,11 @@ test "host_client state helper parses typed state through interleaved events" {
     const FakeWriter = struct {
         bytes: std.ArrayList(u8),
 
-        fn writeAll(self: *@This(), bytes: []const u8) !void {
+        pub fn writeAll(self: *@This(), bytes: []const u8) !void {
             try self.bytes.appendSlice(std.testing.allocator, bytes);
         }
 
-        fn print(self: *@This(), comptime fmt: []const u8, args: anytype) !void {
+        pub fn print(self: *@This(), comptime fmt: []const u8, args: anytype) !void {
             const text = try std.fmt.allocPrint(std.testing.allocator, fmt, args);
             defer std.testing.allocator.free(text);
             try self.bytes.appendSlice(std.testing.allocator, text);
@@ -473,7 +453,7 @@ test "host_client roundTrip rejects malformed line" {
         lines: []const []const u8,
         index: usize = 0,
 
-        fn readUntilDelimiterOrEof(self: *@This(), buf: []u8, delimiter: u8) !?[]u8 {
+        pub fn readUntilDelimiterOrEof(self: *@This(), buf: []u8, delimiter: u8) !?[]u8 {
             _ = delimiter;
             if (self.index >= self.lines.len) return null;
             const line = self.lines[self.index];
@@ -486,11 +466,11 @@ test "host_client roundTrip rejects malformed line" {
     const FakeWriter = struct {
         bytes: std.ArrayList(u8),
 
-        fn writeAll(self: *@This(), bytes: []const u8) !void {
+        pub fn writeAll(self: *@This(), bytes: []const u8) !void {
             try self.bytes.appendSlice(std.testing.allocator, bytes);
         }
 
-        fn print(self: *@This(), comptime fmt: []const u8, args: anytype) !void {
+        pub fn print(self: *@This(), comptime fmt: []const u8, args: anytype) !void {
             const text = try std.fmt.allocPrint(std.testing.allocator, fmt, args);
             defer std.testing.allocator.free(text);
             try self.bytes.appendSlice(std.testing.allocator, text);
