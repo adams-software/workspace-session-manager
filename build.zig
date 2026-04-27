@@ -153,6 +153,16 @@ pub fn build(b: *std.Build) void {
     router_session_mod.addImport("ptyio_raw_mode", raw_mode_mod);
     router_session_mod.addImport("ptyio_tty_size", tty_size_mod);
 
+    const router_core_mod = b.addModule("router_core", .{
+        .root_source_file = b.path("router/src/router_core.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    router_core_mod.addImport("router_control", router_control_mod);
+    router_core_mod.addImport("router_runtime", router_runtime_mod);
+    router_core_mod.addImport("router_session", router_session_mod);
+
     // msr
     const exe_root = b.createModule(.{
         .root_source_file = b.path("msr/src/main.zig"),
@@ -199,6 +209,7 @@ pub fn build(b: *std.Build) void {
     router_root.addImport("router_runtime", router_runtime_mod);
     router_root.addImport("router_control", router_control_mod);
     router_root.addImport("router_session", router_session_mod);
+    router_root.addImport("router_core", router_core_mod);
     router_root.addImport("ctlwire", ctlwire_mod);
     router_root.addImport("byte_queue", byte_queue_mod);
     router_root.addImport("fd_stream", fd_stream_mod);

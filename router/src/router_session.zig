@@ -58,8 +58,10 @@ pub const Session = struct {
         }
         self.clearQueues();
         self.active = next;
-        self.attached_control_fd = try connectUnix(spec.control_path);
-        errdefer self.closeAttachedControl();
+        if (spec.control_path) |control_path| {
+            self.attached_control_fd = try connectUnix(control_path);
+            errdefer self.closeAttachedControl();
+        }
         try self.ensureRaw();
         try self.sendInitialResize();
     }
@@ -164,10 +166,21 @@ pub const Session = struct {
 
     fn sendInitialResize(self: *Session) !void {
         if (!self.stdin_is_tty) return;
-        const fd = self.attached_control_fd orelse return;
         const size = getTtySize(c.STDIN_FILENO) catch return;
+        try self.sendResize(size.cols, size.rows);
+    }
+
+    pub fn syncResizeFromTty(self: *Session) !void {
+        if (!self.stdin_is_tty) return;
+        if (self.active == null) return;
+        const size = getTtySize(c.STDIN_FILENO) catch return;
+        try self.sendResize(size.cols, size.rows);
+    }
+
+    fn sendResize(self: *Session, cols: u16, rows: u16) !void {
+        const fd = self.attached_control_fd orelse return;
         var buf: [64]u8 = undefined;
-        const msg = try std.fmt.bufPrint(&buf, "resize {d} {d}\n", .{ size.cols, size.rows });
+        const msg = try std.fmt.bufPrint(&buf, "resize {d} {d}\n", .{ cols, rows });
         var sent: usize = 0;
         while (sent < msg.len) {
             const n = c.write(fd, msg.ptr + sent, msg.len - sent);

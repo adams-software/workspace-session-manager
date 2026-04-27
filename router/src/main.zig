@@ -3,9 +3,11 @@ const fd_stream = @import("fd_stream");
 const router_runtime = @import("router_runtime");
 const router_control = @import("router_control");
 const router_session = @import("router_session");
+const router_core = @import("router_core");
 const ctlwire = @import("ctlwire");
 
 const c = @cImport({
+    @cInclude("errno.h");
     @cInclude("sys/socket.h");
     @cInclude("sys/un.h");
     @cInclude("unistd.h");
@@ -77,40 +79,22 @@ fn acceptControlConn(listener_fd: c_int, allocator: std.mem.Allocator, current: 
 
 fn handleControlLine(
     conn: *ControlConn,
-    runtime: *router_runtime.RouterRuntime,
-    session: *router_session.Session,
+    core: *router_core.RouterCore,
     trimmed: []const u8,
 ) !bool {
     const parsed = router_control.parse(trimmed);
     const result: router_control.Result = switch (parsed) {
-        .command => |cmd| blk: {
-            switch (cmd) {
-                .attach => |spec| {
-                    if (session.active != null) break :blk .{ .err_runtime = .already_attached };
-                    session.attach(spec) catch break :blk .{ .err_runtime = .connect_failed };
-                    const res = router_control.applyAttach(runtime, spec);
-                    if (res != .ok) session.detach();
-                    break :blk res;
-                },
-                .detach => {
-                    const res = router_control.applyDetach(runtime);
-                    if (res == .ok) session.detach();
-                    break :blk res;
-                },
-                else => break :blk router_control.executeRuntimeOnly(runtime, cmd),
-            }
-        },
+        .command => |cmd| core.handleCommand(cmd),
         .err => |err| router_control.Result{ .err_parse = err },
     };
     try printControlResponse(conn.conn.file, result);
-    return !runtime.should_exit;
+    return !core.runtime.should_exit;
 }
 
 fn stepControlConn(
     allocator: std.mem.Allocator,
     conn: *ControlConn,
-    runtime: *router_runtime.RouterRuntime,
-    session: *router_session.Session,
+    core: *router_core.RouterCore,
 ) !bool {
     if (!conn.ready_emitted) {
         var writer = conn.conn.file.writer(&.{});
@@ -122,9 +106,31 @@ fn stepControlConn(
     while (true) {
         const next = try conn.conn.nextLine(allocator);
         const line_text = next orelse return keep;
-        keep = try handleControlLine(conn, runtime, session, line_text);
+        keep = try handleControlLine(conn, core, line_text);
         if (!keep) return false;
     }
+}
+
+const ControlMode = union(enum) {
+    socket_path: []const u8,
+    fd: c_int,
+};
+
+fn usage() void {
+    std.debug.print("usage: router <control-socket-path> | router --control-fd <fd>\n", .{});
+}
+
+fn parseControlMode(args: *std.process.ArgIterator) !ControlMode {
+    const first = args.next() orelse return error.InvalidArgs;
+    if (std.mem.eql(u8, first, "--control-fd")) {
+        const fd_text = args.next() orelse return error.InvalidArgs;
+        if (args.next() != null) return error.InvalidArgs;
+        const fd = try std.fmt.parseInt(c_int, fd_text, 10);
+        if (fd < 0) return error.InvalidArgs;
+        return .{ .fd = fd };
+    }
+    if (args.next() != null) return error.InvalidArgs;
+    return .{ .socket_path = first };
 }
 
 pub fn main() !void {
@@ -136,22 +142,32 @@ pub fn main() !void {
     defer args.deinit();
 
     _ = args.next();
-    const control_path = args.next() orelse {
-        std.debug.print("usage: router <control-socket-path>\n", .{});
+    const mode = parseControlMode(&args) catch {
+        usage();
         return error.InvalidArgs;
     };
-    if (args.next() != null) {
-        std.debug.print("usage: router <control-socket-path>\n", .{});
-        return error.InvalidArgs;
-    }
 
-    var runtime = try router_runtime.RouterRuntime.init(allocator, control_path);
+    const runtime_control_name = switch (mode) {
+        .socket_path => |path| path,
+        .fd => "fd:control",
+    };
+    var runtime = try router_runtime.RouterRuntime.init(allocator, runtime_control_name);
     defer runtime.deinit();
 
-    const listener_fd = try createListener(control_path);
-    defer {
-        _ = c.close(listener_fd);
-        _ = c.unlink(control_path.ptr);
+    var listener_fd: ?c_int = null;
+    var control_conn: ?ControlConn = null;
+    switch (mode) {
+        .socket_path => |control_path| {
+            listener_fd = try createListener(control_path);
+            defer {
+                _ = c.close(listener_fd.?);
+                _ = c.unlink(control_path.ptr);
+            };
+        },
+        .fd => |fd| {
+            try fd_stream.setNonBlocking(fd);
+            control_conn = ControlConn.init(fd);
+        },
     }
 
     const stdin_is_tty = c.isatty(c.STDIN_FILENO) == 1;
@@ -160,14 +176,14 @@ pub fn main() !void {
 
     var session = router_session.Session.init(allocator, stdin_is_tty);
     defer session.deinit();
+    var core = router_core.RouterCore.init(&runtime, &session);
 
-    var control_conn: ?ControlConn = null;
     defer if (control_conn) |*conn| conn.deinit(allocator);
 
     while (!runtime.should_exit) {
-        try acceptControlConn(listener_fd, allocator, &control_conn);
+        if (listener_fd) |fd| try acceptControlConn(fd, allocator, &control_conn);
         if (control_conn) |*conn| {
-            const keep = try stepControlConn(allocator, conn, &runtime, &session);
+            const keep = try stepControlConn(allocator, conn, &core);
             if (!keep) {
                 conn.deinit(allocator);
                 control_conn = null;
@@ -177,14 +193,14 @@ pub fn main() !void {
         if (session.active != null) {
             const stream_lost = try session.stepDataPump();
             if (stream_lost) {
-                session.onStreamLost();
-                runtime.detach() catch {};
+                core.onStreamLost();
                 continue;
             }
+            try session.syncResizeFromTty();
         }
 
         var pfds = [_]c.struct_pollfd{
-            .{ .fd = listener_fd, .events = c.POLLIN, .revents = 0 },
+            .{ .fd = listener_fd orelse -1, .events = if (listener_fd != null) c.POLLIN else 0, .revents = 0 },
             .{ .fd = if (control_conn) |conn| conn.fd else -1, .events = if (control_conn != null) c.POLLIN else 0, .revents = 0 },
             .{ .fd = c.STDIN_FILENO, .events = if (stdin_is_tty and session.active != null) c.POLLIN else 0, .revents = 0 },
             .{ .fd = if (session.active) |a| a.data_fd else -1, .events = if (session.active != null) @as(c_short, c.POLLIN) | (if (!session.sock_tx.isEmpty()) @as(c_short, c.POLLOUT) else 0) else 0, .revents = 0 },

@@ -62,14 +62,14 @@ pub fn parse(line: []const u8) Parsed {
         }
         return .{ .command = .{ .attach = .{
             .data_path = data_path orelse return .{ .err = .missing_data },
-            .control_path = control_path orelse return .{ .err = .missing_control },
+            .control_path = control_path,
         } } };
     }
     return .{ .err = .invalid_command };
 }
 
 pub const help_text =
-    "commands: help, state, attach data=<path> control=<path>, detach, exit";
+    "commands: help, state, attach data=<path> [control=<path>], detach, exit";
 
 pub fn executeRuntimeOnly(runtime: *router_runtime.RouterRuntime, command: Command) Result {
     switch (command) {
@@ -119,14 +119,23 @@ fn mapRuntimeError(err: anyerror) RuntimeError {
     };
 }
 
-test "router_control parse attach requires both paths" {
-    try std.testing.expect(parse("attach data=/tmp/a") == .err);
+test "router_control parse attach requires data and accepts optional control" {
+    try std.testing.expect(parse("attach") == .err);
     try std.testing.expect(parse("attach control=/tmp/b") == .err);
-    const parsed = parse("attach data=/tmp/a control=/tmp/b");
-    try std.testing.expect(parsed == .command);
-    try std.testing.expect(parsed.command == .attach);
-    try std.testing.expectEqualStrings("/tmp/a", parsed.command.attach.data_path);
-    try std.testing.expectEqualStrings("/tmp/b", parsed.command.attach.control_path);
+    {
+        const parsed = parse("attach data=/tmp/a");
+        try std.testing.expect(parsed == .command);
+        try std.testing.expect(parsed.command == .attach);
+        try std.testing.expectEqualStrings("/tmp/a", parsed.command.attach.data_path);
+        try std.testing.expect(parsed.command.attach.control_path == null);
+    }
+    {
+        const parsed = parse("attach data=/tmp/a control=/tmp/b");
+        try std.testing.expect(parsed == .command);
+        try std.testing.expect(parsed.command == .attach);
+        try std.testing.expectEqualStrings("/tmp/a", parsed.command.attach.data_path);
+        try std.testing.expectEqualStrings("/tmp/b", parsed.command.attach.control_path.?);
+    }
 }
 
 test "router_control execute state shows unattached" {

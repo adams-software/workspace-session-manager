@@ -2,7 +2,7 @@ const std = @import("std");
 
 pub const AttachSpec = struct {
     data_path: []const u8,
-    control_path: []const u8,
+    control_path: ?[]const u8 = null,
 };
 
 pub const RouterState = struct {
@@ -57,7 +57,9 @@ pub const RouterRuntime = struct {
             self.allocator.free(self.attached_data_path.?);
             self.attached_data_path = null;
         }
-        self.attached_control_path = try self.allocator.dupe(u8, spec.control_path);
+        if (spec.control_path) |control_path| {
+            self.attached_control_path = try self.allocator.dupe(u8, control_path);
+        }
     }
 
     pub fn detach(self: *RouterRuntime) Error!void {
