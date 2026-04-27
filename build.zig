@@ -89,6 +89,7 @@ pub fn build(b: *std.Build) void {
     });
     host_repl_mod.addImport("host_control", host_control_mod);
     host_repl_mod.addImport("host_runtime", host_runtime_mod);
+    host_repl_mod.addImport("fd_stream", fd_stream_mod);
 
     const server_mod = b.addModule("server", .{
         .root_source_file = b.path("msr/src/server.zig"),
@@ -100,6 +101,46 @@ pub fn build(b: *std.Build) void {
     server_mod.addImport("host_runtime", host_runtime_mod);
     server_mod.addImport("byte_queue", byte_queue_mod);
     server_mod.addImport("fd_stream", fd_stream_mod);
+
+    const raw_mode_mod = b.addModule("ptyio_raw_mode", .{
+        .root_source_file = b.path("ptyio/src/tty/raw_mode.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+
+    const tty_size_mod = b.addModule("ptyio_tty_size", .{
+        .root_source_file = b.path("ptyio/src/tty/tty_size.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+
+    const router_runtime_mod = b.addModule("router_runtime", .{
+        .root_source_file = b.path("router/src/router_runtime.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+
+    const router_control_mod = b.addModule("router_control", .{
+        .root_source_file = b.path("router/src/router_control.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    router_control_mod.addImport("router_runtime", router_runtime_mod);
+
+    const router_session_mod = b.addModule("router_session", .{
+        .root_source_file = b.path("router/src/router_session.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    router_session_mod.addImport("router_runtime", router_runtime_mod);
+    router_session_mod.addImport("byte_queue", byte_queue_mod);
+    router_session_mod.addImport("fd_stream", fd_stream_mod);
+    router_session_mod.addImport("ptyio_raw_mode", raw_mode_mod);
 
     // msr
     const exe_root = b.createModule(.{
@@ -121,13 +162,6 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe);
 
-    const raw_mode_mod = b.addModule("ptyio_raw_mode", .{
-        .root_source_file = b.path("ptyio/src/tty/raw_mode.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-
     const attach_root = b.createModule(.{
         .root_source_file = b.path("msr/src/attach_raw.zig"),
         .target = target,
@@ -143,6 +177,29 @@ pub fn build(b: *std.Build) void {
         .root_module = attach_root,
     });
     b.installArtifact(attach_exe);
+
+    const router_root = b.createModule(.{
+        .root_source_file = b.path("router/src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    router_root.addImport("router_runtime", router_runtime_mod);
+    router_root.addImport("router_control", router_control_mod);
+    router_root.addImport("router_session", router_session_mod);
+    router_root.addImport("byte_queue", byte_queue_mod);
+    router_root.addImport("fd_stream", fd_stream_mod);
+    router_root.addImport("ptyio_raw_mode", raw_mode_mod);
+    router_root.addImport("ptyio_tty_size", tty_size_mod);
+    router_root.addImport("host_client", host_client_mod);
+    router_root.addImport("host_runtime", host_runtime_mod);
+    router_root.addImport("host_control", host_control_mod);
+
+    const router_exe = b.addExecutable(.{
+        .name = "router",
+        .root_module = router_root,
+    });
+    b.installArtifact(router_exe);
 
     const run_cmd = b.addRunArtifact(exe);
     if (b.args) |args| run_cmd.addArgs(args);
