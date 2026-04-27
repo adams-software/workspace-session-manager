@@ -78,16 +78,18 @@ fn runAttach(allocator: std.mem.Allocator, path: []const u8) !u8 {
     defer stdout_tx.deinit(allocator);
 
     while (true) {
-        const in_status = try fd_stream.readIntoQueue(allocator, c.STDIN_FILENO, &stdin_rx, 64 * 1024);
-        switch (in_status) {
-            .progress => {},
-            .would_block => {},
-            .eof => return 0,
-        }
+        if (stdin_is_tty) {
+            const in_status = try fd_stream.readIntoQueue(allocator, c.STDIN_FILENO, &stdin_rx, 64 * 1024);
+            switch (in_status) {
+                .progress => {},
+                .would_block => {},
+                .eof => return 0,
+            }
 
-        if (!stdin_rx.isEmpty()) {
-            try sock_tx.append(allocator, stdin_rx.readableSlice());
-            stdin_rx.clear();
+            if (!stdin_rx.isEmpty()) {
+                try sock_tx.append(allocator, stdin_rx.readableSlice());
+                stdin_rx.clear();
+            }
         }
 
         _ = try fd_stream.writeFromQueue(fd, &sock_tx, 64 * 1024);
@@ -107,12 +109,11 @@ fn runAttach(allocator: std.mem.Allocator, path: []const u8) !u8 {
         _ = try fd_stream.writeFromQueue(c.STDOUT_FILENO, &stdout_tx, 64 * 1024);
 
         var pfds = [_]c.struct_pollfd{
-            .{ .fd = c.STDIN_FILENO, .events = c.POLLIN, .revents = 0 },
-            .{ .fd = fd, .events = c.POLLIN, .revents = 0 },
+            .{ .fd = c.STDIN_FILENO, .events = if (stdin_is_tty) c.POLLIN else 0, .revents = 0 },
+            .{ .fd = fd, .events = @as(c_short, c.POLLIN) | (if (!sock_tx.isEmpty()) @as(c_short, c.POLLOUT) else 0), .revents = 0 },
             .{ .fd = c.STDOUT_FILENO, .events = if (!stdout_tx.isEmpty()) c.POLLOUT else 0, .revents = 0 },
         };
-        const poll_count: usize = if (stdin_is_tty) pfds.len else 2;
-        _ = c.poll(&pfds, @intCast(poll_count), 25);
+        _ = c.poll(&pfds, pfds.len, 25);
     }
 }
 

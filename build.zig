@@ -155,6 +155,7 @@ pub fn build(b: *std.Build) void {
     exe_root.addImport("host_control", host_control_mod);
     exe_root.addImport("host_repl", host_repl_mod);
     exe_root.addImport("server", server_mod);
+    exe_root.addImport("ptyio_tty_size", tty_size_mod);
 
     const exe = b.addExecutable(.{
         .name = "msr",

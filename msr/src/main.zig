@@ -3,6 +3,7 @@ const host = @import("host");
 const host_runtime = @import("host_runtime");
 const host_repl = @import("host_repl");
 const session_server = @import("server");
+const getTtySize = @import("ptyio_tty_size").getTtySize;
 
 const c = @cImport({
     @cInclude("unistd.h");
@@ -107,10 +108,19 @@ const StdoutEventSink = struct {
 };
 
 fn runHost(allocator: std.mem.Allocator, parsed: Parsed) !u8 {
+    const initial_size = parsed.size orelse blk: {
+        if (getTtySize(std.posix.STDIN_FILENO)) |tty_size| {
+            if (tty_size.cols != 0 and tty_size.rows != 0) {
+                break :blk host.Size{ .cols = tty_size.cols, .rows = tty_size.rows };
+            }
+        } else |_| {}
+        break :blk null;
+    };
+
     var child = try host.PtyChildHost.init(allocator, .{
         .argv = parsed.child_argv,
-        .cols = if (parsed.size) |s| s.cols else null,
-        .rows = if (parsed.size) |s| s.rows else null,
+        .cols = if (initial_size) |s| s.cols else null,
+        .rows = if (initial_size) |s| s.rows else null,
     });
     defer child.deinit();
 
@@ -120,17 +130,18 @@ fn runHost(allocator: std.mem.Allocator, parsed: Parsed) !u8 {
     defer server.deinit();
     try server.listenWithEventSink(parsed.socket_path, .{ .ctx = null, .onEventFn = StdoutEventSink.onEvent });
     if (server.runtime) |*runtime| {
-        if (parsed.size) |s| try runtime.resize(s.cols, s.rows);
+        if (initial_size) |s| try runtime.resize(s.cols, s.rows);
         if (child.pid) |pid| runtime.onChildStarted(pid);
     }
 
-    if (server.runtime) |*runtime| {
-        try host_repl.run(allocator, runtime);
-    }
+    var repl = host_repl.Repl.init(allocator);
+    defer repl.deinit();
+    try repl.setup();
 
     while (true) {
         _ = try server.step();
         try child.refresh();
+        if (server.runtime) |*runtime| try repl.step(runtime);
 
         switch (child.currentState()) {
             .running, .starting => {},
@@ -154,12 +165,13 @@ fn runHost(allocator: std.mem.Allocator, parsed: Parsed) !u8 {
             }
         }
 
-        var pfd = [_]c.struct_pollfd{.{
-            .fd = server.listener_fd orelse -1,
-            .events = c.POLLIN,
-            .revents = 0,
-        }};
-        _ = c.poll(&pfd, 1, 25);
+        var pfds = [_]c.struct_pollfd{
+            .{ .fd = server.listener_fd orelse -1, .events = c.POLLIN, .revents = 0 },
+            .{ .fd = server.owner_fd orelse -1, .events = c.POLLIN, .revents = 0 },
+            .{ .fd = child.masterFd() orelse -1, .events = c.POLLIN, .revents = 0 },
+            .{ .fd = std.posix.STDIN_FILENO, .events = c.POLLIN, .revents = 0 },
+        };
+        _ = c.poll(&pfds, pfds.len, 25);
     }
 }
 

@@ -59,6 +59,7 @@ pub fn build(b: *std.Build) void {
     });
     host_repl_mod.addImport("host_control", host_control_mod);
     host_repl_mod.addImport("host_runtime", host_runtime_mod);
+    host_repl_mod.addImport("fd_stream", fd_stream_mod);
 
     const server_mod = b.addModule("server", .{
         .root_source_file = b.path("src/server.zig"),

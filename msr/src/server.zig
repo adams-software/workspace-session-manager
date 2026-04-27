@@ -205,9 +205,7 @@ pub const SessionServer = struct {
             self.owner_fd = null;
             if (self.runtime) |*runtime| runtime.onClientDisconnected();
         }
-        self.owner_rx.clear();
         self.owner_tx.clear();
-        self.pty_tx.clear();
     }
 
     fn installOwner(self: *SessionServer, fd: c_int) Error!void {
@@ -239,27 +237,42 @@ pub const SessionServer = struct {
         return accepted_any;
     }
 
-    fn pumpOwnerToPty(self: *SessionServer) Error!bool {
-        const owner_fd = self.owner_fd orelse return false;
-        const master_fd = self.session_host.masterFd() orelse return false;
-        var progressed = false;
-
-        const rd = fd_stream.readIntoQueue(self.allocator, owner_fd, &self.owner_rx, 64 * 1024) catch {
-            self.dropOwner();
-            return true;
-        };
-        switch (rd) {
-            .progress => |n| progressed = progressed or (n > 0),
-            .would_block => {},
-            .eof => {
-                self.dropOwner();
-                return true;
-            },
-        }
-
+    fn commitOwnerRx(self: *SessionServer) Error!void {
         if (!self.owner_rx.isEmpty()) {
             try self.pty_tx.append(self.allocator, self.owner_rx.readableSlice());
             self.owner_rx.clear();
+        }
+    }
+
+    fn pumpOwnerToPty(self: *SessionServer) Error!bool {
+        const master_fd = self.session_host.masterFd() orelse return false;
+        var progressed = false;
+
+        if (self.owner_fd) |owner_fd| {
+            const rd = fd_stream.readIntoQueue(self.allocator, owner_fd, &self.owner_rx, 64 * 1024) catch {
+                try self.commitOwnerRx();
+                self.dropOwner();
+                progressed = true;
+                const wr_after_drop = fd_stream.writeFromQueue(master_fd, &self.pty_tx, 64 * 1024) catch {
+                    return Error.IoError;
+                };
+                switch (wr_after_drop) {
+                    .progress => |n| progressed = progressed or (n > 0),
+                    .would_block => {},
+                }
+                return progressed;
+            };
+            switch (rd) {
+                .progress => |n| progressed = progressed or (n > 0),
+                .would_block => {},
+                .eof => {
+                    try self.commitOwnerRx();
+                    self.dropOwner();
+                    progressed = true;
+                },
+            }
+
+            try self.commitOwnerRx();
         }
 
         if (!self.pty_tx.isEmpty()) {
