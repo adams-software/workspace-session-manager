@@ -24,13 +24,14 @@ fn usage() void {
         "NAME\n" ++
             "  msr - single-child foreground host\n\n" ++
             "USAGE\n" ++
-            "  msr <socket-path> [--size <cols>x<rows>] [--] <cmd...>\n\n" ++
+            "  msr <socket-path> [--headless] [--size <cols>x<rows>] [--] <cmd...>\n\n" ++
             "BEHAVIOR\n" ++
             "  Starts one child process, binds one socket, accepts zero or one active\n" ++
             "  owner at a time, and exits when the child exits. The host cleans up its\n" ++
             "  socket path on exit. New attachers always replace the current owner.\n\n" ++
             "EXAMPLES\n" ++
             "  msr /tmp/dev.sock -- /bin/sh -i\n" ++
+            "  msr /tmp/dev.sock --headless -- /bin/sh -i\n" ++
             "  msr /tmp/dev.sock --size 120x40 -- nvim\n",
         .{},
     );
@@ -39,6 +40,7 @@ fn usage() void {
 const Parsed = struct {
     socket_path: []const u8,
     size: ?host.Size,
+    headless: bool,
     child_argv: []const []const u8,
 };
 
@@ -62,12 +64,18 @@ fn parseArgs(allocator: std.mem.Allocator, argv: []const []const u8) !Parsed {
 
     var i: usize = 2;
     var size: ?host.Size = null;
+    var headless = false;
 
     while (i < argv.len) {
         const arg = argv[i];
         if (std.mem.eql(u8, arg, "--")) {
             i += 1;
             break;
+        }
+        if (std.mem.eql(u8, arg, "--headless")) {
+            headless = true;
+            i += 1;
+            continue;
         }
         if (std.mem.eql(u8, arg, "--size")) {
             if (i + 1 >= argv.len) return error.InvalidArgs;
@@ -88,6 +96,7 @@ fn parseArgs(allocator: std.mem.Allocator, argv: []const []const u8) !Parsed {
     return .{
         .socket_path = socket_path,
         .size = size,
+        .headless = headless,
         .child_argv = argv[i..],
     };
 }
@@ -106,6 +115,10 @@ const StdoutEventSink = struct {
         host_runtime.writeEventLine(&stdout.interface, event) catch {};
     }
 };
+
+fn applyChildResize(child: *host.PtyChildHost, size: host_runtime.Size) !void {
+    try child.applySize(.{ .cols = size.cols, .rows = size.rows });
+}
 
 fn runHost(allocator: std.mem.Allocator, parsed: Parsed) !u8 {
     const initial_size = parsed.size orelse blk: {
@@ -128,20 +141,40 @@ fn runHost(allocator: std.mem.Allocator, parsed: Parsed) !u8 {
 
     var server = session_server.SessionServer.init(allocator, &child);
     defer server.deinit();
-    try server.listenWithEventSink(parsed.socket_path, .{ .ctx = null, .onEventFn = StdoutEventSink.onEvent });
+    const event_sink: ?host_runtime.EventSink = if (parsed.headless)
+        null
+    else
+        .{ .ctx = null, .onEventFn = StdoutEventSink.onEvent };
+    try server.listenWithEventSink(parsed.socket_path, event_sink);
+    if (child.pid == null or child.masterFd() == null) return error.InvalidState;
+    try server.markReady();
     if (server.runtime) |*runtime| {
         if (initial_size) |s| try runtime.resize(s.cols, s.rows);
         if (child.pid) |pid| runtime.onChildStarted(pid);
     }
 
-    var repl = host_repl.Repl.init(allocator);
-    defer repl.deinit();
-    try repl.setup();
+    var repl: ?host_repl.Repl = null;
+    defer if (repl) |*r| r.deinit();
+    if (!parsed.headless) {
+        repl = host_repl.Repl.init(allocator);
+        try repl.?.setup();
+    }
 
     while (true) {
         _ = try server.step();
         try child.refresh();
-        if (server.runtime) |*runtime| try repl.step(runtime);
+        if (repl) |*r| {
+            if (server.runtime) |*runtime| {
+                const ResizeBridge = struct {
+                    var child_ptr: *host.PtyChildHost = undefined;
+                    fn call(size: host_runtime.Size) anyerror!void {
+                        try applyChildResize(child_ptr, size);
+                    }
+                };
+                ResizeBridge.child_ptr = &child;
+                try r.step(runtime, ResizeBridge.call);
+            }
+        }
 
         switch (child.currentState()) {
             .running, .starting => {},
@@ -169,7 +202,7 @@ fn runHost(allocator: std.mem.Allocator, parsed: Parsed) !u8 {
             .{ .fd = server.listener_fd orelse -1, .events = c.POLLIN, .revents = 0 },
             .{ .fd = server.owner_fd orelse -1, .events = c.POLLIN, .revents = 0 },
             .{ .fd = child.masterFd() orelse -1, .events = c.POLLIN, .revents = 0 },
-            .{ .fd = std.posix.STDIN_FILENO, .events = c.POLLIN, .revents = 0 },
+            .{ .fd = std.posix.STDIN_FILENO, .events = if (parsed.headless) 0 else c.POLLIN, .revents = 0 },
         };
         _ = c.poll(&pfds, pfds.len, 25);
     }

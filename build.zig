@@ -55,6 +55,15 @@ pub fn build(b: *std.Build) void {
     });
     fd_stream_mod.addImport("byte_queue", byte_queue_mod);
 
+    const duplex_link_mod = b.addModule("duplex_link", .{
+        .root_source_file = b.path("ptyio/src/stream/duplex_link.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    duplex_link_mod.addImport("byte_queue", byte_queue_mod);
+    duplex_link_mod.addImport("fd_stream", fd_stream_mod);
+
     const host_runtime_mod = b.addModule("host_runtime", .{
         .root_source_file = b.path("msr/src/host_runtime.zig"),
         .target = target,
@@ -125,44 +134,6 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
 
-    const router_runtime_mod = b.addModule("router_runtime", .{
-        .root_source_file = b.path("router/src/router_runtime.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-
-    const router_control_mod = b.addModule("router_control", .{
-        .root_source_file = b.path("router/src/router_control.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    router_control_mod.addImport("router_runtime", router_runtime_mod);
-    router_control_mod.addImport("ctlwire", ctlwire_mod);
-
-    const router_session_mod = b.addModule("router_session", .{
-        .root_source_file = b.path("router/src/router_session.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    router_session_mod.addImport("router_runtime", router_runtime_mod);
-    router_session_mod.addImport("byte_queue", byte_queue_mod);
-    router_session_mod.addImport("fd_stream", fd_stream_mod);
-    router_session_mod.addImport("ptyio_raw_mode", raw_mode_mod);
-    router_session_mod.addImport("ptyio_tty_size", tty_size_mod);
-
-    const router_core_mod = b.addModule("router_core", .{
-        .root_source_file = b.path("router/src/router_core.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    router_core_mod.addImport("router_control", router_control_mod);
-    router_core_mod.addImport("router_runtime", router_runtime_mod);
-    router_core_mod.addImport("router_session", router_session_mod);
-
     // msr
     const exe_root = b.createModule(.{
         .root_source_file = b.path("msr/src/main.zig"),
@@ -200,30 +171,23 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(attach_exe);
 
-    const router_root = b.createModule(.{
-        .root_source_file = b.path("router/src/main.zig"),
+    const wsm_root = b.createModule(.{
+        .root_source_file = b.path("wsm/src/main.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
-    router_root.addImport("router_runtime", router_runtime_mod);
-    router_root.addImport("router_control", router_control_mod);
-    router_root.addImport("router_session", router_session_mod);
-    router_root.addImport("router_core", router_core_mod);
-    router_root.addImport("ctlwire", ctlwire_mod);
-    router_root.addImport("byte_queue", byte_queue_mod);
-    router_root.addImport("fd_stream", fd_stream_mod);
-    router_root.addImport("ptyio_raw_mode", raw_mode_mod);
-    router_root.addImport("ptyio_tty_size", tty_size_mod);
-    router_root.addImport("host_client", host_client_mod);
-    router_root.addImport("host_runtime", host_runtime_mod);
-    router_root.addImport("host_control", host_control_mod);
-
-    const router_exe = b.addExecutable(.{
-        .name = "router",
-        .root_module = router_root,
+    wsm_root.addImport("byte_queue", byte_queue_mod);
+    wsm_root.addImport("fd_stream", fd_stream_mod);
+    wsm_root.addImport("duplex_link", duplex_link_mod);
+    wsm_root.addImport("ptyio_raw_mode", raw_mode_mod);
+    wsm_root.addImport("ptyio_tty_size", tty_size_mod);
+    wsm_root.addImport("ctlwire", ctlwire_mod);
+    const wsm_exe = b.addExecutable(.{
+        .name = "wsm",
+        .root_module = wsm_root,
     });
-    b.installArtifact(router_exe);
+    b.installArtifact(wsm_exe);
 
     const run_cmd = b.addRunArtifact(exe);
     if (b.args) |args| run_cmd.addArgs(args);
@@ -249,6 +213,20 @@ pub fn build(b: *std.Build) void {
     const host_control_tests = b.addTest(.{ .root_module = host_control_mod });
     const host_client_tests = b.addTest(.{ .root_module = host_client_mod });
 
+    const wsm_ui_state_mod = b.createModule(.{
+        .root_source_file = b.path("wsm/src/ui_state.zig"), .target = target, .optimize = optimize, .link_libc = true,
+    });
+    const wsm_bar_layout_mod = b.createModule(.{
+        .root_source_file = b.path("wsm/src/bar_layout.zig"), .target = target, .optimize = optimize, .link_libc = true,
+    });
+    wsm_bar_layout_mod.addImport("ui_state", wsm_ui_state_mod);
+    const wsm_bar_render_mod = b.createModule(.{
+        .root_source_file = b.path("wsm/src/bar_render.zig"), .target = target, .optimize = optimize, .link_libc = true,
+    });
+    wsm_bar_render_mod.addImport("ui_state", wsm_ui_state_mod);
+    const wsm_ui_state_tests = b.addTest(.{ .root_module = wsm_ui_state_mod });
+    const wsm_bar_layout_tests = b.addTest(.{ .root_module = wsm_bar_layout_mod });
+    const wsm_bar_render_tests = b.addTest(.{ .root_module = wsm_bar_render_mod });
 
     // vpty
     const vpty_terminal_mod = b.addModule("vpty_terminal", .{
@@ -439,6 +417,9 @@ pub fn build(b: *std.Build) void {
     const run_host_runtime_tests = b.addRunArtifact(host_runtime_tests);
     const run_host_control_tests = b.addRunArtifact(host_control_tests);
     const run_host_client_tests = b.addRunArtifact(host_client_tests);
+    const run_wsm_ui_state_tests = b.addRunArtifact(wsm_ui_state_tests);
+    const run_wsm_bar_layout_tests = b.addRunArtifact(wsm_bar_layout_tests);
+    const run_wsm_bar_render_tests = b.addRunArtifact(wsm_bar_render_tests);
 
     const test_step = b.step("test", "Run workspace tests");
     test_step.dependOn(&run_alt_tests.step);
@@ -448,6 +429,9 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_host_runtime_tests.step);
     test_step.dependOn(&run_host_control_tests.step);
     test_step.dependOn(&run_host_client_tests.step);
+    test_step.dependOn(&run_wsm_ui_state_tests.step);
+    test_step.dependOn(&run_wsm_bar_layout_tests.step);
+    test_step.dependOn(&run_wsm_bar_render_tests.step);
 
     const test_terminal_state_vterm_step = b.step("test-vterm", "Run libvterm adapter tests");
     test_terminal_state_vterm_step.dependOn(&run_terminal_state_vterm_tests.step);
@@ -472,6 +456,15 @@ pub fn build(b: *std.Build) void {
 
     const test_host_client_step = b.step("test-host-client", "Run msr host_client tests");
     test_host_client_step.dependOn(&run_host_client_tests.step);
+
+    const test_wsm_ui_state_step = b.step("test-wsm-ui-state", "Run wsm ui_state tests");
+    test_wsm_ui_state_step.dependOn(&run_wsm_ui_state_tests.step);
+
+    const test_wsm_bar_layout_step = b.step("test-wsm-bar-layout", "Run wsm bar_layout tests");
+    test_wsm_bar_layout_step.dependOn(&run_wsm_bar_layout_tests.step);
+
+    const test_wsm_bar_render_step = b.step("test-wsm-bar-render", "Run wsm bar_render tests");
+    test_wsm_bar_render_step.dependOn(&run_wsm_bar_render_tests.step);
 
     const smoke_cmd = b.addSystemCommand(&.{ "python3", "-u", "msr/scripts/smoke_msr_binary.py" });
     smoke_cmd.setCwd(b.path("."));

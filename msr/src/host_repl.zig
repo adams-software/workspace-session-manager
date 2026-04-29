@@ -33,7 +33,11 @@ pub const Repl = struct {
         }
     }
 
-    pub fn step(self: *Repl, runtime: *host_runtime.HostRuntime) !void {
+    pub fn step(
+        self: *Repl,
+        runtime: *host_runtime.HostRuntime,
+        applyResizeFn: ?*const fn (size: host_runtime.Size) anyerror!void,
+    ) !void {
         var byte_buf: [1]u8 = undefined;
 
         while (true) {
@@ -61,7 +65,7 @@ pub const Repl = struct {
 
             const parsed = host_control.parse(trimmed);
             const result = switch (parsed) {
-                .command => |cmd| host_control.execute(runtime, cmd),
+                .command => |cmd| host_control.execute(runtime, cmd, applyResizeFn),
                 .err => |err| host_control.Result{ .err = err },
             };
             try printResult(&self.stdout.interface, result);

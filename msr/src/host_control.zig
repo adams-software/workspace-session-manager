@@ -20,10 +20,19 @@ pub const Error = enum {
     invalid_state,
 };
 
-pub fn execute(runtime: *host_runtime.HostRuntime, command: Command) Result {
+pub fn execute(
+    runtime: *host_runtime.HostRuntime,
+    command: Command,
+    applyResizeFn: ?*const fn (size: host_runtime.Size) anyerror!void,
+) Result {
     return switch (command) {
         .state => .{ .state = runtime.state() },
         .resize => |size| blk: {
+            if (applyResizeFn) |apply| {
+                apply(size) catch |e| {
+                    break :blk .{ .err = mapResizeError(e) };
+                };
+            }
             runtime.resize(size.cols, size.rows) catch |e| {
                 break :blk .{ .err = mapRuntimeError(e) };
             };
@@ -100,6 +109,14 @@ fn mapRuntimeError(err: anyerror) Error {
     };
 }
 
+fn mapResizeError(err: anyerror) Error {
+    return switch (err) {
+        error.InvalidArgs => .invalid_args,
+        error.InvalidState, error.NotStarted, error.Closed => .invalid_state,
+        else => .invalid_state,
+    };
+}
+
 test "host_control parses core commands" {
     {
         const parsed = parse("state");
@@ -147,17 +164,17 @@ test "host_control execute updates runtime state" {
     runtime.onChildStarted(123);
 
     {
-        const res = execute(&runtime, .state);
+        const res = execute(&runtime, .state, null);
         try std.testing.expect(res == .state);
     }
     {
-        const res = execute(&runtime, .{ .resize = .{ .cols = 90, .rows = 30 } });
+        const res = execute(&runtime, .{ .resize = .{ .cols = 90, .rows = 30 } }, null);
         try std.testing.expect(res == .ok);
         try std.testing.expect(runtime.state().size != null);
         try std.testing.expectEqual(@as(u16, 90), runtime.state().size.?.cols);
     }
     {
-        const res = execute(&runtime, .exit);
+        const res = execute(&runtime, .exit, null);
         try std.testing.expect(res == .ok);
         try std.testing.expectEqual(host_runtime.HostPhase.exiting, runtime.state().host_phase);
     }

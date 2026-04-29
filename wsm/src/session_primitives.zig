@@ -1,0 +1,93 @@
+const std = @import("std");
+const policy = @import("policy.zig");
+
+const c = @cImport({
+    @cInclude("sys/socket.h");
+    @cInclude("sys/un.h");
+    @cInclude("unistd.h");
+});
+
+pub const SessionPaths = struct {
+    id: []u8,
+    data_path: []u8,
+    control_path: []u8,
+
+    pub fn deinit(self: *SessionPaths, allocator: std.mem.Allocator) void {
+        allocator.free(self.id);
+        allocator.free(self.data_path);
+        allocator.free(self.control_path);
+    }
+};
+
+pub const CreateSpec = struct {
+    id: []const u8,
+    shell: []const u8,
+};
+
+pub fn pathsForId(allocator: std.mem.Allocator, provider: *policy.Provider, id: []const u8) !SessionPaths {
+    try provider.validateCreateId(id);
+    const data_path = try provider.socketPathForId(id);
+    errdefer allocator.free(data_path);
+    const control_path = try controlPathForDataPath(allocator, data_path);
+    errdefer allocator.free(control_path);
+    return .{
+        .id = try allocator.dupe(u8, id),
+        .data_path = data_path,
+        .control_path = control_path,
+    };
+}
+
+pub fn controlPathForDataPath(allocator: std.mem.Allocator, data_path: []const u8) ![]u8 {
+    if (!std.mem.endsWith(u8, data_path, ".msr")) return error.InvalidPath;
+    return try std.fmt.allocPrint(allocator, "{s}.ctl", .{data_path[0 .. data_path.len - 4]});
+}
+
+pub fn createSession(allocator: std.mem.Allocator, msr_bin: []const u8, provider: *policy.Provider, spec: CreateSpec) !SessionPaths {
+    var paths = try pathsForId(allocator, provider, spec.id);
+    errdefer paths.deinit(allocator);
+
+    if (pathExists(paths.data_path) or pathExists(paths.control_path)) return error.SessionAlreadyExists;
+
+    if (std.fs.path.dirname(paths.data_path)) |dir| std.fs.makeDirAbsolute(dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+
+    var argv = std.ArrayList([]const u8){};
+    defer argv.deinit(allocator);
+    try argv.appendSlice(allocator, &.{
+        msr_bin,
+        paths.control_path,
+        "--headless",
+        "--",
+        msr_bin,
+        paths.data_path,
+        "--",
+        spec.shell,
+        "-i",
+    });
+
+    var child = std.process.Child.init(argv.items, allocator);
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Ignore;
+    child.stderr_behavior = .Ignore;
+    try child.spawn();
+    try waitSocketPathExists(paths.data_path, 2000);
+    try waitSocketPathExists(paths.control_path, 2000);
+
+    return paths;
+}
+
+fn waitSocketPathExists(path: []const u8, timeout_ms: u64) !void {
+    const deadline = std.time.milliTimestamp() + @as(i64, @intCast(timeout_ms));
+    while (std.time.milliTimestamp() < deadline) {
+        if (pathExists(path)) return;
+        std.Thread.sleep(20 * std.time.ns_per_ms);
+    }
+    return error.SessionNotReady;
+}
+
+fn pathExists(path: []const u8) bool {
+    std.fs.accessAbsolute(path, .{}) catch return false;
+    return true;
+}

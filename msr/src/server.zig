@@ -93,8 +93,12 @@ pub const SessionServer = struct {
         self.listener_fd = fd;
         self.socket_path = try self.allocator.dupe(u8, socket_path);
         self.runtime = try host_runtime.HostRuntime.init(self.allocator, socket_path, event_sink);
-        self.runtime.?.onSocketListening();
         self.state = .listening;
+    }
+
+    pub fn markReady(self: *SessionServer) Error!void {
+        if (self.state != .listening) return Error.InvalidState;
+        if (self.runtime) |*runtime| runtime.onSocketListening();
     }
 
     pub fn stop(self: *SessionServer) Error!void {
