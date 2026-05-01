@@ -1,7 +1,6 @@
 const std = @import("std");
 const policy = @import("policy.zig");
-const session_primitives = @import("session_primitives.zig");
-const session_link_mod = @import("session_link.zig");
+const service_mod = @import("service.zig");
 
 pub const Result = union(enum) {
     info: []const u8,
@@ -19,7 +18,8 @@ pub const Executor = struct {
     allocator: std.mem.Allocator,
     root: []const u8,
     msr_bin: []const u8,
-    link: ?session_link_mod.SessionLink,
+    vpty_bin: []const u8,
+    link: ?service_mod.AttachedSession,
     interactive_attached: bool,
 
     pub fn init(allocator: std.mem.Allocator, root: []const u8) !Executor {
@@ -27,6 +27,7 @@ pub const Executor = struct {
             .allocator = allocator,
             .root = try allocator.dupe(u8, root),
             .msr_bin = try allocator.dupe(u8, "zig-out/bin/msr"),
+            .vpty_bin = try allocator.dupe(u8, "zig-out/bin/vpty"),
             .link = null,
             .interactive_attached = false,
         };
@@ -36,49 +37,57 @@ pub const Executor = struct {
         if (self.link) |*link| link.deinit();
         self.allocator.free(self.root);
         self.allocator.free(self.msr_bin);
+        self.allocator.free(self.vpty_bin);
     }
 
     pub fn run(self: *Executor, provider: *policy.Provider, action: policy.ResolvedAction) !Result {
         return switch (action) {
             .quit => .detached,
             .detach => self.runDetach() catch |err| .{ .err = try std.fmt.allocPrint(self.allocator, "detach failed: {s}", .{@errorName(err)}) },
-            .logs => .{ .info = try self.allocator.dupe(u8, "logs pending transcript/runtime bridge") },
+            .logs => blk: {
+                var service = service_mod.WorkspaceService.init(self.allocator, self.msr_bin, self.vpty_bin);
+                const current = if (provider.current_session.len == 0) null else provider.current_session;
+                if (current == null) break :blk .{ .err = try self.allocator.dupe(u8, "no current session") };
+                const info = service.sessionInfo(provider, current.?) catch |err| {
+                    break :blk .{ .err = try std.fmt.allocPrint(self.allocator, "logs failed: {s}", .{@errorName(err)}) };
+                };
+                defer info.deinit(self.allocator);
+                break :blk .{ .info = try std.fmt.allocPrint(self.allocator, "transcript: {s}", .{info.transcript_path}) };
+            },
             .nav => |target| blk: {
                 defer self.allocator.free(target);
                 if (target.len == 0) break :blk .{ .err = try self.allocator.dupe(u8, "no target") };
-                self.attachCanonical(provider, target) catch |err| {
+                const attached_id = self.attachCanonical(provider, target) catch |err| {
                     break :blk .{ .err = try std.fmt.allocPrint(self.allocator, "attach failed: {s}", .{@errorName(err)}) };
                 };
+                defer self.allocator.free(attached_id);
                 self.interactive_attached = true;
-                break :blk .{ .attached = try self.allocator.dupe(u8, target) };
+                break :blk .{ .attached = try self.allocator.dupe(u8, attached_id) };
             },
             .attach => |target| blk: {
                 defer self.allocator.free(target);
                 if (target.len == 0) break :blk .{ .err = try self.allocator.dupe(u8, "attach target required") };
-                self.attachCanonical(provider, target) catch |err| {
+                const attached_id = self.attachCanonical(provider, target) catch |err| {
                     break :blk .{ .err = try std.fmt.allocPrint(self.allocator, "attach failed: {s}", .{@errorName(err)}) };
                 };
+                defer self.allocator.free(attached_id);
                 self.interactive_attached = true;
-                break :blk .{ .attached = try self.allocator.dupe(u8, target) };
+                break :blk .{ .attached = try self.allocator.dupe(u8, attached_id) };
             },
             .create => |name| blk: {
                 defer self.allocator.free(name);
                 const shell = std.posix.getenv("SHELL") orelse "/bin/sh";
-                var paths = session_primitives.createSession(self.allocator, self.msr_bin, provider, .{
-                    .id = name,
-                    .shell = shell,
-                }) catch |err| switch (err) {
+                var service = service_mod.WorkspaceService.init(self.allocator, self.msr_bin, self.vpty_bin);
+                const result = service.createAndAttach(provider, name, shell) catch |err| switch (err) {
                     error.SessionAlreadyExists => break :blk .{ .err = try self.allocator.dupe(u8, "session already exists") },
                     error.Empty, error.StartsWithSlash, error.EndsWithSlash, error.EmptySegment, error.DotSegment, error.InvalidChar => break :blk .{ .err = try std.fmt.allocPrint(self.allocator, "invalid id: {s}", .{@errorName(err)}) },
-                    else => return err,
+                    else => break :blk .{ .err = try std.fmt.allocPrint(self.allocator, "created but attach failed: {s}", .{@errorName(err)}) },
                 };
-                defer paths.deinit(self.allocator);
-
-                self.attachCanonicalWithRetry(provider, paths.id, 2000) catch |err| {
-                    break :blk .{ .err = try std.fmt.allocPrint(self.allocator, "created but attach failed: {s}", .{@errorName(err)}) };
-                };
+                if (self.link) |*link| link.deinit();
+                self.link = result.attached;
                 self.interactive_attached = true;
-                break :blk .{ .attached = try self.allocator.dupe(u8, paths.id) };
+                defer result.session.deinit(self.allocator);
+                break :blk .{ .attached = try self.allocator.dupe(u8, result.session.id) };
             },
         };
     }
@@ -88,7 +97,7 @@ pub const Executor = struct {
     }
 
     pub fn attachedDataFd(self: *Executor) ?std.posix.fd_t {
-        if (self.link) |*link| return link.dataPollFd();
+        if (self.link) |*link| return link.dataFd();
         return null;
     }
 
@@ -102,7 +111,7 @@ pub const Executor = struct {
 
     pub fn pumpAttachedOutput(self: *Executor, writer_fd: std.posix.fd_t) !bool {
         if (self.link) |*link| {
-            const result = try link.pumpDataToOutput(writer_fd);
+            const result = try link.pumpOutput(writer_fd);
             if (result.stream_lost) {
                 self.interactive_attached = false;
                 link.detach();
@@ -128,40 +137,18 @@ pub const Executor = struct {
     }
 
     fn attachCanonicalWithRetry(self: *Executor, provider: *policy.Provider, id: []const u8, timeout_ms: u64) !void {
-        const deadline = std.time.milliTimestamp() + @as(i64, @intCast(timeout_ms));
-        while (true) {
-            self.attachCanonical(provider, id) catch |err| {
-                if (std.time.milliTimestamp() >= deadline) return err;
-                switch (err) {
-                    error.ConnectFailed => {
-                        std.Thread.sleep(20 * std.time.ns_per_ms);
-                        continue;
-                    },
-                    else => return err,
-                }
-            };
-            return;
-        }
+        var service = service_mod.WorkspaceService.init(self.allocator, self.msr_bin, self.vpty_bin);
+        const attached = try service.attachWithRetry(provider, id, timeout_ms);
+        if (self.link) |*link| link.deinit();
+        self.link = attached;
     }
 
-    fn attachCanonical(self: *Executor, provider: *policy.Provider, id: []const u8) !void {
-        var paths = try session_primitives.pathsForId(self.allocator, provider, id);
-        defer paths.deinit(self.allocator);
-
+    fn attachCanonical(self: *Executor, provider: *policy.Provider, id: []const u8) ![]u8 {
+        var service = service_mod.WorkspaceService.init(self.allocator, self.msr_bin, self.vpty_bin);
+        const result = try service.attach(provider, id);
+        defer result.session.deinit(self.allocator);
         if (self.link) |*link| link.deinit();
-        self.link = null;
-
-        var link = session_link_mod.SessionLink.init(self.allocator);
-        errdefer link.deinit();
-        try link.attach(.{
-            .data_path = paths.data_path,
-            .control_path = if (pathExists(paths.control_path)) paths.control_path else null,
-        });
-        self.link = link;
+        self.link = result.attached;
+        return try self.allocator.dupe(u8, result.session.id);
     }
 };
-
-fn pathExists(path: []const u8) bool {
-    std.fs.accessAbsolute(path, .{}) catch return false;
-    return true;
-}

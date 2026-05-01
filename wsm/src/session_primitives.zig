@@ -12,7 +12,7 @@ pub const SessionPaths = struct {
     data_path: []u8,
     control_path: []u8,
 
-    pub fn deinit(self: *SessionPaths, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: SessionPaths, allocator: std.mem.Allocator) void {
         allocator.free(self.id);
         allocator.free(self.data_path);
         allocator.free(self.control_path);
@@ -22,6 +22,7 @@ pub const SessionPaths = struct {
 pub const CreateSpec = struct {
     id: []const u8,
     shell: []const u8,
+    vpty_bin: []const u8,
 };
 
 pub fn pathsForId(allocator: std.mem.Allocator, provider: *policy.Provider, id: []const u8) !SessionPaths {
@@ -55,6 +56,11 @@ pub fn createSession(allocator: std.mem.Allocator, msr_bin: []const u8, provider
 
     var argv = std.ArrayList([]const u8){};
     defer argv.deinit(allocator);
+    const log_path = try std.fmt.allocPrint(allocator, "{s}.typescript", .{paths.data_path[0 .. paths.data_path.len - 4]});
+    defer allocator.free(log_path);
+    const script_cmd = try std.fmt.allocPrint(allocator, "WSM_SESSION_ID={s} exec {s} -i", .{ spec.id, spec.shell });
+    defer allocator.free(script_cmd);
+
     try argv.appendSlice(allocator, &.{
         msr_bin,
         paths.control_path,
@@ -63,14 +69,20 @@ pub fn createSession(allocator: std.mem.Allocator, msr_bin: []const u8, provider
         msr_bin,
         paths.data_path,
         "--",
-        spec.shell,
-        "-i",
+        spec.vpty_bin,
+        "--",
+        "script",
+        "-q",
+        "-f",
+        "-c",
+        script_cmd,
+        log_path,
     });
 
     var child = std.process.Child.init(argv.items, allocator);
     child.stdin_behavior = .Ignore;
     child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Ignore;
+    child.stderr_behavior = .Inherit;
     try child.spawn();
     try waitSocketPathExists(paths.data_path, 2000);
     try waitSocketPathExists(paths.control_path, 2000);

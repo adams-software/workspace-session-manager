@@ -4,6 +4,7 @@ const bar_layout = @import("bar_layout.zig");
 const bar_render = @import("bar_render.zig");
 const policy = @import("policy.zig");
 const executor_mod = @import("executor.zig");
+const cli_main = @import("cli_main.zig");
 const enterRawMode = @import("ptyio_raw_mode").enterRawMode;
 const getTtySize = @import("ptyio_tty_size").getTtySize;
 
@@ -79,7 +80,7 @@ const App = struct {
     size: OuterSize,
     layout: bar_layout.Layout,
 
-    fn init(allocator: std.mem.Allocator, term: *TerminalState) !App {
+    fn init(allocator: std.mem.Allocator, term: *TerminalState, initial_mode: ?cli_main.Mode) !App {
         var bar_state = ui_state.State.init(allocator);
         errdefer bar_state.deinit();
 
@@ -94,7 +95,7 @@ const App = struct {
         const size = try currentOuterSize(term);
         const layout_state = bar_layout.compute(size.cols, size.rows, bar_state.mode);
 
-        return .{
+        var app: App = .{
             .should_exit = false,
             .allocator = allocator,
             .term = term,
@@ -105,6 +106,25 @@ const App = struct {
             .size = size,
             .layout = layout_state,
         };
+
+        if (initial_mode) |mode| {
+            switch (mode) {
+                .interactive_attach => |id| {
+                    const owned = try allocator.dupe(u8, id);
+                    defer allocator.free(owned);
+                    try app.handleAction(.{ .attach = owned });
+                },
+                .interactive_create_attach => |id| {
+                    const owned = try allocator.dupe(u8, id);
+                    defer allocator.free(owned);
+                    try app.handleAction(.{ .create = owned });
+                },
+                else => {},
+            }
+            _ = app.executor.pumpAttachedOutput(term.tty_fd) catch {};
+        }
+
+        return app;
     }
 
     fn deinit(self: *App) void {
@@ -124,11 +144,8 @@ const App = struct {
     }
 
     fn renderBody(self: *App) !void {
-        if (self.bar_state.mode == .passive) return;
-        var out = std.ArrayList(u8){};
-        defer out.deinit(self.allocator);
-        try out.appendSlice(self.allocator, "\x1b[H\x1b[2J");
-        try writeAll(self.term.tty_fd, out.items);
+        _ = self;
+        return;
     }
 
     fn renderBar(self: *App) !void {
@@ -283,13 +300,49 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
+    const argv = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, argv);
+    const args = if (argv.len > 1) argv[1..] else &.{};
+
+    const mode = try cli_main.parseMode(allocator, args);
+    defer mode.deinit(allocator);
+    const nested_session = std.posix.getenv("WSM_SESSION_ID");
+    if (nested_session != null) {
+        switch (mode) {
+            .interactive_attach, .interactive_create_attach => {
+                const msg = "wsm: nested interactive sessions are not supported, use detached create or run from outside the session\n";
+                try std.fs.File.stdout().writeAll(msg);
+                return;
+            },
+            else => {},
+        }
+    }
+
+    switch (mode) {
+        .help, .list, .inspect, .cleanup, .create_detached, .kill => {
+            const root = cli_main.resolveWorkspace(allocator, args) catch |err| {
+                if (err == error.MissingWorkspace) {
+                    try cli_main.printHelp(allocator, std.fs.File.stdout(), null, std.posix.getenv("WSM_SESSION_ID"));
+                    return;
+                }
+                return err;
+            };
+            defer allocator.free(root);
+            _ = try cli_main.runCommand(allocator, root, mode, std.fs.File.stdout());
+            return;
+        },
+        .interactive_attach, .interactive_create_attach => try runInteractive(allocator, mode),
+    }
+}
+
+fn runInteractive(allocator: std.mem.Allocator, mode: cli_main.Mode) !void {
     installSigwinchHandler();
 
     var term = try TerminalState.init();
     defer term.deinit();
     try writeAll(term.tty_fd, ENTER_ALT_SCREEN);
 
-    var app = try App.init(allocator, &term);
+    var app = try App.init(allocator, &term, mode);
     defer app.deinit();
     defer writeAll(term.tty_fd, EXIT_RESET) catch {};
     defer app.clearBar() catch {};
@@ -339,11 +392,18 @@ pub fn main() !void {
                 return Error.Unexpected;
             }
             if ((rev & (c.POLLHUP | c.POLLERR)) != 0) {
-                std.debug.print("wsm attached data HUP/ERR revents={x}\n", .{rev});
-                _ = try app.executor.pumpAttachedOutput(term.tty_fd);
+                const did_work = try app.executor.pumpAttachedOutput(term.tty_fd);
+                if (!app.executor.isInteractiveAttached() and !did_work) {
+                    app.should_exit = true;
+                    continue;
+                }
             }
             if ((rev & c.POLLIN) != 0) {
-                _ = try app.executor.pumpAttachedOutput(term.tty_fd);
+                const did_work = try app.executor.pumpAttachedOutput(term.tty_fd);
+                if (!app.executor.isInteractiveAttached() and !did_work) {
+                    app.should_exit = true;
+                    continue;
+                }
             }
         }
     }

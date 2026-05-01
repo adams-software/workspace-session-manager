@@ -1,5 +1,9 @@
 const std = @import("std");
 
+const c = @cImport({
+    @cInclude("signal.h");
+});
+
 pub const Signal = enum {
     term,
     int,
@@ -129,7 +133,16 @@ pub const HostRuntime = struct {
 
     pub fn sendSignal(self: *HostRuntime, sig: Signal) Error!Signal {
         switch (self.state_snapshot.child_phase) {
-            .starting, .running => return sig,
+            .starting, .running => {
+                const pid = self.state_snapshot.child_pid orelse return Error.InvalidState;
+                const os_sig: u8 = @intCast(switch (sig) {
+                    .term => c.SIGTERM,
+                    .int => c.SIGINT,
+                    .kill => c.SIGKILL,
+                });
+                std.posix.kill(pid, os_sig) catch return Error.InvalidState;
+                return sig;
+            },
             .exited => return Error.InvalidState,
         }
     }

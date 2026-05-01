@@ -18,6 +18,11 @@ pub const PumpResult = struct {
     did_work: bool,
 };
 
+pub const Signal = enum {
+    term,
+    kill,
+};
+
 pub const SessionLink = struct {
     allocator: std.mem.Allocator,
     pump: DuplexLink,
@@ -89,20 +94,33 @@ pub const SessionLink = struct {
         const fd = self.control_fd orelse return;
         var buf: [64]u8 = undefined;
         const msg = try std.fmt.bufPrint(&buf, "resize {d} {d}\n", .{ cols, rows });
-        var sent: usize = 0;
-        while (sent < msg.len) {
-            const n = c.write(fd, msg.ptr + sent, msg.len - sent);
-            if (n > 0) {
-                sent += @intCast(n);
-                continue;
-            }
-            if (n == 0) return error.WriteFailed;
-            const e = std.posix.errno(-1);
-            if (e == .INTR) continue;
-            return error.WriteFailed;
-        }
+        try writeControl(fd, msg);
+    }
+
+    pub fn signal(self: *SessionLink, sig: Signal) !void {
+        const fd = self.control_fd orelse return error.NoControl;
+        const msg = switch (sig) {
+            .term => "signal term\n",
+            .kill => "signal kill\n",
+        };
+        try writeControl(fd, msg);
     }
 };
+
+fn writeControl(fd: c_int, msg: []const u8) !void {
+    var sent: usize = 0;
+    while (sent < msg.len) {
+        const n = c.write(fd, msg.ptr + sent, msg.len - sent);
+        if (n > 0) {
+            sent += @intCast(n);
+            continue;
+        }
+        if (n == 0) return error.WriteFailed;
+        const e = std.posix.errno(-1);
+        if (e == .INTR) continue;
+        return error.WriteFailed;
+    }
+}
 
 fn connectUnix(path: []const u8) !c_int {
     var addr: c.struct_sockaddr_un = undefined;

@@ -171,6 +171,13 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(attach_exe);
 
+    const argv_parse_mod = b.addModule("argv_parse", .{
+        .root_source_file = b.path("shared/src/cli/argv_parse.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+
     const wsm_root = b.createModule(.{
         .root_source_file = b.path("wsm/src/main.zig"),
         .target = target,
@@ -183,6 +190,7 @@ pub fn build(b: *std.Build) void {
     wsm_root.addImport("ptyio_raw_mode", raw_mode_mod);
     wsm_root.addImport("ptyio_tty_size", tty_size_mod);
     wsm_root.addImport("ctlwire", ctlwire_mod);
+    wsm_root.addImport("argv_parse", argv_parse_mod);
     const wsm_exe = b.addExecutable(.{
         .name = "wsm",
         .root_module = wsm_root,
