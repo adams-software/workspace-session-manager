@@ -1,3 +1,4 @@
+const alt_control = @import("alt_control.zig");
 const pty_host = @import("host");
 const PtyChildHost = pty_host.PtyChildHost;
 const SpawnOptions = pty_host.SpawnOptions;
@@ -6,6 +7,7 @@ const ByteQueue = @import("byte_queue").ByteQueue;
 const fd_stream = @import("fd_stream");
 const getTtySize = @import("ptyio_tty_size").getTtySize;
 const argv_parse = @import("argv_parse");
+const ctlwire = @import("ctlwire");
 const std = @import("std");
 
 const c = @cImport({
@@ -408,6 +410,30 @@ fn dropControlClient(server: *ControlServer) void {
     server.rx.clear();
 }
 
+fn writeCtlLine(fd: c_int, line: []const u8) !void {
+    var file = std.fs.File{ .handle = fd };
+    var writer = file.writer(&.{});
+    try writer.interface.writeAll(line);
+}
+
+fn writeCtlOk(fd: c_int) !void {
+    var file = std.fs.File{ .handle = fd };
+    var writer = file.writer(&.{});
+    try ctlwire.message.writeOk(&writer.interface);
+}
+
+fn writeCtlOkPayload(fd: c_int, payload: []const u8) !void {
+    var file = std.fs.File{ .handle = fd };
+    var writer = file.writer(&.{});
+    try ctlwire.message.writeOkPayload(&writer.interface, payload);
+}
+
+fn writeCtlErr(fd: c_int, kind: []const u8) !void {
+    var file = std.fs.File{ .handle = fd };
+    var writer = file.writer(&.{});
+    try ctlwire.message.writeErr(&writer.interface, .{ .kind = kind });
+}
+
 fn handleControlServer(server: *ControlServer, active: *ActiveSide, should_exit: *bool, term: *TerminalState, cfg: Config, primary: *SideRuntime, alternate: *SideRuntime) !void {
     if (server.client_fd == null) {
         const fd = c.accept(server.listener_fd, null, null);
@@ -431,49 +457,56 @@ fn handleControlServer(server: *ControlServer, active: *ActiveSide, should_exit:
         return;
     }
     try server.rx.append(server.allocator, buf[0..@intCast(rc)]);
-    while (std.mem.indexOfScalar(u8, server.rx.readableSlice(), '\n')) |nl| {
-        const line_owned = try server.allocator.dupe(u8, std.mem.trim(u8, server.rx.readableSlice()[0..nl], " \r\n"));
+    while (true) {
+        const readable = server.rx.readableSlice();
+        const line_end = std.mem.indexOfAny(u8, readable, "\r\n") orelse break;
+        const line_owned = try server.allocator.dupe(u8, std.mem.trim(u8, readable[0..line_end], " \r\n"));
         defer server.allocator.free(line_owned);
-        server.rx.discard(nl + 1);
+        var discard_len = line_end + 1;
+        while (discard_len < readable.len and (readable[discard_len] == '\r' or readable[discard_len] == '\n')) : (discard_len += 1) {}
+        server.rx.discard(discard_len);
         const line = line_owned;
-        if (std.mem.eql(u8, line, "help")) {
-            try writeAll(client_fd, "ok commands=help,state,switch,cycle,exit\n");
-            continue;
-        }
-        if (std.mem.eql(u8, line, "state")) {
-            const msg = try std.fmt.allocPrint(server.allocator, "ok active={d} screens=2 screen0={s} screen1={s}\n", .{ active.*.index(), stateName(primary), stateName(alternate) });
-            defer server.allocator.free(msg);
-            try writeAll(client_fd, msg);
-            continue;
-        }
-        if (std.mem.eql(u8, line, "cycle")) {
-            _ = try activateSide(term, cfg, active.*.toggled(), active, primary, alternate);
-            const msg = try std.fmt.allocPrint(server.allocator, "ok active={d} screens=2\n", .{active.*.index()});
-            defer server.allocator.free(msg);
-            try writeAll(client_fd, msg);
-            continue;
-        }
-        if (std.mem.eql(u8, line, "exit")) {
-            should_exit.* = true;
-            try writeAll(client_fd, "ok\n");
-            continue;
-        }
-        if (std.mem.startsWith(u8, line, "switch ")) {
-            const idx = std.fmt.parseInt(usize, line[7..], 10) catch {
-                try writeAll(client_fd, "err invalid_args\n");
+        switch (alt_control.parse(line)) {
+            .err => |err| {
+                try writeCtlErr(client_fd, @tagName(err));
                 continue;
-            };
-            const target = ActiveSide.fromIndex(idx) orelse {
-                try writeAll(client_fd, "err invalid_args\n");
-                continue;
-            };
-            _ = try activateSide(term, cfg, target, active, primary, alternate);
-            const msg = try std.fmt.allocPrint(server.allocator, "ok active={d} screens=2\n", .{active.*.index()});
-            defer server.allocator.free(msg);
-            try writeAll(client_fd, msg);
-            continue;
+            },
+            .command => |cmd| switch (cmd) {
+                .help => {
+                    try writeCtlOkPayload(client_fd, "commands=help,state,switch,cycle,exit");
+                    continue;
+                },
+                .state => {
+                    const msg = try std.fmt.allocPrint(server.allocator, "active={d} screens=2 screen0={s} screen1={s}", .{ active.*.index(), stateName(primary), stateName(alternate) });
+                    defer server.allocator.free(msg);
+                    try writeCtlOkPayload(client_fd, msg);
+                    continue;
+                },
+                .cycle => {
+                    _ = try activateSide(term, cfg, active.*.toggled(), active, primary, alternate);
+                    const msg = try std.fmt.allocPrint(server.allocator, "active={d} screens=2", .{active.*.index()});
+                    defer server.allocator.free(msg);
+                    try writeCtlOkPayload(client_fd, msg);
+                    continue;
+                },
+                .exit => {
+                    should_exit.* = true;
+                    try writeCtlOk(client_fd);
+                    continue;
+                },
+                .switch_to => |idx| {
+                    const target = ActiveSide.fromIndex(idx) orelse {
+                        try writeCtlErr(client_fd, "invalid_args");
+                        continue;
+                    };
+                    _ = try activateSide(term, cfg, target, active, primary, alternate);
+                    const msg = try std.fmt.allocPrint(server.allocator, "active={d} screens=2", .{active.*.index()});
+                    defer server.allocator.free(msg);
+                    try writeCtlOkPayload(client_fd, msg);
+                    continue;
+                },
+            },
         }
-        try writeAll(client_fd, "err invalid_command\n");
     }
 }
 

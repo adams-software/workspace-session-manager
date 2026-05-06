@@ -156,7 +156,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(exe);
 
     const attach_root = b.createModule(.{
-        .root_source_file = b.path("msr/src/attach_raw.zig"),
+        .root_source_file = b.path("attach/src/main.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -166,7 +166,7 @@ pub fn build(b: *std.Build) void {
     attach_root.addImport("ptyio_raw_mode", raw_mode_mod);
 
     const attach_exe = b.addExecutable(.{
-        .name = "msr-attach",
+        .name = "attach",
         .root_module = attach_root,
     });
     b.installArtifact(attach_exe);
@@ -395,6 +395,7 @@ pub fn build(b: *std.Build) void {
     alt_root.addImport("fd_stream", fd_stream_mod);
     alt_root.addImport("ptyio_tty_size", ptyio_tty_size_mod);
     alt_root.addImport("argv_parse", argv_parse_mod);
+    alt_root.addImport("ctlwire", ctlwire_mod);
 
     const alt_exe = b.addExecutable(.{
         .name = "alt",

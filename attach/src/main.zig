@@ -17,9 +17,9 @@ fn out(comptime fmt: []const u8, args: anytype) void {
 fn usage() void {
     out(
         "NAME\n" ++
-            "  msr-attach - raw terminal attacher for msr host\n\n" ++
+            "  attach - raw terminal attacher for session sockets\n\n" ++
             "USAGE\n" ++
-            "  msr-attach <socket-path>\n",
+            "  attach <socket-path>\n",
         .{},
     );
 }
@@ -148,7 +148,7 @@ pub fn main() !void {
     }
 
     const code = runAttach(allocator, argv[1]) catch |e| {
-        std.debug.print("msr-attach: {s}\n", .{@errorName(e)});
+        std.debug.print("attach: {s}\n", .{@errorName(e)});
         return std.process.exit(1);
     };
     std.process.exit(code);

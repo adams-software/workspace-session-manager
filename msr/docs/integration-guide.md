@@ -80,7 +80,7 @@ The socket path is intentionally minimal:
 This path is for terminal attachment only.
 
 See also:
-- `../src/attach_raw.zig`
+- `../../attach/src/main.zig`
 - `../src/server.zig`
 
 ## Host control integration
@@ -156,7 +156,7 @@ Do not assume a clean request/response stream with no interruptions.
 
 ## What the attach client is for
 
-`msr-attach` and `msr/src/attach_raw.zig` demonstrate the raw attach pattern.
+`attach` and `attach/src/main.zig` demonstrate the raw attach pattern.
 
 This path is appropriate when you want a real terminal-facing client that:
 
@@ -281,7 +281,7 @@ Avoid these patterns:
 If you are integrating `msr` into another library or app:
 
 1. start with `host_client.zig` for control
-2. start with `attach_raw.zig` as the model for terminal attach
+2. start with `attach/src/main.zig` as the model for terminal attach
 3. keep transports separate
 4. only add higher-level wrappers after the split feels correct in real use
 
@@ -291,4 +291,4 @@ That preserves the current architecture:
 - `host_control` owns typed control commands/results
 - `host_repl` is the stdin/stdout adapter
 - `host_client` is the transport-agnostic client-side control layer
-- `attach_raw` is the raw child-terminal attach model
+- `attach` is the raw child-terminal attach model
