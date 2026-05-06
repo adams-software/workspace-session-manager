@@ -4,6 +4,7 @@ pub const Option = struct {
     spelling: []const u8,
     name: []const u8,
     value: ?[]const u8,
+    arg_index: usize,
 };
 
 pub const ParsedArgv = struct {
@@ -43,6 +44,11 @@ pub fn countOption(parsed: ParsedArgv, aliases: []const []const u8) usize {
     return n;
 }
 
+pub fn findOptionValue(parsed: ParsedArgv, aliases: []const []const u8) ?[]const u8 {
+    const opt = findOption(parsed, aliases) orelse return null;
+    return opt.value;
+}
+
 pub fn parseArgv(allocator: std.mem.Allocator, argv: []const []const u8) Error!ParsedArgv {
     var options = std.ArrayList(Option){};
     defer options.deinit(allocator);
@@ -78,6 +84,7 @@ pub fn parseArgv(allocator: std.mem.Allocator, argv: []const []const u8) Error!P
                     .spelling = tok,
                     .name = tok[2..eq],
                     .value = tok[(eq + 1)..],
+                    .arg_index = i,
                 });
                 i += 1;
                 continue;
@@ -86,6 +93,7 @@ pub fn parseArgv(allocator: std.mem.Allocator, argv: []const []const u8) Error!P
                 .spelling = tok,
                 .name = tok[2..],
                 .value = null,
+                .arg_index = i,
             });
             i += 1;
             continue;
@@ -95,6 +103,7 @@ pub fn parseArgv(allocator: std.mem.Allocator, argv: []const []const u8) Error!P
                 .spelling = tok,
                 .name = tok[1..],
                 .value = null,
+                .arg_index = i,
             });
             i += 1;
             continue;
@@ -117,6 +126,7 @@ pub fn parseArgv(allocator: std.mem.Allocator, argv: []const []const u8) Error!P
                     .spelling = tok,
                     .name = tok[2..eq],
                     .value = tok[(eq + 1)..],
+                    .arg_index = i,
                 });
                 i += 1;
                 continue;
@@ -126,6 +136,7 @@ pub fn parseArgv(allocator: std.mem.Allocator, argv: []const []const u8) Error!P
                 .spelling = tok,
                 .name = tok[2..],
                 .value = null,
+                .arg_index = i,
             });
             i += 1;
             continue;
@@ -137,6 +148,7 @@ pub fn parseArgv(allocator: std.mem.Allocator, argv: []const []const u8) Error!P
                     .spelling = tok,
                     .name = tok[1..],
                     .value = null,
+                    .arg_index = i,
                 });
                 i += 1;
                 continue;
@@ -166,6 +178,7 @@ test "argv_parse handles options positionals and literal tail" {
     try std.testing.expectEqual(@as(usize, 1), parsed.options.len);
     try std.testing.expectEqualStrings("a", parsed.options[0].name);
     try std.testing.expect(parsed.options[0].value == null);
+    try std.testing.expectEqual(@as(usize, 1), parsed.options[0].arg_index);
     try std.testing.expectEqual(@as(usize, 1), parsed.positionals.len);
     try std.testing.expectEqualStrings("/tmp/x", parsed.positionals[0]);
     try std.testing.expect(parsed.literal_tail != null);
@@ -182,6 +195,7 @@ test "argv_parse handles long option with equals" {
     try std.testing.expectEqual(@as(usize, 1), parsed.options.len);
     try std.testing.expectEqualStrings("session", parsed.options[0].name);
     try std.testing.expectEqualStrings("/tmp/x", parsed.options[0].value.?);
+    try std.testing.expectEqual(@as(usize, 1), parsed.options[0].arg_index);
 }
 
 test "argv_parse treats bare long flag before positional as flag not valued option" {
@@ -194,6 +208,7 @@ test "argv_parse treats bare long flag before positional as flag not valued opti
     try std.testing.expectEqual(@as(usize, 1), parsed.options.len);
     try std.testing.expectEqualStrings("attach", parsed.options[0].name);
     try std.testing.expect(parsed.options[0].value == null);
+    try std.testing.expect(findOptionValue(parsed, &.{ "attach" }) == null);
     try std.testing.expectEqual(@as(usize, 1), parsed.positionals.len);
     try std.testing.expectEqualStrings("/tmp/x", parsed.positionals[0]);
 }

@@ -95,8 +95,8 @@ pub fn resolveWorkspace(allocator: std.mem.Allocator, argv: []const []const u8) 
     defer allocator.free(parsed.positionals);
     defer if (parsed.literal_tail) |tail| allocator.free(tail);
 
-    if (argv_parse.findOption(parsed, &.{ "workspace" })) |opt| {
-        if (opt.value) |v| return try std.fs.realpathAlloc(allocator, v);
+    if (argv_parse.findOptionValue(parsed, &.{ "workspace" })) |v| {
+        return try std.fs.realpathAlloc(allocator, v);
     }
     const env_root = std.posix.getenv("WSM_ROOT") orelse return error.MissingWorkspace;
     return try std.fs.realpathAlloc(allocator, env_root);

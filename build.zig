@@ -394,6 +394,7 @@ pub fn build(b: *std.Build) void {
     alt_root.addImport("byte_queue", byte_queue_mod);
     alt_root.addImport("fd_stream", fd_stream_mod);
     alt_root.addImport("ptyio_tty_size", ptyio_tty_size_mod);
+    alt_root.addImport("argv_parse", argv_parse_mod);
 
     const alt_exe = b.addExecutable(.{
         .name = "alt",
