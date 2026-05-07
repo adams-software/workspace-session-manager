@@ -29,6 +29,12 @@ pub const CreateSpec = struct {
     scroll_bin: []const u8,
 };
 
+pub const CreateCommandSpec = struct {
+    id: []const u8,
+    vpty_bin: []const u8,
+    argv: []const []const u8,
+};
+
 pub fn pathsForId(allocator: std.mem.Allocator, provider: *policy.Provider, id: []const u8) !SessionPaths {
     try provider.validateCreateId(id);
     const data_path = try provider.socketPathForId(id);
@@ -109,6 +115,43 @@ pub fn createSession(allocator: std.mem.Allocator, msr_bin: []const u8, provider
     try waitSocketPathExists(paths.data_path, 2000);
     try waitSocketPathExists(paths.control_path, 2000);
     _ = waitSocketPathExists(paths.alt_path, 2000) catch null;
+
+    return paths;
+}
+
+pub fn createCommandSession(allocator: std.mem.Allocator, msr_bin: []const u8, provider: *policy.Provider, spec: CreateCommandSpec) !SessionPaths {
+    var paths = try pathsForId(allocator, provider, spec.id);
+    errdefer paths.deinit(allocator);
+
+    if (pathExists(paths.data_path) or pathExists(paths.control_path)) return error.SessionAlreadyExists;
+
+    if (std.fs.path.dirname(paths.data_path)) |dir| std.fs.makeDirAbsolute(dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+
+    var argv = std.ArrayList([]const u8){};
+    defer argv.deinit(allocator);
+    try argv.appendSlice(allocator, &.{
+        msr_bin,
+        paths.control_path,
+        "--headless",
+        "--",
+        msr_bin,
+        paths.data_path,
+        "--",
+        spec.vpty_bin,
+        "--",
+    });
+    try argv.appendSlice(allocator, spec.argv);
+
+    var child = std.process.Child.init(argv.items, allocator);
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Ignore;
+    child.stderr_behavior = .Inherit;
+    try child.spawn();
+    try waitSocketPathExists(paths.data_path, 2000);
+    try waitSocketPathExists(paths.control_path, 2000);
 
     return paths;
 }

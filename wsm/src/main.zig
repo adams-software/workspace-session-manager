@@ -130,7 +130,17 @@ const App = struct {
                 },
                 else => {},
             }
-            _ = app.executor.pumpAttachedOutput(term.tty_fd) catch {};
+            const initial_pump = app.executor.pumpAttachedOutput(&app.provider, term.tty_fd) catch null;
+            if (initial_pump) |pump_result| switch (pump_result) {
+                .reattached => |id| {
+                    defer allocator.free(id);
+                    try app.provider.setCurrentSession(id);
+                    _ = app.bar_state.setExternalInfo("attached");
+                    _ = app.executor.forwardResize(app.layout.outer_cols, app.layout.main_rows) catch {};
+                    try app.render();
+                },
+                else => {},
+            };
             if (!app.executor.isInteractiveAttached()) {
                 app.should_exit = true;
             }
@@ -257,7 +267,7 @@ const App = struct {
                 defer self.allocator.free(msg);
                 _ = self.bar_state.setExternalError(msg);
             },
-            .attached => |id| {
+            .attached, .reattached => |id| {
                 defer self.allocator.free(id);
                 try self.provider.setCurrentSession(id);
                 _ = self.bar_state.setExternalInfo("attached");
@@ -267,6 +277,28 @@ const App = struct {
                 try self.provider.setCurrentSession(null);
                 _ = self.bar_state.setExternalInfo("detached");
             },
+        }
+    }
+
+    fn handlePumpResult(self: *App, pump_result: executor_mod.Result) !void {
+        switch (pump_result) {
+            .reattached => |id| {
+                defer self.allocator.free(id);
+                try self.provider.setCurrentSession(id);
+                _ = self.bar_state.setExternalInfo("attached");
+                _ = self.executor.forwardResize(self.layout.outer_cols, self.layout.main_rows) catch {};
+                try self.refreshPolicy();
+                try self.render();
+            },
+            .detached => {
+                if (!self.executor.isInteractiveAttached()) self.should_exit = true;
+            },
+            .info => |msg| {
+                defer self.allocator.free(msg);
+                debugLog("wsm pump info len={d} attached={}\n", .{ msg.len, self.executor.isInteractiveAttached() });
+                if (!self.executor.isInteractiveAttached() and msg.len == 0) self.should_exit = true;
+            },
+            else => {},
         }
     }
 };
@@ -405,20 +437,10 @@ fn runInteractive(allocator: std.mem.Allocator, mode: cli_main.Mode) !void {
                 return Error.Unexpected;
             }
             if ((rev & (c.POLLHUP | c.POLLERR)) != 0) {
-                const did_work = try app.executor.pumpAttachedOutput(term.tty_fd);
-                debugLog("wsm pump after hup/err did_work={} attached={}\n", .{ did_work, app.executor.isInteractiveAttached() });
-                if (!app.executor.isInteractiveAttached() and !did_work) {
-                    app.should_exit = true;
-                    continue;
-                }
+                try app.handlePumpResult(try app.executor.pumpAttachedOutput(&app.provider, term.tty_fd));
             }
             if ((rev & c.POLLIN) != 0) {
-                const did_work = try app.executor.pumpAttachedOutput(term.tty_fd);
-                debugLog("wsm pump after pollin did_work={} attached={}\n", .{ did_work, app.executor.isInteractiveAttached() });
-                if (!app.executor.isInteractiveAttached() and !did_work) {
-                    app.should_exit = true;
-                    continue;
-                }
+                try app.handlePumpResult(try app.executor.pumpAttachedOutput(&app.provider, term.tty_fd));
             }
         }
     }

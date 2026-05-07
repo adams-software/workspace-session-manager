@@ -163,8 +163,32 @@ pub const WorkspaceService = struct {
         };
     }
 
+    pub fn createCommand(self: *WorkspaceService, provider: *policy.Provider, id: []const u8, argv: []const []const u8) !SessionRef {
+        var paths = try session_primitives.createCommandSession(self.allocator, self.msr_bin, provider, .{
+            .id = id,
+            .vpty_bin = self.vpty_bin,
+            .argv = argv,
+        });
+        defer paths.deinit(self.allocator);
+
+        return .{
+            .id = try self.allocator.dupe(u8, paths.id),
+            .paths = try session_primitives.pathsForId(self.allocator, provider, paths.id),
+        };
+    }
+
     pub fn createAndAttach(self: *WorkspaceService, provider: *policy.Provider, id: []const u8, shell: []const u8) !CreateAttachResult {
         const session = try self.create(provider, id, shell);
+        errdefer session.deinit(self.allocator);
+        const attached = try self.attachWithRetry(provider, session.id, 2000);
+        return .{
+            .session = session,
+            .attached = attached,
+        };
+    }
+
+    pub fn createCommandAndAttach(self: *WorkspaceService, provider: *policy.Provider, id: []const u8, argv: []const []const u8) !CreateAttachResult {
+        const session = try self.createCommand(provider, id, argv);
         errdefer session.deinit(self.allocator);
         const attached = try self.attachWithRetry(provider, session.id, 2000);
         return .{

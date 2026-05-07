@@ -6,6 +6,19 @@ pub const Error = error{
     AmbiguousTarget,
 };
 
+pub fn scrollSessionId(allocator: std.mem.Allocator, base_id: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{s}.scroll", .{base_id});
+}
+
+pub fn scrollBaseId(allocator: std.mem.Allocator, id: []const u8) !?[]u8 {
+    if (!std.mem.endsWith(u8, id, ".scroll")) return null;
+    return try allocator.dupe(u8, id[0 .. id.len - ".scroll".len]);
+}
+
+pub fn isScrollSession(id: []const u8) bool {
+    return std.mem.endsWith(u8, id, ".scroll");
+}
+
 pub const ResolvedAction = union(enum) {
     quit,
     detach,
