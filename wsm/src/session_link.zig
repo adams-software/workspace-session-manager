@@ -11,6 +11,7 @@ const c = @cImport({
 pub const AttachSpec = struct {
     data_path: []const u8,
     control_path: ?[]const u8,
+    alt_path: ?[]const u8,
 };
 
 pub const PumpResult = struct {
@@ -28,6 +29,7 @@ pub const SessionLink = struct {
     pump: DuplexLink,
     data_fd: ?c_int,
     control_fd: ?c_int,
+    alt_fd: ?c_int,
 
     pub fn init(allocator: std.mem.Allocator) SessionLink {
         return .{
@@ -35,6 +37,7 @@ pub const SessionLink = struct {
             .pump = DuplexLink.init(allocator),
             .data_fd = null,
             .control_fd = null,
+            .alt_fd = null,
         };
     }
 
@@ -50,16 +53,22 @@ pub const SessionLink = struct {
         errdefer _ = c.close(data_fd);
 
         var control_fd: ?c_int = null;
+        var alt_fd: ?c_int = null;
         errdefer {
             if (control_fd) |fd| _ = c.close(fd);
+            if (alt_fd) |fd| _ = c.close(fd);
         }
 
         if (spec.control_path) |control_path| {
-            control_fd = try connectUnix(control_path);
+            control_fd = connectUnix(control_path) catch null;
+        }
+        if (spec.alt_path) |alt_path| {
+            alt_fd = connectUnix(alt_path) catch null;
         }
 
         self.data_fd = data_fd;
         self.control_fd = control_fd;
+        self.alt_fd = alt_fd;
         self.pump.clear();
     }
 
@@ -71,6 +80,10 @@ pub const SessionLink = struct {
         if (self.control_fd) |fd| {
             _ = c.close(fd);
             self.control_fd = null;
+        }
+        if (self.alt_fd) |fd| {
+            _ = c.close(fd);
+            self.alt_fd = null;
         }
         self.pump.clear();
     }
@@ -104,6 +117,11 @@ pub const SessionLink = struct {
             .kill => "signal kill\n",
         };
         try writeControl(fd, msg);
+    }
+
+    pub fn altCycle(self: *SessionLink) !void {
+        const fd = self.alt_fd orelse return error.NoControl;
+        try writeControl(fd, "cycle\n");
     }
 };
 

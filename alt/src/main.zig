@@ -192,7 +192,7 @@ fn findRawOptionValue(args: []const []const u8, aliases: []const []const u8) ?[]
 const Config = struct {
     allocator: Allocator,
     control_path: []const u8,
-    alternate_path: []const u8,
+    alternate_argv: []const []const u8,
     signal_1: ?c_int,
     signal_2: ?c_int,
     primary_argv: []const []const u8,
@@ -208,6 +208,19 @@ const Config = struct {
 
         const resolved_control = findRawOptionValue(args, &.{ "control" }) orelse return Error.MissingControlPath;
         const resolved_alternate = findRawOptionValue(args, &.{ "run" }) orelse return Error.MissingAlternateCommand;
+
+        var alternate_args = std.ArrayList([]const u8){};
+        defer {
+            for (alternate_args.items) |arg| allocator.free(arg);
+            alternate_args.deinit(allocator);
+        }
+        try alternate_args.append(allocator, try allocator.dupe(u8, resolved_alternate));
+        for (parsed.options) |opt| {
+            if (std.mem.eql(u8, opt.name, "run-arg")) {
+                const value = opt.value orelse return Error.InvalidArgs;
+                try alternate_args.append(allocator, try allocator.dupe(u8, value));
+            }
+        }
 
         const signal_1 = if (findRawOptionValue(args, &.{ "signal-1" })) |value|
             parseSignalSpec(value) orelse return Error.InvalidArgs
@@ -226,7 +239,7 @@ const Config = struct {
         return .{
             .allocator = allocator,
             .control_path = try allocator.dupe(u8, resolved_control),
-            .alternate_path = try allocator.dupe(u8, resolved_alternate),
+            .alternate_argv = try alternate_args.toOwnedSlice(allocator),
             .signal_1 = signal_1,
             .signal_2 = signal_2,
             .primary_argv = primary_copy,
@@ -235,7 +248,8 @@ const Config = struct {
 
     fn deinit(self: *Config) void {
         self.allocator.free(self.control_path);
-        self.allocator.free(self.alternate_path);
+        for (self.alternate_argv) |arg| self.allocator.free(arg);
+        self.allocator.free(self.alternate_argv);
         for (self.primary_argv) |arg| self.allocator.free(arg);
         self.allocator.free(self.primary_argv);
     }
@@ -307,7 +321,7 @@ fn writeAll(fd: c_int, bytes: []const u8) !void {
 
 fn usage() void {
     std.fs.File.stderr().writeAll(
-        "Usage: alt --control <path> --run <path> [--signal-1 <sig>] [--signal-2 <sig>] -- <primary-command...>\n\n" ++
+        "Usage: alt --control <path> --run <path> [--run-arg <arg> ...] [--signal-1 <sig>] [--signal-2 <sig>] -- <primary-command...>\n\n" ++
         "Control commands: help, state, switch <index>, cycle, exit\n",
     ) catch {};
 }
@@ -349,7 +363,8 @@ fn activateSide(term: *TerminalState, cfg: Config, next: ActiveSide, active: *Ac
     try maybeSignalSwitchAway(previous_side, signalForSide(active.*, cfg));
     previous_side.output_tx.clear();
     try next_side.ensureLive(term.tty_fd);
-    try next_side.syncActivation(term.tty_fd);
+    try next_side.captureDesiredSize(term.tty_fd);
+    try syncSideWindowSize(term.tty_fd, next_side);
     try emitSwitchBoundaryReset(term.tty_fd);
     active.* = next;
     next_side.output_tx.clear();
@@ -359,14 +374,12 @@ fn activateSide(term: *TerminalState, cfg: Config, next: ActiveSide, active: *Ac
 fn refreshLoopState(term: *TerminalState, cfg: Config, active: *ActiveSide, primary: *SideRuntime, alternate: *SideRuntime) !bool {
     refreshSide(primary) catch |err| switch (err) { Error.ChildExited => {}, else => return err };
     refreshSide(alternate) catch |err| switch (err) { Error.ChildExited => {}, else => return err };
-    const active_running = activeSidePtr(active.*, primary, alternate).isRunning();
-    if (active_running) return false;
-    const fallback = active.*.toggled();
-    if (activeSidePtr(fallback, primary, alternate).isRunning()) {
-        _ = try activateSide(term, cfg, fallback, active, primary, alternate);
+    if (!primary.isRunning()) return true;
+    if (active.* == .alternate and !alternate.isRunning()) {
+        _ = try activateSide(term, cfg, .primary, active, primary, alternate);
         return false;
     }
-    return true;
+    return false;
 }
 
 fn createListener(path: []const u8) !c_int {
@@ -588,8 +601,7 @@ pub fn main() !void {
     try primary.session.start();
     try setNonBlockingIfPresent(primary.session.masterFd());
 
-    const alternate_argv = [_][]const u8{cfg.alternate_path};
-    var alternate = try SideRuntime.init(.{ .allocator = allocator, .spawn = .{ .argv = &alternate_argv, .cols = size.cols, .rows = size.rows } });
+    var alternate = try SideRuntime.init(.{ .allocator = allocator, .spawn = .{ .argv = cfg.alternate_argv, .cols = size.cols, .rows = size.rows } });
     alternate.desired_size = .{ .cols = size.cols, .rows = size.rows };
     defer alternate.deinit(allocator);
 

@@ -31,13 +31,7 @@ Open the interactive menu:
 wsm menu
 ```
 
-The menu hotkey uses the same key-spec format as `alt`. The default is `ctrl-g`.
-You can override it with `--menu-key <spec>` or `WSM_MENU_KEY=<spec>`.
-
-```bash
-wsm --menu-key ctrl-g create -a api/dev -- bash
-WSM_MENU_KEY=ctrl-g wsm create -a api/dev -- bash
-```
+The menu path is still evolving and may be revised as `alt` and control-socket conventions settle.
 
 `wsm` now expects an explicit workspace root via `WSM_ROOT` or `--root`.
 It should not silently treat the current directory as the workspace root.

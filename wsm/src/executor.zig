@@ -2,6 +2,15 @@ const std = @import("std");
 const policy = @import("policy.zig");
 const service_mod = @import("service.zig");
 
+fn debugEnabled() bool {
+    return std.posix.getenv("WSM_DEBUG") != null;
+}
+
+fn debugLog(comptime fmt: []const u8, args: anytype) void {
+    if (!debugEnabled()) return;
+    std.debug.print(fmt, args);
+}
+
 pub const Result = union(enum) {
     info: []const u8,
     err: []const u8,
@@ -19,6 +28,8 @@ pub const Executor = struct {
     root: []const u8,
     msr_bin: []const u8,
     vpty_bin: []const u8,
+    alt_bin: []const u8,
+    logs_viewer_bin: []const u8,
     link: ?service_mod.AttachedSession,
     interactive_attached: bool,
 
@@ -28,6 +39,8 @@ pub const Executor = struct {
             .root = try allocator.dupe(u8, root),
             .msr_bin = try allocator.dupe(u8, "zig-out/bin/msr"),
             .vpty_bin = try allocator.dupe(u8, "zig-out/bin/vpty"),
+            .alt_bin = try allocator.dupe(u8, "zig-out/bin/alt"),
+            .logs_viewer_bin = try allocator.dupe(u8, "wsm/scripts/wsm_logs_viewer"),
             .link = null,
             .interactive_attached = false,
         };
@@ -38,6 +51,8 @@ pub const Executor = struct {
         self.allocator.free(self.root);
         self.allocator.free(self.msr_bin);
         self.allocator.free(self.vpty_bin);
+        self.allocator.free(self.alt_bin);
+        self.allocator.free(self.logs_viewer_bin);
     }
 
     pub fn run(self: *Executor, provider: *policy.Provider, action: policy.ResolvedAction) !Result {
@@ -45,14 +60,13 @@ pub const Executor = struct {
             .quit => .detached,
             .detach => self.runDetach() catch |err| .{ .err = try std.fmt.allocPrint(self.allocator, "detach failed: {s}", .{@errorName(err)}) },
             .logs => blk: {
-                var service = service_mod.WorkspaceService.init(self.allocator, self.msr_bin, self.vpty_bin);
-                const current = if (provider.current_session.len == 0) null else provider.current_session;
-                if (current == null) break :blk .{ .err = try self.allocator.dupe(u8, "no current session") };
-                const info = service.sessionInfo(provider, current.?) catch |err| {
-                    break :blk .{ .err = try std.fmt.allocPrint(self.allocator, "logs failed: {s}", .{@errorName(err)}) };
-                };
-                defer info.deinit(self.allocator);
-                break :blk .{ .info = try std.fmt.allocPrint(self.allocator, "transcript: {s}", .{info.transcript_path}) };
+                if (self.link) |*link| {
+                    link.altCycle() catch |err| {
+                        break :blk .{ .err = try std.fmt.allocPrint(self.allocator, "logs failed: {s}", .{@errorName(err)}) };
+                    };
+                    break :blk .{ .info = try self.allocator.dupe(u8, "toggled logs") };
+                }
+                break :blk .{ .err = try self.allocator.dupe(u8, "no current session") };
             },
             .nav => |target| blk: {
                 defer self.allocator.free(target);
@@ -77,7 +91,7 @@ pub const Executor = struct {
             .create => |name| blk: {
                 defer self.allocator.free(name);
                 const shell = std.posix.getenv("SHELL") orelse "/bin/sh";
-                var service = service_mod.WorkspaceService.init(self.allocator, self.msr_bin, self.vpty_bin);
+                var service = service_mod.WorkspaceService.init(self.allocator, self.msr_bin, self.vpty_bin, self.alt_bin, self.logs_viewer_bin);
                 const result = service.createAndAttach(provider, name, shell) catch |err| switch (err) {
                     error.SessionAlreadyExists => break :blk .{ .err = try self.allocator.dupe(u8, "session already exists") },
                     error.Empty, error.StartsWithSlash, error.EndsWithSlash, error.EmptySegment, error.DotSegment, error.InvalidChar => break :blk .{ .err = try std.fmt.allocPrint(self.allocator, "invalid id: {s}", .{@errorName(err)}) },
@@ -112,6 +126,7 @@ pub const Executor = struct {
     pub fn pumpAttachedOutput(self: *Executor, writer_fd: std.posix.fd_t) !bool {
         if (self.link) |*link| {
             const result = try link.pumpOutput(writer_fd);
+            debugLog("executor pump stream_lost={} did_work={}\n", .{ result.stream_lost, result.did_work });
             if (result.stream_lost) {
                 self.interactive_attached = false;
                 link.detach();
@@ -137,14 +152,14 @@ pub const Executor = struct {
     }
 
     fn attachCanonicalWithRetry(self: *Executor, provider: *policy.Provider, id: []const u8, timeout_ms: u64) !void {
-        var service = service_mod.WorkspaceService.init(self.allocator, self.msr_bin, self.vpty_bin);
+        var service = service_mod.WorkspaceService.init(self.allocator, self.msr_bin, self.vpty_bin, self.alt_bin, self.logs_viewer_bin);
         const attached = try service.attachWithRetry(provider, id, timeout_ms);
         if (self.link) |*link| link.deinit();
         self.link = attached;
     }
 
     fn attachCanonical(self: *Executor, provider: *policy.Provider, id: []const u8) ![]u8 {
-        var service = service_mod.WorkspaceService.init(self.allocator, self.msr_bin, self.vpty_bin);
+        var service = service_mod.WorkspaceService.init(self.allocator, self.msr_bin, self.vpty_bin, self.alt_bin, self.logs_viewer_bin);
         const result = try service.attach(provider, id);
         defer result.session.deinit(self.allocator);
         if (self.link) |*link| link.deinit();

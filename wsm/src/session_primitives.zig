@@ -11,11 +11,13 @@ pub const SessionPaths = struct {
     id: []u8,
     data_path: []u8,
     control_path: []u8,
+    alt_path: []u8,
 
     pub fn deinit(self: SessionPaths, allocator: std.mem.Allocator) void {
         allocator.free(self.id);
         allocator.free(self.data_path);
         allocator.free(self.control_path);
+        allocator.free(self.alt_path);
     }
 };
 
@@ -23,6 +25,8 @@ pub const CreateSpec = struct {
     id: []const u8,
     shell: []const u8,
     vpty_bin: []const u8,
+    alt_bin: []const u8,
+    scroll_bin: []const u8,
 };
 
 pub fn pathsForId(allocator: std.mem.Allocator, provider: *policy.Provider, id: []const u8) !SessionPaths {
@@ -31,10 +35,13 @@ pub fn pathsForId(allocator: std.mem.Allocator, provider: *policy.Provider, id: 
     errdefer allocator.free(data_path);
     const control_path = try controlPathForDataPath(allocator, data_path);
     errdefer allocator.free(control_path);
+    const alt_path = try altPathForDataPath(allocator, data_path);
+    errdefer allocator.free(alt_path);
     return .{
         .id = try allocator.dupe(u8, id),
         .data_path = data_path,
         .control_path = control_path,
+        .alt_path = alt_path,
     };
 }
 
@@ -43,11 +50,16 @@ pub fn controlPathForDataPath(allocator: std.mem.Allocator, data_path: []const u
     return try std.fmt.allocPrint(allocator, "{s}.ctl", .{data_path[0 .. data_path.len - 4]});
 }
 
+pub fn altPathForDataPath(allocator: std.mem.Allocator, data_path: []const u8) ![]u8 {
+    if (!std.mem.endsWith(u8, data_path, ".msr")) return error.InvalidPath;
+    return try std.fmt.allocPrint(allocator, "{s}.alt", .{data_path[0 .. data_path.len - 4]});
+}
+
 pub fn createSession(allocator: std.mem.Allocator, msr_bin: []const u8, provider: *policy.Provider, spec: CreateSpec) !SessionPaths {
     var paths = try pathsForId(allocator, provider, spec.id);
     errdefer paths.deinit(allocator);
 
-    if (pathExists(paths.data_path) or pathExists(paths.control_path)) return error.SessionAlreadyExists;
+    if (pathExists(paths.data_path) or pathExists(paths.control_path) or pathExists(paths.alt_path)) return error.SessionAlreadyExists;
 
     if (std.fs.path.dirname(paths.data_path)) |dir| std.fs.makeDirAbsolute(dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
@@ -58,8 +70,14 @@ pub fn createSession(allocator: std.mem.Allocator, msr_bin: []const u8, provider
     defer argv.deinit(allocator);
     const log_path = try std.fmt.allocPrint(allocator, "{s}.typescript", .{paths.data_path[0 .. paths.data_path.len - 4]});
     defer allocator.free(log_path);
-    const script_cmd = try std.fmt.allocPrint(allocator, "WSM_SESSION_ID={s} exec {s} -i", .{ spec.id, spec.shell });
-    defer allocator.free(script_cmd);
+    const inner_cmd = try std.fmt.allocPrint(allocator, "WSM_SESSION_ID={s} exec {s} -i", .{ spec.id, spec.shell });
+    defer allocator.free(inner_cmd);
+    const inner_cmd_quoted = try std.fmt.allocPrint(allocator, "\"{s}\"", .{inner_cmd});
+    defer allocator.free(inner_cmd_quoted);
+    const primary_cmd = try std.fmt.allocPrint(allocator, "exec script -q -f -c {s} {s}", .{ inner_cmd_quoted, log_path });
+    defer allocator.free(primary_cmd);
+    const run_arg = try std.fmt.allocPrint(allocator, "--run-arg={s}", .{log_path});
+    defer allocator.free(run_arg);
 
     try argv.appendSlice(allocator, &.{
         msr_bin,
@@ -71,12 +89,16 @@ pub fn createSession(allocator: std.mem.Allocator, msr_bin: []const u8, provider
         "--",
         spec.vpty_bin,
         "--",
-        "script",
-        "-q",
-        "-f",
-        "-c",
-        script_cmd,
-        log_path,
+        spec.alt_bin,
+        "--control",
+        paths.alt_path,
+        "--run",
+        spec.scroll_bin,
+        run_arg,
+        "--",
+        "/bin/bash",
+        "-lc",
+        primary_cmd,
     });
 
     var child = std.process.Child.init(argv.items, allocator);
@@ -86,6 +108,7 @@ pub fn createSession(allocator: std.mem.Allocator, msr_bin: []const u8, provider
     try child.spawn();
     try waitSocketPathExists(paths.data_path, 2000);
     try waitSocketPathExists(paths.control_path, 2000);
+    _ = waitSocketPathExists(paths.alt_path, 2000) catch null;
 
     return paths;
 }

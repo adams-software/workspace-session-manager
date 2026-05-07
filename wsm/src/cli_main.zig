@@ -117,7 +117,7 @@ fn presentSummary(allocator: std.mem.Allocator, info: service_mod.SessionInfo) !
 pub fn runCommand(allocator: std.mem.Allocator, root: []const u8, mode: Mode, stdout_file: std.fs.File) !u8 {
     var provider = try policy.Provider.init(allocator, root, null);
     defer provider.deinit();
-    var service = service_mod.WorkspaceService.init(allocator, "zig-out/bin/msr", "zig-out/bin/vpty");
+    var service = service_mod.WorkspaceService.init(allocator, "zig-out/bin/msr", "zig-out/bin/vpty", "zig-out/bin/alt", "wsm/scripts/wsm_logs_viewer");
 
     switch (mode) {
         .help => {

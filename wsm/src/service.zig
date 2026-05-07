@@ -59,6 +59,10 @@ pub const AttachedSession = struct {
     pub fn detach(self: *AttachedSession) void {
         self.link.detach();
     }
+
+    pub fn altCycle(self: *AttachedSession) !void {
+        try self.link.altCycle();
+    }
 };
 
 pub const SessionInfo = struct {
@@ -130,12 +134,16 @@ pub const WorkspaceService = struct {
     allocator: std.mem.Allocator,
     msr_bin: []const u8,
     vpty_bin: []const u8,
+    alt_bin: []const u8,
+    scroll_bin: []const u8,
 
-    pub fn init(allocator: std.mem.Allocator, msr_bin: []const u8, vpty_bin: []const u8) WorkspaceService {
+    pub fn init(allocator: std.mem.Allocator, msr_bin: []const u8, vpty_bin: []const u8, alt_bin: []const u8, scroll_bin: []const u8) WorkspaceService {
         return .{
             .allocator = allocator,
             .msr_bin = msr_bin,
             .vpty_bin = vpty_bin,
+            .alt_bin = alt_bin,
+            .scroll_bin = scroll_bin,
         };
     }
 
@@ -144,6 +152,8 @@ pub const WorkspaceService = struct {
             .id = id,
             .shell = shell,
             .vpty_bin = self.vpty_bin,
+            .alt_bin = self.alt_bin,
+            .scroll_bin = self.scroll_bin,
         });
         defer paths.deinit(self.allocator);
 
@@ -366,6 +376,7 @@ pub const WorkspaceService = struct {
         try link.attach(.{
             .data_path = paths.data_path,
             .control_path = if (pathExists(paths.control_path)) paths.control_path else null,
+            .alt_path = if (pathExists(paths.alt_path)) paths.alt_path else null,
         });
         return .{ .link = link };
     }

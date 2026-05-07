@@ -69,6 +69,15 @@ const OuterSize = struct {
     rows: u16,
 };
 
+fn debugEnabled() bool {
+    return std.posix.getenv("WSM_DEBUG") != null;
+}
+
+fn debugLog(comptime fmt: []const u8, args: anytype) void {
+    if (!debugEnabled()) return;
+    std.debug.print(fmt, args);
+}
+
 const App = struct {
     should_exit: bool = false,
     allocator: std.mem.Allocator,
@@ -122,6 +131,9 @@ const App = struct {
                 else => {},
             }
             _ = app.executor.pumpAttachedOutput(term.tty_fd) catch {};
+            if (!app.executor.isInteractiveAttached()) {
+                app.should_exit = true;
+            }
         }
 
         return app;
@@ -387,12 +399,14 @@ fn runInteractive(allocator: std.mem.Allocator, mode: cli_main.Mode) !void {
 
         if (nfds > 1) {
             const rev = pfds[1].revents;
+            if (rev != 0) debugLog("wsm poll attached fd={d} revents=0x{x}\n", .{ pfds[1].fd, rev });
             if ((rev & c.POLLNVAL) != 0) {
                 std.debug.print("wsm attached data POLLNVAL fd={d}\n", .{pfds[1].fd});
                 return Error.Unexpected;
             }
             if ((rev & (c.POLLHUP | c.POLLERR)) != 0) {
                 const did_work = try app.executor.pumpAttachedOutput(term.tty_fd);
+                debugLog("wsm pump after hup/err did_work={} attached={}\n", .{ did_work, app.executor.isInteractiveAttached() });
                 if (!app.executor.isInteractiveAttached() and !did_work) {
                     app.should_exit = true;
                     continue;
@@ -400,6 +414,7 @@ fn runInteractive(allocator: std.mem.Allocator, mode: cli_main.Mode) !void {
             }
             if ((rev & c.POLLIN) != 0) {
                 const did_work = try app.executor.pumpAttachedOutput(term.tty_fd);
+                debugLog("wsm pump after pollin did_work={} attached={}\n", .{ did_work, app.executor.isInteractiveAttached() });
                 if (!app.executor.isInteractiveAttached() and !did_work) {
                     app.should_exit = true;
                     continue;

@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ $# -ne 1 ]]; then
+  echo "usage: wsm_logs_viewer <typescript-path>" >&2
+  exit 2
+fi
+
+exec "$(dirname "$0")/../../zig-out/bin/scroll" --ansi "$1" | less -R
