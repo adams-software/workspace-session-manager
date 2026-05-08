@@ -4,14 +4,18 @@ const getTtySize = @import("ptyio_tty_size").getTtySize;
 
 const max_input_bytes = 64 * 1024 * 1024;
 const replay_chunk_size = 16 * 1024;
+// Transcript replay is fed directly into libvterm rather than written through a
+// kernel TTY with output processing enabled. In practice, standard CLI
+// typescripts often contain lone LF bytes in places where a user-visible
+// terminal display would have behaved like ONLCR and moved to column 0 on the
+// next row. Normalize lone LF to CRLF during replay so scroll renders ordinary
+// CLI transcripts the way users expect.
 const normalize_lf_for_replay = true;
 
 const OutputFormat = enum {
     plain,
     ansi,
 };
-
-const debug_committed_lines = false;
 
 const Builder = struct {
     allocator: std.mem.Allocator,

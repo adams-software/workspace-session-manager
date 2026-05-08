@@ -33,6 +33,18 @@ wsm menu
 
 The menu path is still evolving. Log viewing currently uses paired temporary sessions like `<session>.scroll` rather than the older `alt`-based prototype.
 
+The paired logs path is backed by `scroll`, which can replay a transcript from a
+path or stdin:
+
+```bash
+scroll /path/to/session.typescript
+scroll --ansi /path/to/session.typescript
+cat /path/to/session.typescript | scroll
+```
+
+When run with no input target from an interactive terminal, `scroll` shows its
+help instead of waiting on stdin.
+
 `wsm` now expects an explicit workspace root via `WSM_ROOT` or `--root`.
 It should not silently treat the current directory as the workspace root.
 
