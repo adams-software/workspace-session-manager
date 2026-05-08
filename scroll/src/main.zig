@@ -4,41 +4,34 @@ const getTtySize = @import("ptyio_tty_size").getTtySize;
 
 const max_input_bytes = 64 * 1024 * 1024;
 const replay_chunk_size = 16 * 1024;
+const normalize_lf_for_replay = true;
 
 const OutputFormat = enum {
     plain,
     ansi,
 };
 
-const StyledLine = struct {
-    cells: []term_engine.HostScreenCell,
-    hyperlinks: []term_engine.HostHyperlink,
-};
-
-const Record = union(enum) {
-    text_line: []u8,
-    styled_line: StyledLine,
-};
+const debug_committed_lines = false;
 
 const Builder = struct {
     allocator: std.mem.Allocator,
     format: OutputFormat,
-    records: std.ArrayList(Record),
     in_alt: bool = false,
     pending_plain: std.ArrayList(u8) = .{},
     pending_styled_cells: std.ArrayList(term_engine.HostScreenCell) = .{},
     pending_styled_hyperlinks: []term_engine.HostHyperlink = &.{},
+    out: std.ArrayList(u8) = .{},
 
     fn init(allocator: std.mem.Allocator, format: OutputFormat) Builder {
         return .{
             .allocator = allocator,
             .format = format,
-            .records = .{},
             .in_alt = false,
         };
     }
 
     fn deinit(self: *Builder) void {
+        self.out.deinit(self.allocator);
         self.pending_plain.deinit(self.allocator);
         self.pending_styled_cells.deinit(self.allocator);
         if (self.pending_styled_hyperlinks.len > 0) {
@@ -48,35 +41,31 @@ const Builder = struct {
             }
             self.allocator.free(self.pending_styled_hyperlinks);
         }
-        for (self.records.items) |rec| switch (rec) {
-            .text_line => |line| self.allocator.free(line),
-            .styled_line => |line| {
-                self.allocator.free(line.cells);
-                for (line.hyperlinks) |link| {
-                    self.allocator.free(link.params);
-                    self.allocator.free(link.uri);
-                }
-                self.allocator.free(line.hyperlinks);
-            },
-        };
-        self.records.deinit(self.allocator);
     }
 
     fn flushPending(self: *Builder) !void {
         switch (self.format) {
             .plain => {
                 if (self.pending_plain.items.len == 0) return;
-                const line = try self.pending_plain.toOwnedSlice(self.allocator);
-                self.pending_plain = .{};
-                try self.records.append(self.allocator, .{ .text_line = line });
+                try self.out.appendSlice(self.allocator, self.pending_plain.items);
+                try self.out.append(self.allocator, '\n');
+                self.pending_plain.clearRetainingCapacity();
             },
             .ansi => {
                 if (self.pending_styled_cells.items.len == 0) return;
-                const cells = try self.pending_styled_cells.toOwnedSlice(self.allocator);
-                self.pending_styled_cells = .{};
-                const hyperlinks = self.pending_styled_hyperlinks;
+                var style_state = StyleState{};
+                var buf = std.ArrayList(u8){};
+                defer buf.deinit(self.allocator);
+                try style_state.renderLine(buf.writer(self.allocator), self.pending_styled_cells.items, self.pending_styled_hyperlinks);
+                try buf.appendSlice(self.allocator, "\x1b[0m\n");
+                try self.out.appendSlice(self.allocator, buf.items);
+                self.pending_styled_cells.clearRetainingCapacity();
+                for (self.pending_styled_hyperlinks) |link| {
+                    self.allocator.free(link.params);
+                    self.allocator.free(link.uri);
+                }
+                if (self.pending_styled_hyperlinks.len > 0) self.allocator.free(self.pending_styled_hyperlinks);
                 self.pending_styled_hyperlinks = &.{};
-                try self.records.append(self.allocator, .{ .styled_line = .{ .cells = cells, .hyperlinks = hyperlinks } });
             },
         }
     }
@@ -151,12 +140,11 @@ const Builder = struct {
                     try tail_lines.append(self.allocator, text);
                 }
 
-                while (tail_lines.items.len > 0 and tail_lines.items[tail_lines.items.len - 1].len == 0) {
-                    self.allocator.free(tail_lines.pop().?);
-                }
+                while (tail_lines.items.len > 0 and tail_lines.items[tail_lines.items.len - 1].len == 0) self.allocator.free(tail_lines.pop().?);
 
                 for (tail_lines.items) |line| {
-                    try self.records.append(self.allocator, .{ .text_line = try self.allocator.dupe(u8, line) });
+                    try self.out.appendSlice(self.allocator, line);
+                    try self.out.append(self.allocator, '\n');
                 }
             },
             .ansi => {
@@ -177,17 +165,7 @@ const Builder = struct {
 
     fn writeTo(self: *Builder, writer: anytype) !void {
         try self.flushPending();
-        var style_state = StyleState{};
-        for (self.records.items) |rec| {
-            switch (rec) {
-                .text_line => |line| try writer.print("{s}\n", .{line}),
-                .styled_line => |line| {
-                    try style_state.renderLine(writer, line.cells, line.hyperlinks);
-                    try writer.writeAll("\x1b[0m\n");
-                    style_state = .{};
-                },
-            }
-        }
+        try writer.writeAll(self.out.items);
     }
 };
 
@@ -285,7 +263,7 @@ const StyleState = struct {
 
 fn usage() void {
     std.debug.print(
-        "NAME\n  scroll - transcript to normalized text buffer\n\nUSAGE\n  scroll [--ansi] [typescript-file]\n",
+        "NAME\n  scroll - replay a terminal typescript into readable CLI output\n\nUSAGE\n  scroll [--ansi] <typescript-file>\n  scroll [--ansi] -\n  cat <typescript-file> | scroll [--ansi]\n\nOPTIONS\n  --ansi   preserve ANSI styling in the rendered output\n\nNOTES\n  With no input target, scroll reads stdin only when stdin is piped.\n  If stdin is a TTY and no target is provided, this help is shown.\n",
         .{},
     );
 }
@@ -367,6 +345,23 @@ fn processPendingEvents(allocator: std.mem.Allocator, engine: *term_engine.Engin
     try builder.processEvents(events);
 }
 
+fn feedReplayBytes(engine: *term_engine.Engine, bytes: []const u8, prev_byte: *?u8) !void {
+    if (!normalize_lf_for_replay) return engine.feed(bytes);
+
+    var normalized = std.ArrayList(u8){};
+    defer normalized.deinit(std.heap.smp_allocator);
+
+    for (bytes) |b| {
+        if (b == '\n' and prev_byte.* != '\r') {
+            try normalized.append(std.heap.smp_allocator, '\r');
+        }
+        try normalized.append(std.heap.smp_allocator, b);
+        prev_byte.* = b;
+    }
+
+    try engine.feed(normalized.items);
+}
+
 fn replayReader(allocator: std.mem.Allocator, format: OutputFormat, rows: u16, cols: u16, reader: anytype, writer: anytype) !void {
     var engine = try term_engine.Engine.init(allocator, rows, cols);
     defer engine.deinit();
@@ -376,13 +371,14 @@ fn replayReader(allocator: std.mem.Allocator, format: OutputFormat, rows: u16, c
 
     var buf: [replay_chunk_size]u8 = undefined;
     var total_bytes: usize = 0;
+    var prev_byte: ?u8 = null;
 
     while (true) {
         const n = try reader.readSliceShort(&buf);
         if (n == 0) break;
         total_bytes += n;
         if (total_bytes > max_input_bytes) return error.InputTooLarge;
-        try engine.feed(buf[0..n]);
+        try feedReplayBytes(&engine, buf[0..n], &prev_byte);
         try processPendingEvents(allocator, &engine, &builder);
     }
 
@@ -423,11 +419,20 @@ pub fn main() !u8 {
     const size = defaultTerminalSize();
 
     if (path_arg) |path| {
-        const file = try std.fs.cwd().openFile(path, .{});
-        defer file.close();
-        var file_buf: [4096]u8 = undefined;
-        var file_reader = file.reader(&file_buf);
-        try replayReader(allocator, format, size.rows, size.cols, &file_reader.interface, &stdout_writer.interface);
+        if (std.mem.eql(u8, path, "-")) {
+            var stdin_buf: [4096]u8 = undefined;
+            var stdin_reader = std.fs.File.stdin().reader(&stdin_buf);
+            try replayReader(allocator, format, size.rows, size.cols, &stdin_reader.interface, &stdout_writer.interface);
+        } else {
+            const file = try std.fs.cwd().openFile(path, .{});
+            defer file.close();
+            var file_buf: [4096]u8 = undefined;
+            var file_reader = file.reader(&file_buf);
+            try replayReader(allocator, format, size.rows, size.cols, &file_reader.interface, &stdout_writer.interface);
+        }
+    } else if (std.posix.isatty(std.posix.STDIN_FILENO)) {
+        usage();
+        return 0;
     } else {
         var stdin_buf: [4096]u8 = undefined;
         var stdin_reader = std.fs.File.stdin().reader(&stdin_buf);

@@ -124,9 +124,10 @@ pub const Engine = struct {
                             },
                         };
                     }
+                    const continuation = raw.continuation != 0;
                     try self.event_queue.append(self.allocator, .{ .line_committed = .{
-                        .line = .{ .cells = cells, .eol = true },
-                        .continuation = raw.continuation != 0,
+                        .line = .{ .cells = cells, .eol = !continuation },
+                        .continuation = continuation,
                     } });
                 },
                 c.MSR_VTERM_HISTORY_ALT_ENTER => try self.event_queue.append(self.allocator, .alternate_enter),
