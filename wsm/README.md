@@ -31,7 +31,7 @@ Open the interactive menu:
 wsm menu
 ```
 
-The menu path is still evolving and may be revised as `alt` and control-socket conventions settle.
+The menu path is still evolving. Log viewing currently uses paired temporary sessions like `<session>.scroll` rather than the older `alt`-based prototype.
 
 `wsm` now expects an explicit workspace root via `WSM_ROOT` or `--root`.
 It should not silently treat the current directory as the workspace root.

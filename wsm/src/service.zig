@@ -147,13 +147,15 @@ pub const WorkspaceService = struct {
         };
     }
 
-    pub fn create(self: *WorkspaceService, provider: *policy.Provider, id: []const u8, shell: []const u8) !SessionRef {
+    pub fn create(self: *WorkspaceService, provider: *policy.Provider, id: []const u8, shell: []const u8, cols: ?u16, rows: ?u16) !SessionRef {
         var paths = try session_primitives.createSession(self.allocator, self.msr_bin, provider, .{
             .id = id,
             .shell = shell,
             .vpty_bin = self.vpty_bin,
             .alt_bin = self.alt_bin,
             .scroll_bin = self.scroll_bin,
+            .cols = cols,
+            .rows = rows,
         });
         defer paths.deinit(self.allocator);
 
@@ -163,11 +165,13 @@ pub const WorkspaceService = struct {
         };
     }
 
-    pub fn createCommand(self: *WorkspaceService, provider: *policy.Provider, id: []const u8, argv: []const []const u8) !SessionRef {
+    pub fn createCommand(self: *WorkspaceService, provider: *policy.Provider, id: []const u8, argv: []const []const u8, cols: ?u16, rows: ?u16) !SessionRef {
         var paths = try session_primitives.createCommandSession(self.allocator, self.msr_bin, provider, .{
             .id = id,
             .vpty_bin = self.vpty_bin,
             .argv = argv,
+            .cols = cols,
+            .rows = rows,
         });
         defer paths.deinit(self.allocator);
 
@@ -177,8 +181,8 @@ pub const WorkspaceService = struct {
         };
     }
 
-    pub fn createAndAttach(self: *WorkspaceService, provider: *policy.Provider, id: []const u8, shell: []const u8) !CreateAttachResult {
-        const session = try self.create(provider, id, shell);
+    pub fn createAndAttach(self: *WorkspaceService, provider: *policy.Provider, id: []const u8, shell: []const u8, cols: ?u16, rows: ?u16) !CreateAttachResult {
+        const session = try self.create(provider, id, shell, cols, rows);
         errdefer session.deinit(self.allocator);
         const attached = try self.attachWithRetry(provider, session.id, 2000);
         return .{
@@ -187,8 +191,8 @@ pub const WorkspaceService = struct {
         };
     }
 
-    pub fn createCommandAndAttach(self: *WorkspaceService, provider: *policy.Provider, id: []const u8, argv: []const []const u8) !CreateAttachResult {
-        const session = try self.createCommand(provider, id, argv);
+    pub fn createCommandAndAttach(self: *WorkspaceService, provider: *policy.Provider, id: []const u8, argv: []const []const u8, cols: ?u16, rows: ?u16) !CreateAttachResult {
+        const session = try self.createCommand(provider, id, argv, cols, rows);
         errdefer session.deinit(self.allocator);
         const attached = try self.attachWithRetry(provider, session.id, 2000);
         return .{

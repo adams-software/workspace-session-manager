@@ -27,12 +27,16 @@ pub const CreateSpec = struct {
     vpty_bin: []const u8,
     alt_bin: []const u8,
     scroll_bin: []const u8,
+    cols: ?u16 = null,
+    rows: ?u16 = null,
 };
 
 pub const CreateCommandSpec = struct {
     id: []const u8,
     vpty_bin: []const u8,
     argv: []const []const u8,
+    cols: ?u16 = null,
+    rows: ?u16 = null,
 };
 
 pub fn pathsForId(allocator: std.mem.Allocator, provider: *policy.Provider, id: []const u8) !SessionPaths {
@@ -74,6 +78,11 @@ pub fn createSession(allocator: std.mem.Allocator, msr_bin: []const u8, provider
 
     var argv = std.ArrayList([]const u8){};
     defer argv.deinit(allocator);
+    const size_arg = if (spec.cols != null and spec.rows != null)
+        try std.fmt.allocPrint(allocator, "{d}x{d}", .{ spec.cols.?, spec.rows.? })
+    else
+        null;
+    defer if (size_arg) |arg| allocator.free(arg);
     const log_path = try std.fmt.allocPrint(allocator, "{s}.typescript", .{paths.data_path[0 .. paths.data_path.len - 4]});
     defer allocator.free(log_path);
     const inner_cmd = try std.fmt.allocPrint(allocator, "WSM_SESSION_ID={s} exec {s} -i", .{ spec.id, spec.shell });
@@ -92,6 +101,9 @@ pub fn createSession(allocator: std.mem.Allocator, msr_bin: []const u8, provider
         "--",
         msr_bin,
         paths.data_path,
+    });
+    if (size_arg) |arg| try argv.appendSlice(allocator, &.{ "--size", arg });
+    try argv.appendSlice(allocator, &.{
         "--",
         spec.vpty_bin,
         "--",
@@ -132,6 +144,11 @@ pub fn createCommandSession(allocator: std.mem.Allocator, msr_bin: []const u8, p
 
     var argv = std.ArrayList([]const u8){};
     defer argv.deinit(allocator);
+    const size_arg = if (spec.cols != null and spec.rows != null)
+        try std.fmt.allocPrint(allocator, "{d}x{d}", .{ spec.cols.?, spec.rows.? })
+    else
+        null;
+    defer if (size_arg) |arg| allocator.free(arg);
     try argv.appendSlice(allocator, &.{
         msr_bin,
         paths.control_path,
@@ -139,6 +156,9 @@ pub fn createCommandSession(allocator: std.mem.Allocator, msr_bin: []const u8, p
         "--",
         msr_bin,
         paths.data_path,
+    });
+    if (size_arg) |arg| try argv.appendSlice(allocator, &.{ "--size", arg });
+    try argv.appendSlice(allocator, &.{
         "--",
         spec.vpty_bin,
         "--",

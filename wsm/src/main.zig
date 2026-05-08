@@ -120,12 +120,10 @@ const App = struct {
             switch (mode) {
                 .interactive_attach => |id| {
                     const owned = try allocator.dupe(u8, id);
-                    defer allocator.free(owned);
                     try app.handleAction(.{ .attach = owned });
                 },
                 .interactive_create_attach => |id| {
                     const owned = try allocator.dupe(u8, id);
-                    defer allocator.free(owned);
                     try app.handleAction(.{ .create = owned });
                 },
                 else => {},
@@ -254,10 +252,38 @@ const App = struct {
             return;
         }
 
+        if (action == .logs) {
+            const exec_result = try self.executor.openLogs(&self.provider, .{ .cols = self.layout.outer_cols, .rows = self.layout.main_rows });
+            try self.applyExecResult(exec_result);
+            return;
+        }
+
+        if (action == .create) {
+            const shell = std.posix.getenv("SHELL") orelse "/bin/sh";
+            const exec_result = try self.executor.createAndAttachSized(&self.provider, action.create, shell, .{ .cols = self.layout.outer_cols, .rows = self.layout.main_rows });
+            self.allocator.free(action.create);
+            try self.applyExecResult(exec_result);
+            return;
+        }
+
+        if (action == .attach) {
+            const resolved = try self.provider.resolveAction(action);
+            self.allocator.free(action.attach);
+            const exec_result: executor_mod.Result = self.executor.run(&self.provider, resolved) catch |err| blk: {
+                break :blk .{ .err = try std.fmt.allocPrint(self.allocator, "action failed: {s}", .{@errorName(err)}) };
+            };
+            try self.applyExecResult(exec_result);
+            return;
+        }
+
         const resolved = try self.provider.resolveAction(action);
         const exec_result: executor_mod.Result = self.executor.run(&self.provider, resolved) catch |err| blk: {
             break :blk .{ .err = try std.fmt.allocPrint(self.allocator, "action failed: {s}", .{@errorName(err)}) };
         };
+        try self.applyExecResult(exec_result);
+    }
+
+    fn applyExecResult(self: *App, exec_result: executor_mod.Result) !void {
         switch (exec_result) {
             .info => |msg| {
                 defer self.allocator.free(msg);

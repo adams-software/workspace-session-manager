@@ -188,7 +188,7 @@ pub fn runCommand(allocator: std.mem.Allocator, root: []const u8, mode: Mode, st
         },
         .create_detached => |id| {
             const shell = std.posix.getenv("SHELL") orelse "/bin/sh";
-            const session = try service.create(&provider, id, shell);
+            const session = try service.create(&provider, id, shell, null, null);
             defer session.deinit(allocator);
             const line = try std.fmt.allocPrint(allocator, "created {s}\n", .{session.id});
             defer allocator.free(line);

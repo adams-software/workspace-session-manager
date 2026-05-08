@@ -25,6 +25,9 @@ const Builder = struct {
     format: OutputFormat,
     records: std.ArrayList(Record),
     in_alt: bool = false,
+    pending_plain: std.ArrayList(u8) = .{},
+    pending_styled_cells: std.ArrayList(term_engine.HostScreenCell) = .{},
+    pending_styled_hyperlinks: []term_engine.HostHyperlink = &.{},
 
     fn init(allocator: std.mem.Allocator, format: OutputFormat) Builder {
         return .{
@@ -36,6 +39,15 @@ const Builder = struct {
     }
 
     fn deinit(self: *Builder) void {
+        self.pending_plain.deinit(self.allocator);
+        self.pending_styled_cells.deinit(self.allocator);
+        if (self.pending_styled_hyperlinks.len > 0) {
+            for (self.pending_styled_hyperlinks) |link| {
+                self.allocator.free(link.params);
+                self.allocator.free(link.uri);
+            }
+            self.allocator.free(self.pending_styled_hyperlinks);
+        }
         for (self.records.items) |rec| switch (rec) {
             .text_line => |line| self.allocator.free(line),
             .styled_line => |line| {
@@ -48,6 +60,25 @@ const Builder = struct {
             },
         };
         self.records.deinit(self.allocator);
+    }
+
+    fn flushPending(self: *Builder) !void {
+        switch (self.format) {
+            .plain => {
+                if (self.pending_plain.items.len == 0) return;
+                const line = try self.pending_plain.toOwnedSlice(self.allocator);
+                self.pending_plain = .{};
+                try self.records.append(self.allocator, .{ .text_line = line });
+            },
+            .ansi => {
+                if (self.pending_styled_cells.items.len == 0) return;
+                const cells = try self.pending_styled_cells.toOwnedSlice(self.allocator);
+                self.pending_styled_cells = .{};
+                const hyperlinks = self.pending_styled_hyperlinks;
+                self.pending_styled_hyperlinks = &.{};
+                try self.records.append(self.allocator, .{ .styled_line = .{ .cells = cells, .hyperlinks = hyperlinks } });
+            },
+        }
     }
 
     fn cloneHyperlinks(self: *Builder, snapshot: ?*const term_engine.HostScreenSnapshot) ![]term_engine.HostHyperlink {
@@ -69,17 +100,20 @@ const Builder = struct {
         return links;
     }
 
-    fn appendLineFromCells(self: *Builder, snapshot: ?*const term_engine.HostScreenSnapshot, cells: []const term_engine.HostScreenCell) !void {
+    fn appendLineFromCells(self: *Builder, snapshot: ?*const term_engine.HostScreenSnapshot, line: term_engine.HostScreenLine) !void {
         switch (self.format) {
             .plain => {
-                const line = try cellSliceToUtf8(self.allocator, cells);
-                try self.records.append(self.allocator, .{ .text_line = line });
+                const text = try cellSliceToUtf8(self.allocator, line.cells);
+                defer self.allocator.free(text);
+                try self.pending_plain.appendSlice(self.allocator, text);
+                if (line.eol) try self.flushPending();
             },
             .ansi => {
-                const line = try self.allocator.dupe(term_engine.HostScreenCell, cells);
-                errdefer self.allocator.free(line);
-                const hyperlinks = try self.cloneHyperlinks(snapshot);
-                try self.records.append(self.allocator, .{ .styled_line = .{ .cells = line, .hyperlinks = hyperlinks } });
+                if (self.pending_styled_hyperlinks.len == 0) {
+                    self.pending_styled_hyperlinks = try self.cloneHyperlinks(snapshot);
+                }
+                try self.pending_styled_cells.appendSlice(self.allocator, line.cells);
+                if (line.eol) try self.flushPending();
             },
         }
     }
@@ -89,7 +123,7 @@ const Builder = struct {
             switch (ev) {
                 .line_committed => |lc| {
                     if (self.in_alt) continue;
-                    try self.appendLineFromCells(null, lc.line.cells);
+                    try self.appendLineFromCells(null, lc.line);
                 },
                 .alternate_enter => self.in_alt = true,
                 .alternate_exit => self.in_alt = false,
@@ -135,13 +169,14 @@ const Builder = struct {
                 }
 
                 for (snapshot.lines[0..end]) |line| {
-                    try self.appendLineFromCells(&snapshot, line.cells);
+                    try self.appendLineFromCells(&snapshot, line);
                 }
             },
         }
     }
 
     fn writeTo(self: *Builder, writer: anytype) !void {
+        try self.flushPending();
         var style_state = StyleState{};
         for (self.records.items) |rec| {
             switch (rec) {

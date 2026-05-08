@@ -24,6 +24,11 @@ pub const ResizeResult = enum {
     forwarded,
 };
 
+pub const SessionSize = struct {
+    cols: u16,
+    rows: u16,
+};
+
 pub const Executor = struct {
     allocator: std.mem.Allocator,
     root: []const u8,
@@ -79,7 +84,7 @@ pub const Executor = struct {
                 const transcript = try std.fmt.allocPrint(self.allocator, "{s}.typescript", .{base_paths[0 .. base_paths.len - 4]});
                 defer self.allocator.free(transcript);
                 const argv = [_][]const u8{ self.logs_viewer_bin, transcript };
-                const result = service.createCommandAndAttach(provider, scroll_id, &argv) catch |err| switch (err) {
+                const result = service.createCommandAndAttach(provider, scroll_id, &argv, null, null) catch |err| switch (err) {
                     error.SessionAlreadyExists => {
                         const attached_id = try self.attachCanonical(provider, scroll_id);
                         try self.setReturnSession(base_id_copy);
@@ -116,7 +121,7 @@ pub const Executor = struct {
                 defer self.allocator.free(name);
                 const shell = std.posix.getenv("SHELL") orelse "/bin/sh";
                 var service = service_mod.WorkspaceService.init(self.allocator, self.msr_bin, self.vpty_bin, self.alt_bin, self.logs_viewer_bin);
-                const result = service.createAndAttach(provider, name, shell) catch |err| switch (err) {
+                const result = service.createAndAttach(provider, name, shell, null, null) catch |err| switch (err) {
                     error.SessionAlreadyExists => break :blk .{ .err = try self.allocator.dupe(u8, "session already exists") },
                     error.Empty, error.StartsWithSlash, error.EndsWithSlash, error.EmptySegment, error.DotSegment, error.InvalidChar => break :blk .{ .err = try std.fmt.allocPrint(self.allocator, "invalid id: {s}", .{@errorName(err)}) },
                     else => break :blk .{ .err = try std.fmt.allocPrint(self.allocator, "created but attach failed: {s}", .{@errorName(err)}) },
@@ -126,6 +131,45 @@ pub const Executor = struct {
                 break :blk .{ .attached = try self.allocator.dupe(u8, result.session.id) };
             },
         };
+    }
+
+    pub fn openLogs(self: *Executor, provider: *policy.Provider, size: SessionSize) !Result {
+        const base_id = self.current_session_id orelse return .{ .err = try self.allocator.dupe(u8, "no current session") };
+        if (policy.isScrollSession(base_id)) return .{ .err = try self.allocator.dupe(u8, "already in logs") };
+        const base_id_copy = try self.allocator.dupe(u8, base_id);
+        defer self.allocator.free(base_id_copy);
+        var service = service_mod.WorkspaceService.init(self.allocator, self.msr_bin, self.vpty_bin, self.alt_bin, self.logs_viewer_bin);
+        const scroll_id = try policy.scrollSessionId(self.allocator, base_id_copy);
+        defer self.allocator.free(scroll_id);
+        const base_paths = try provider.socketPathForId(base_id_copy);
+        defer self.allocator.free(base_paths);
+        const transcript = try std.fmt.allocPrint(self.allocator, "{s}.typescript", .{base_paths[0 .. base_paths.len - 4]});
+        defer self.allocator.free(transcript);
+        const argv = [_][]const u8{ self.logs_viewer_bin, transcript };
+        const result = service.createCommandAndAttach(provider, scroll_id, &argv, size.cols, size.rows) catch |err| switch (err) {
+            error.SessionAlreadyExists => {
+                const attached_id = try self.attachCanonical(provider, scroll_id);
+                try self.setReturnSession(base_id_copy);
+                return .{ .attached = attached_id };
+            },
+            else => return .{ .err = try std.fmt.allocPrint(self.allocator, "logs failed: {s}", .{@errorName(err)}) },
+        };
+        try self.enterAttached(result.attached, result.session.id);
+        try self.setReturnSession(base_id_copy);
+        defer result.session.deinit(self.allocator);
+        return .{ .attached = try self.allocator.dupe(u8, result.session.id) };
+    }
+
+    pub fn createAndAttachSized(self: *Executor, provider: *policy.Provider, name: []const u8, shell: []const u8, size: SessionSize) !Result {
+        var service = service_mod.WorkspaceService.init(self.allocator, self.msr_bin, self.vpty_bin, self.alt_bin, self.logs_viewer_bin);
+        const result = service.createAndAttach(provider, name, shell, size.cols, size.rows) catch |err| switch (err) {
+            error.SessionAlreadyExists => return .{ .err = try self.allocator.dupe(u8, "session already exists") },
+            error.Empty, error.StartsWithSlash, error.EndsWithSlash, error.EmptySegment, error.DotSegment, error.InvalidChar => return .{ .err = try std.fmt.allocPrint(self.allocator, "invalid id: {s}", .{@errorName(err)}) },
+            else => return .{ .err = try std.fmt.allocPrint(self.allocator, "created but attach failed: {s}", .{@errorName(err)}) },
+        };
+        try self.enterAttached(result.attached, result.session.id);
+        defer result.session.deinit(self.allocator);
+        return .{ .attached = try self.allocator.dupe(u8, result.session.id) };
     }
 
     pub fn isInteractiveAttached(self: *const Executor) bool {

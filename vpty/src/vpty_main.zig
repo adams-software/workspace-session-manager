@@ -480,10 +480,24 @@ const VptyRuntime = struct {
         errdefer stdout_actor.deinit();
 
         const size = terminal.currentSize() catch vpty_terminal.Size{ .rows = 24, .cols = 80 };
-        const viewport = switch (mode) {
+        const resolved = switch (mode) {
             .fullscreen => Viewport.init(0, 0, size.rows, size.cols),
             .bounded => resolveViewport(viewport_override, size),
         };
+        const target_rows = switch (mode) {
+            .fullscreen => resolved.rows,
+            .bounded => if (viewport_intent.rows_explicit) viewport_override.rows else resolved.rows,
+        };
+        const target_cols = switch (mode) {
+            .fullscreen => resolved.cols,
+            .bounded => if (viewport_intent.cols_explicit) viewport_override.cols else resolved.cols,
+        };
+        const viewport = Viewport.init(
+            resolved.origin_row,
+            resolved.origin_col,
+            target_rows,
+            target_cols,
+        );
 
         var session_host = try host.SessionHost.init(allocator, .{
             .argv = child_argv,
