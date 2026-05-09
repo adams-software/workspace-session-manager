@@ -1,4 +1,5 @@
 const std = @import("std");
+const cli_main = @import("cli_main.zig");
 const policy = @import("policy.zig");
 const service_mod = @import("service.zig");
 
@@ -172,6 +173,14 @@ pub const Executor = struct {
         return .{ .attached = try self.allocator.dupe(u8, result.session.id) };
     }
 
+    pub fn bootstrapInteractive(self: *Executor, provider: *policy.Provider, mode: cli_main.Mode) !Result {
+        return switch (mode) {
+            .interactive_attach => |id| self.run(provider, .{ .attach = try self.allocator.dupe(u8, id) }),
+            .interactive_create_attach => |id| self.run(provider, .{ .create = try self.allocator.dupe(u8, id) }),
+            else => .detached,
+        };
+    }
+
     pub fn isInteractiveAttached(self: *const Executor) bool {
         return self.interactive_attached;
     }
@@ -197,7 +206,11 @@ pub const Executor = struct {
                 if (self.current_session_id) |current_id| {
                     if (policy.isScrollSession(current_id) and self.return_session_id != null) {
                         const return_id = self.return_session_id.?;
-                        const reattached_id = try self.attachCanonical(provider, return_id);
+                        const reattached_id = self.attachCanonical(provider, return_id) catch |err| {
+                            self.interactive_attached = false;
+                            link.detach();
+                            return .{ .err = try std.fmt.allocPrint(self.allocator, "return attach failed: {s}", .{@errorName(err)}) };
+                        };
                         try provider.setCurrentSession(return_id);
                         return .{ .reattached = reattached_id };
                     }

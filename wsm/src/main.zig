@@ -80,6 +80,7 @@ fn debugLog(comptime fmt: []const u8, args: anytype) void {
 
 const App = struct {
     should_exit: bool = false,
+    exit_message: ?[]u8 = null,
     allocator: std.mem.Allocator,
     term: *TerminalState,
     hotkey: KeyBinding,
@@ -117,23 +118,16 @@ const App = struct {
         };
 
         if (initial_mode) |mode| {
-            switch (mode) {
-                .interactive_attach => |id| {
-                    const owned = try allocator.dupe(u8, id);
-                    try app.handleAction(.{ .attach = owned });
-                },
-                .interactive_create_attach => |id| {
-                    const owned = try allocator.dupe(u8, id);
-                    try app.handleAction(.{ .create = owned });
-                },
-                else => {},
+            try app.applyExecResult(try app.executor.bootstrapInteractive(&app.provider, mode));
+            if (!app.should_exit) {
+                try app.refreshPolicy();
             }
             const initial_pump = app.executor.pumpAttachedOutput(&app.provider, term.tty_fd) catch null;
             if (initial_pump) |pump_result| switch (pump_result) {
                 .reattached => |id| {
                     defer allocator.free(id);
                     try app.provider.setCurrentSession(id);
-                    _ = app.bar_state.setExternalInfo("attached");
+                    _ = app.bar_state.clearNotice();
                     _ = app.executor.forwardResize(app.layout.outer_cols, app.layout.main_rows) catch {};
                     try app.render();
                 },
@@ -148,6 +142,7 @@ const App = struct {
     }
 
     fn deinit(self: *App) void {
+        if (self.exit_message) |msg| self.allocator.free(msg);
         self.executor.deinit();
         self.provider.deinit();
         self.bar_state.deinit();
@@ -171,7 +166,7 @@ const App = struct {
     fn renderBar(self: *App) !void {
         if (!self.layout.bar_visible or self.layout.bar_row == null) return;
 
-        const line = try bar_render.buildLine(self.allocator, &self.bar_state, self.provider.externalContext(), self.layout.outer_cols);
+        const line = try bar_render.buildLine(self.allocator, &self.bar_state, self.provider.barModel(), self.layout.outer_cols);
         defer self.allocator.free(line);
 
         var out = std.ArrayList(u8){};
@@ -201,6 +196,10 @@ const App = struct {
 
     fn handleTTYInput(self: *App, bytes: []const u8) !bool {
         if (bytes.len == 0) return false;
+
+        if (self.provider.currentSessionIsScroll()) {
+            return try self.executor.forwardInput(bytes);
+        }
 
         if (self.bar_state.mode == .passive) {
             if (keyFromInput(bytes, self.hotkey)) |key| {
@@ -252,7 +251,15 @@ const App = struct {
             return;
         }
 
+        if (action == .detach) {
+            try self.applyExecResult(try self.executeResolvedAction(action));
+            try writeAll(self.term.tty_fd, "\r\n");
+            self.should_exit = true;
+            return;
+        }
+
         if (action == .logs) {
+            self.bar_state.enterPassive();
             const exec_result = try self.executor.openLogs(&self.provider, .{ .cols = self.layout.outer_cols, .rows = self.layout.main_rows });
             try self.applyExecResult(exec_result);
             return;
@@ -266,21 +273,16 @@ const App = struct {
             return;
         }
 
-        if (action == .attach) {
-            const resolved = try self.provider.resolveAction(action);
-            self.allocator.free(action.attach);
-            const exec_result: executor_mod.Result = self.executor.run(&self.provider, resolved) catch |err| blk: {
-                break :blk .{ .err = try std.fmt.allocPrint(self.allocator, "action failed: {s}", .{@errorName(err)}) };
-            };
-            try self.applyExecResult(exec_result);
-            return;
-        }
+        try self.applyExecResult(try self.executeResolvedAction(action));
+    }
 
+    fn executeResolvedAction(self: *App, action: ui_state.Action) !executor_mod.Result {
         const resolved = try self.provider.resolveAction(action);
-        const exec_result: executor_mod.Result = self.executor.run(&self.provider, resolved) catch |err| blk: {
-            break :blk .{ .err = try std.fmt.allocPrint(self.allocator, "action failed: {s}", .{@errorName(err)}) };
-        };
-        try self.applyExecResult(exec_result);
+        switch (action) {
+            .attach => |target| self.allocator.free(target),
+            else => {},
+        }
+        return self.executor.run(&self.provider, resolved) catch |err| .{ .err = try std.fmt.allocPrint(self.allocator, "action failed: {s}", .{@errorName(err)}) };
     }
 
     fn applyExecResult(self: *App, exec_result: executor_mod.Result) !void {
@@ -292,31 +294,36 @@ const App = struct {
             .err => |msg| {
                 defer self.allocator.free(msg);
                 _ = self.bar_state.setExternalError(msg);
+                if (!self.executor.isInteractiveAttached()) {
+                    if (self.exit_message) |existing| self.allocator.free(existing);
+                    self.exit_message = try self.allocator.dupe(u8, msg);
+                }
             },
             .attached, .reattached => |id| {
                 defer self.allocator.free(id);
                 try self.provider.setCurrentSession(id);
-                _ = self.bar_state.setExternalInfo("attached");
+                _ = self.bar_state.clearNotice();
                 _ = self.executor.forwardResize(self.layout.outer_cols, self.layout.main_rows) catch {};
             },
             .detached => {
                 try self.provider.setCurrentSession(null);
-                _ = self.bar_state.setExternalInfo("detached");
+                _ = self.bar_state.clearNotice();
             },
         }
     }
 
     fn handlePumpResult(self: *App, pump_result: executor_mod.Result) !void {
         switch (pump_result) {
-            .reattached => |id| {
-                defer self.allocator.free(id);
-                try self.provider.setCurrentSession(id);
-                _ = self.bar_state.setExternalInfo("attached");
-                _ = self.executor.forwardResize(self.layout.outer_cols, self.layout.main_rows) catch {};
+            .reattached => {
+                try self.applyExecResult(pump_result);
                 try self.refreshPolicy();
                 try self.render();
             },
             .detached => {
+                if (!self.executor.isInteractiveAttached()) self.should_exit = true;
+            },
+            .err => {
+                try self.applyExecResult(pump_result);
                 if (!self.executor.isInteractiveAttached()) self.should_exit = true;
             },
             .info => |msg| {
@@ -409,13 +416,9 @@ fn runInteractive(allocator: std.mem.Allocator, mode: cli_main.Mode) !void {
     installSigwinchHandler();
 
     var term = try TerminalState.init();
-    defer term.deinit();
     try writeAll(term.tty_fd, ENTER_ALT_SCREEN);
 
     var app = try App.init(allocator, &term, mode);
-    defer app.deinit();
-    defer writeAll(term.tty_fd, EXIT_RESET) catch {};
-    defer app.clearBar() catch {};
 
     try app.render();
 
@@ -469,5 +472,18 @@ fn runInteractive(allocator: std.mem.Allocator, mode: cli_main.Mode) !void {
                 try app.handlePumpResult(try app.executor.pumpAttachedOutput(&app.provider, term.tty_fd));
             }
         }
+    }
+
+    const exit_message = if (app.exit_message) |msg| try allocator.dupe(u8, msg) else null;
+    defer if (exit_message) |msg| allocator.free(msg);
+
+    app.clearBar() catch {};
+    writeAll(term.tty_fd, EXIT_RESET) catch {};
+    app.deinit();
+    term.deinit();
+
+    if (exit_message) |msg| {
+        try std.fs.File.stdout().writeAll(msg);
+        try std.fs.File.stdout().writeAll("\n");
     }
 }

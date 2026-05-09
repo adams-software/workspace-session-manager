@@ -19,10 +19,7 @@ pub const Candidate = struct {
 };
 
 pub const ExternalContext = struct {
-    passive_text: []const u8 = "",
-    active_text: []const u8 = "",
-    passive_workspace: []const u8 = "",
-    passive_session: []const u8 = "",
+    detached: bool = false,
     attach_candidates: []const Candidate = &.{},
 };
 
@@ -124,6 +121,13 @@ pub const State = struct {
         return .{ .rerender = true };
     }
 
+    pub fn enterPassive(self: *State) void {
+        self.mode = .passive;
+        self.notice_kind = .none;
+        self.notice_text.clearRetainingCapacity();
+        self.selected_candidate = null;
+    }
+
     pub fn clearNotice(self: *State) StepResult {
         if (self.notice_kind == .none and self.notice_text.items.len == 0) return .{};
         self.notice_kind = .none;
@@ -143,7 +147,7 @@ pub const State = struct {
 
     fn handlePassive(self: *State, ctx: ExternalContext, key: Key) StepResult {
         return switch (key) {
-            .ctrl_c => if (std.mem.eql(u8, ctx.passive_session, "detached"))
+            .ctrl_c => if (ctx.detached)
                 .{ .rerender = true, .action = .quit }
             else
                 .{},
@@ -166,7 +170,7 @@ pub const State = struct {
                 self.notice_text.clearRetainingCapacity();
                 break :blk .{ .rerender = true };
             },
-            .ctrl_c => .{ .rerender = true, .action = .quit },
+            .ctrl_c => .{ .rerender = true, .action = .detach },
             .home => .{ .rerender = true, .action = .first },
             .end => .{ .rerender = true, .action = .last },
             .left => .{ .rerender = true, .action = .prev },
@@ -174,7 +178,6 @@ pub const State = struct {
             .down => .{ .rerender = true, .action = .in },
             .up => .{ .rerender = true, .action = .out },
             .printable => |ch| switch (ch) {
-                'q' => .{ .rerender = true, .action = .quit },
                 'd' => .{ .rerender = true, .action = .detach },
                 'a' => blk: {
                     self.enterPrompt(.prompt_attach);
@@ -261,7 +264,7 @@ pub const State = struct {
                     break :blk .{ .rerender = true };
                 }
                 self.mode = .passive;
-                break :blk .{ .rerender = true, .action = .{ .attach = self.input_buf.items } };
+                break :blk .{ .rerender = true, .action = .{ .attach = self.allocator.dupe(u8, self.input_buf.items) catch return .{} } };
             },
             .printable => |ch| blk: {
                 self.insertChar(ch);
@@ -314,7 +317,7 @@ pub const State = struct {
                     break :blk .{ .rerender = true };
                 }
                 self.mode = .passive;
-                break :blk .{ .rerender = true, .action = .{ .create = self.input_buf.items } };
+                break :blk .{ .rerender = true, .action = .{ .create = self.allocator.dupe(u8, self.input_buf.items) catch return .{} } };
             },
             .printable => |ch| blk: {
                 self.insertChar(ch);
@@ -374,7 +377,7 @@ test "ctrl-c quits from detached passive state" {
     var state = State.init(std.testing.allocator);
     defer state.deinit();
 
-    const result = state.handleKey(.{ .passive_session = "detached" }, .ctrl_c);
+    const result = state.handleKey(.{ .detached = true }, .ctrl_c);
     try std.testing.expect(result.action != null);
     try std.testing.expectEqual(Action.quit, result.action.?);
 }

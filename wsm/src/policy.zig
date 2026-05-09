@@ -32,19 +32,30 @@ pub const Provider = struct {
     allocator: std.mem.Allocator,
     root: []u8,
     current_session: []u8,
-    passive_text: std.ArrayList(u8),
-    active_text: std.ArrayList(u8),
+    passive_label_buf: std.ArrayList(u8),
+    active_summary: std.ArrayList(u8),
     attach_candidates: []ui_state.Candidate,
 
     pub const NavOp = enum { first, last, prev, next, in, out };
+
+    pub const BarModel = struct {
+        workspace: []const u8,
+        session: []const u8,
+        passive_label: []const u8,
+        logs_exit_hint: bool,
+        active_summary: []const u8,
+        attach_candidates: []const ui_state.Candidate,
+        detached: bool,
+        scroll_view: bool,
+    };
 
     pub fn init(allocator: std.mem.Allocator, root: []const u8, current_session: ?[]const u8) !Provider {
         return .{
             .allocator = allocator,
             .root = try allocator.dupe(u8, root),
             .current_session = try allocator.dupe(u8, current_session orelse ""),
-            .passive_text = .{},
-            .active_text = .{},
+            .passive_label_buf = .{},
+            .active_summary = .{},
             .attach_candidates = &.{},
         };
     }
@@ -52,8 +63,8 @@ pub const Provider = struct {
     pub fn deinit(self: *Provider) void {
         self.allocator.free(self.root);
         self.allocator.free(self.current_session);
-        self.passive_text.deinit(self.allocator);
-        self.active_text.deinit(self.allocator);
+        self.passive_label_buf.deinit(self.allocator);
+        self.active_summary.deinit(self.allocator);
         freeCandidates(self.allocator, self.attach_candidates);
     }
 
@@ -64,25 +75,64 @@ pub const Provider = struct {
 
     pub fn externalContext(self: *const Provider) ui_state.ExternalContext {
         return .{
-            .passive_text = self.passive_text.items,
-            .active_text = self.active_text.items,
-            .passive_workspace = self.root,
-            .passive_session = if (self.current_session.len == 0) "detached" else self.current_session,
+            .detached = self.current_session.len == 0,
             .attach_candidates = self.attach_candidates,
         };
     }
 
+    pub fn barModel(self: *const Provider) BarModel {
+        return .{
+            .workspace = self.root,
+            .session = if (self.current_session.len == 0) "detached" else self.current_session,
+            .passive_label = self.passiveLabel(),
+            .logs_exit_hint = isScrollSession(self.current_session),
+            .active_summary = self.active_summary.items,
+            .attach_candidates = self.attach_candidates,
+            .detached = self.current_session.len == 0,
+            .scroll_view = isScrollSession(self.current_session),
+        };
+    }
+
     pub fn refresh(self: *Provider) !void {
-        self.passive_text.clearRetainingCapacity();
-        self.active_text.clearRetainingCapacity();
+        self.passive_label_buf.clearRetainingCapacity();
+        self.active_summary.clearRetainingCapacity();
 
         if (self.current_session.len == 0) {
-            try self.passive_text.appendSlice(self.allocator, "detached   [a] attach   [c] create");
-            try self.active_text.appendSlice(self.allocator, "detached   [a]attach [c]create [g]logs");
+            try self.passive_label_buf.appendSlice(self.allocator, "detached");
             return;
         }
 
-        try self.appendNavSummary();
+        try self.passive_label_buf.writer(self.allocator).print("{s}/{s}", .{ self.root, self.current_session });
+
+        if (self.current_session.len == 0 or isScrollSession(self.current_session)) return;
+
+        const first = try self.resolveNavTarget(.first);
+        defer if (first) |s| self.allocator.free(s);
+        const prev = try self.resolveNavTarget(.prev);
+        defer if (prev) |s| self.allocator.free(s);
+        const next = try self.resolveNavTarget(.next);
+        defer if (next) |s| self.allocator.free(s);
+        const last = try self.resolveNavTarget(.last);
+        defer if (last) |s| self.allocator.free(s);
+        const child = try self.resolveNavTarget(.in);
+        defer if (child) |s| self.allocator.free(s);
+        const parent = try self.resolveNavTarget(.out);
+        defer if (parent) |s| self.allocator.free(s);
+
+        if (first) |target| try appendTag(&self.active_summary, self.allocator, "home", basename(target));
+        if (prev) |target| try appendTag(&self.active_summary, self.allocator, "prev", basename(target));
+        if (next) |target| try appendTag(&self.active_summary, self.allocator, "next", basename(target));
+        if (child) |target| try appendTag(&self.active_summary, self.allocator, "in", basename(target));
+        if (parent) |target| try appendTag(&self.active_summary, self.allocator, "out", basename(target));
+        if (last) |target| try appendTag(&self.active_summary, self.allocator, "end", basename(target));
+    }
+
+    pub fn currentSessionIsScroll(self: *const Provider) bool {
+        return isScrollSession(self.current_session);
+    }
+
+    fn passiveLabel(self: *const Provider) []const u8 {
+        return self.passive_label_buf.items;
     }
 
     pub fn refreshAttachCandidates(self: *Provider, query: []const u8) !void {
@@ -183,37 +233,6 @@ pub const Provider = struct {
         if (matches.items.len == 1) return try self.allocator.dupe(u8, matches.items[0]);
         if (matches.items.len > 1) return Error.AmbiguousTarget;
         return null;
-    }
-
-    fn appendNavSummary(self: *Provider) !void {
-        const first = try self.resolveNavTarget(.first);
-        defer if (first) |s| self.allocator.free(s);
-        const prev = try self.resolveNavTarget(.prev);
-        defer if (prev) |s| self.allocator.free(s);
-        const next = try self.resolveNavTarget(.next);
-        defer if (next) |s| self.allocator.free(s);
-        const last = try self.resolveNavTarget(.last);
-        defer if (last) |s| self.allocator.free(s);
-        const child = try self.resolveNavTarget(.in);
-        defer if (child) |s| self.allocator.free(s);
-        const parent = try self.resolveNavTarget(.out);
-        defer if (parent) |s| self.allocator.free(s);
-
-        if (first) |target| try appendTag(&self.passive_text, self.allocator, "home", basename(target));
-        if (prev) |target| try appendTag(&self.passive_text, self.allocator, "←", basename(target));
-        if (next) |target| try appendTag(&self.passive_text, self.allocator, "→", basename(target));
-        if (child) |target| try appendTag(&self.passive_text, self.allocator, "↓", basename(target));
-        if (parent) |target| try appendTag(&self.passive_text, self.allocator, "↑", basename(target));
-
-        if (self.passive_text.items.len == 0) {
-            try self.passive_text.appendSlice(self.allocator, "attached");
-        }
-
-        try self.active_text.appendSlice(self.allocator, self.passive_text.items);
-        if (last) |target| {
-            if (self.active_text.items.len > 0) try self.active_text.appendSlice(self.allocator, "   ");
-            try appendTag(&self.active_text, self.allocator, "end", basename(target));
-        }
     }
 
     fn listIds(self: *Provider) ![][]u8 {
