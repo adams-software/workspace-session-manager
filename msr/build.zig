@@ -91,6 +91,25 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe);
 
+    const host_exe_root = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    host_exe_root.linkSystemLibrary("util", .{});
+    host_exe_root.addImport("host", host_mod);
+    host_exe_root.addImport("host_runtime", host_runtime_mod);
+    host_exe_root.addImport("host_control", host_control_mod);
+    host_exe_root.addImport("host_repl", host_repl_mod);
+    host_exe_root.addImport("server", server_mod);
+
+    const host_exe = b.addExecutable(.{
+        .name = "host",
+        .root_module = host_exe_root,
+    });
+    b.installArtifact(host_exe);
+
     const host_runtime_tests = b.addTest(.{ .root_module = host_runtime_mod });
     const run_host_runtime_tests = b.addRunArtifact(host_runtime_tests);
 
@@ -100,12 +119,12 @@ pub fn build(b: *std.Build) void {
     const host_client_tests = b.addTest(.{ .root_module = host_client_mod });
     const run_host_client_tests = b.addRunArtifact(host_client_tests);
 
-    const run_cmd = b.addRunArtifact(exe);
+    const run_cmd = b.addRunArtifact(host_exe);
     if (b.args) |args| run_cmd.addArgs(args);
-    const run_step = b.step("run", "Run the msr executable");
+    const run_step = b.step("run", "Run the host executable");
     run_step.dependOn(&run_cmd.step);
 
-    const test_step = b.step("test", "Run msr unit tests");
+    const test_step = b.step("test", "Run host runtime unit tests");
     test_step.dependOn(&run_host_runtime_tests.step);
     test_step.dependOn(&run_host_control_tests.step);
     test_step.dependOn(&run_host_client_tests.step);

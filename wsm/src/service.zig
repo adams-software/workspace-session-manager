@@ -59,7 +59,6 @@ pub const AttachedSession = struct {
     pub fn detach(self: *AttachedSession) void {
         self.link.detach();
     }
-
 };
 
 pub const SessionInfo = struct {
@@ -139,21 +138,21 @@ pub const CleanupRun = struct {
 
 pub const WorkspaceService = struct {
     allocator: std.mem.Allocator,
-    msr_bin: []const u8,
+    host_bin: []const u8,
     vpty_bin: []const u8,
     scroll_bin: []const u8,
 
-    pub fn init(allocator: std.mem.Allocator, msr_bin: []const u8, vpty_bin: []const u8, scroll_bin: []const u8) WorkspaceService {
+    pub fn init(allocator: std.mem.Allocator, host_bin: []const u8, vpty_bin: []const u8, scroll_bin: []const u8) WorkspaceService {
         return .{
             .allocator = allocator,
-            .msr_bin = msr_bin,
+            .host_bin = host_bin,
             .vpty_bin = vpty_bin,
             .scroll_bin = scroll_bin,
         };
     }
 
     pub fn create(self: *WorkspaceService, provider: *policy.Provider, id: []const u8, shell: []const u8, cols: ?u16, rows: ?u16) !SessionRef {
-        var paths = try session_primitives.createSession(self.allocator, self.msr_bin, provider, .{
+        var paths = try session_primitives.createSession(self.allocator, self.host_bin, provider, .{
             .id = id,
             .shell = shell,
             .vpty_bin = self.vpty_bin,
@@ -169,7 +168,7 @@ pub const WorkspaceService = struct {
     }
 
     pub fn createCommand(self: *WorkspaceService, provider: *policy.Provider, id: []const u8, argv: []const []const u8, cols: ?u16, rows: ?u16) !SessionRef {
-        var paths = try session_primitives.createCommandSession(self.allocator, self.msr_bin, provider, .{
+        var paths = try session_primitives.createCommandSession(self.allocator, self.host_bin, provider, .{
             .id = id,
             .vpty_bin = self.vpty_bin,
             .argv = argv,
@@ -262,7 +261,7 @@ pub const WorkspaceService = struct {
                 switch (entry.kind) {
                     .directory => try stack.append(self.allocator, joined),
                     .file, .unix_domain_socket => {
-                        if (std.mem.endsWith(u8, entry.name, ".msr")) {
+                        if (std.mem.endsWith(u8, entry.name, ".wsm")) {
                             if (try canonicalIdForSock(self.allocator, provider.root, joined)) |id| try out.append(self.allocator, id);
                             self.allocator.free(joined);
                         } else self.allocator.free(joined);
@@ -485,7 +484,7 @@ fn canonicalIdForSock(allocator: std.mem.Allocator, root: []const u8, sock: []co
     if (!std.mem.startsWith(u8, sock, root)) return null;
     var rel = sock[root.len..];
     if (rel.len > 0 and rel[0] == std.fs.path.sep) rel = rel[1..];
-    if (!std.mem.endsWith(u8, rel, ".msr")) return null;
+    if (!std.mem.endsWith(u8, rel, ".wsm")) return null;
     return try allocator.dupe(u8, rel[0 .. rel.len - 4]);
 }
 

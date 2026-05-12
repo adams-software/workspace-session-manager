@@ -34,7 +34,7 @@ pub fn parseMode(allocator: std.mem.Allocator, argv: []const []const u8) !Mode {
     const command = parsed.command orelse return .help;
     if (std.mem.eql(u8, command, "help")) return .help;
     if (std.mem.eql(u8, command, "list")) return .list;
-    if (std.mem.eql(u8, command, "cleanup")) return .{ .cleanup = argv_parse.hasOption(parsed, &.{ "apply" }) };
+    if (std.mem.eql(u8, command, "cleanup")) return .{ .cleanup = argv_parse.hasOption(parsed, &.{"apply"}) };
     if (std.mem.eql(u8, command, "kill")) {
         if (parsed.positionals.len < 1) return .help;
         return .{ .kill = .{ .id = try allocator.dupe(u8, parsed.positionals[0]), .force = argv_parse.hasOption(parsed, &.{ "f", "force" }) } };
@@ -95,7 +95,7 @@ pub fn resolveWorkspace(allocator: std.mem.Allocator, argv: []const []const u8) 
     defer allocator.free(parsed.positionals);
     defer if (parsed.literal_tail) |tail| allocator.free(tail);
 
-    if (argv_parse.findOptionValue(parsed, &.{ "workspace" })) |v| {
+    if (argv_parse.findOptionValue(parsed, &.{"workspace"})) |v| {
         return try std.fs.realpathAlloc(allocator, v);
     }
     const env_root = std.posix.getenv("WSM_ROOT") orelse return error.MissingWorkspace;
@@ -117,7 +117,7 @@ fn presentSummary(allocator: std.mem.Allocator, info: service_mod.SessionInfo) !
 pub fn runCommand(allocator: std.mem.Allocator, root: []const u8, mode: Mode, stdout_file: std.fs.File) !u8 {
     var provider = try policy.Provider.init(allocator, root, null);
     defer provider.deinit();
-    var service = service_mod.WorkspaceService.init(allocator, "zig-out/bin/msr", "zig-out/bin/vpty", "wsm/scripts/wsm_logs_viewer");
+    var service = service_mod.WorkspaceService.init(allocator, "zig-out/bin/host", "zig-out/bin/vpty", "wsm/scripts/wsm_logs_viewer");
 
     switch (mode) {
         .help => {

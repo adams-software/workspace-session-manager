@@ -19,21 +19,25 @@ fn err(comptime fmt: []const u8, args: anytype) void {
     std.debug.print(fmt, args);
 }
 
-fn usage() void {
+fn progName(argv0: []const u8) []const u8 {
+    return std.fs.path.basename(argv0);
+}
+
+fn usage(name: []const u8) void {
     out(
         "NAME\n" ++
-            "  msr - single-child foreground host\n\n" ++
+            "  {s} - single-child foreground host\n\n" ++
             "USAGE\n" ++
-            "  msr <socket-path> [--headless] [--size <cols>x<rows>] [--] <cmd...>\n\n" ++
+            "  {s} <socket-path> [--headless] [--size <cols>x<rows>] [--] <cmd...>\n\n" ++
             "BEHAVIOR\n" ++
             "  Starts one child process, binds one socket, accepts zero or one active\n" ++
             "  owner at a time, and exits when the child exits. The host cleans up its\n" ++
             "  socket path on exit. New attachers always replace the current owner.\n\n" ++
             "EXAMPLES\n" ++
-            "  msr /tmp/dev.sock -- /bin/sh -i\n" ++
-            "  msr /tmp/dev.sock --headless -- /bin/sh -i\n" ++
-            "  msr /tmp/dev.sock --size 120x40 -- nvim\n",
-        .{},
+            "  {s} /tmp/dev.sock -- /bin/sh -i\n" ++
+            "  {s} /tmp/dev.sock --headless -- /bin/sh -i\n" ++
+            "  {s} /tmp/dev.sock --size 120x40 -- nvim\n",
+        .{ name, name, name, name, name },
     );
 }
 
@@ -215,22 +219,23 @@ pub fn main() !void {
 
     const argv = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, argv);
+    const name = if (argv.len > 0) progName(argv[0]) else "msr";
 
     const parsed = parseArgs(allocator, argv) catch |e| {
         switch (e) {
             error.ShowHelp => {
-                usage();
+                usage(name);
                 return;
             },
             else => {
-                usage();
+                usage(name);
                 return std.process.exit(2);
             },
         }
     };
 
     const code = runHost(allocator, parsed) catch |e| {
-        err("msr: {s}\n", .{@errorName(e)});
+        err("{s}: {s}\n", .{ name, @errorName(e) });
         return std.process.exit(1);
     };
     std.process.exit(code);

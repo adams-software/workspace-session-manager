@@ -268,7 +268,7 @@ pub const Provider = struct {
                 switch (entry.kind) {
                     .directory => try stack.append(self.allocator, joined),
                     .file, .unix_domain_socket => {
-                        if (std.mem.endsWith(u8, entry.name, ".msr")) {
+                        if (std.mem.endsWith(u8, entry.name, ".wsm")) {
                             if (try self.canonicalIdForSock(joined)) |id| {
                                 if (isScrollSession(id)) {
                                     self.allocator.free(id);
@@ -343,7 +343,7 @@ pub const Provider = struct {
         errdefer self.freeOwnedStrings(out.items);
         while (try iter.next()) |entry| {
             if (entry.kind != .file and entry.kind != .unix_domain_socket) continue;
-            if (!std.mem.endsWith(u8, entry.name, ".msr")) continue;
+            if (!std.mem.endsWith(u8, entry.name, ".wsm")) continue;
             try out.append(self.allocator, try self.allocator.dupe(u8, entry.name[0 .. entry.name.len - 4]));
         }
         std.mem.sort([]u8, out.items, {}, lessThanString);
@@ -354,7 +354,7 @@ pub const Provider = struct {
         if (!std.mem.startsWith(u8, sock, self.root)) return null;
         var rel = sock[self.root.len..];
         if (rel.len > 0 and rel[0] == std.fs.path.sep) rel = rel[1..];
-        if (!std.mem.endsWith(u8, rel, ".msr")) return null;
+        if (!std.mem.endsWith(u8, rel, ".wsm")) return null;
         return try self.allocator.dupe(u8, rel[0 .. rel.len - 4]);
     }
 

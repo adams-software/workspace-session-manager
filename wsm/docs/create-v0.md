@@ -53,7 +53,7 @@ Users provide explicit canonical ids.
 
 Given workspace root `ROOT` and canonical id `a/b/c`:
 
-- session socket path: `ROOT/a/b/c.msr`
+- session socket path: `ROOT/a/b/c.wsm`
 - transcript path later: `ROOT/a/b/c.typescript`
 
 Parent directories are created as needed.
@@ -78,7 +78,7 @@ The canonical id model is purely lexical. There is no metadata graph in v0.
 
 ### Collision behavior
 
-If `ROOT/<id>.msr` already exists, `create` fails.
+If `ROOT/<id>.wsm` already exists, `create` fails.
 
 v0 does not support:
 

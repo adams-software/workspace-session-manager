@@ -13,7 +13,7 @@ The `.scroll` session is created and attached through the normal `wsm` / `msr` l
 ### 1. Add a command-backed session create path
 Current `session_primitives.createSession(...)` is shell-specific and always assembles:
 - `msr(.ctl)`
-- `msr(.msr)`
+- `msr(.wsm)`
 - `vpty`
 - `alt`
 - scripted shell

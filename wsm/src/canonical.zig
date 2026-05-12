@@ -29,7 +29,7 @@ pub fn validateId(id: []const u8) Error!void {
 
 pub fn socketPath(allocator: std.mem.Allocator, root: []const u8, id: []const u8) ![]u8 {
     try validateId(id);
-    const leaf = try std.fmt.allocPrint(allocator, "{s}.msr", .{id});
+    const leaf = try std.fmt.allocPrint(allocator, "{s}.wsm", .{id});
     defer allocator.free(leaf);
     return try std.fs.path.join(allocator, &.{ root, leaf });
 }

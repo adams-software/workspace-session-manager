@@ -49,11 +49,11 @@ pub fn pathsForId(allocator: std.mem.Allocator, provider: *policy.Provider, id: 
 }
 
 pub fn controlPathForDataPath(allocator: std.mem.Allocator, data_path: []const u8) ![]u8 {
-    if (!std.mem.endsWith(u8, data_path, ".msr")) return error.InvalidPath;
+    if (!std.mem.endsWith(u8, data_path, ".wsm")) return error.InvalidPath;
     return try std.fmt.allocPrint(allocator, "{s}.ctl", .{data_path[0 .. data_path.len - 4]});
 }
 
-pub fn createSession(allocator: std.mem.Allocator, msr_bin: []const u8, provider: *policy.Provider, spec: CreateSpec) !SessionPaths {
+pub fn createSession(allocator: std.mem.Allocator, host_bin: []const u8, provider: *policy.Provider, spec: CreateSpec) !SessionPaths {
     var paths = try pathsForId(allocator, provider, spec.id);
     errdefer paths.deinit(allocator);
 
@@ -81,11 +81,11 @@ pub fn createSession(allocator: std.mem.Allocator, msr_bin: []const u8, provider
     defer allocator.free(primary_cmd);
 
     try argv.appendSlice(allocator, &.{
-        msr_bin,
+        host_bin,
         paths.control_path,
         "--headless",
         "--",
-        msr_bin,
+        host_bin,
         paths.data_path,
     });
     if (size_arg) |arg| try argv.appendSlice(allocator, &.{ "--size", arg });
@@ -109,7 +109,7 @@ pub fn createSession(allocator: std.mem.Allocator, msr_bin: []const u8, provider
     return paths;
 }
 
-pub fn createCommandSession(allocator: std.mem.Allocator, msr_bin: []const u8, provider: *policy.Provider, spec: CreateCommandSpec) !SessionPaths {
+pub fn createCommandSession(allocator: std.mem.Allocator, host_bin: []const u8, provider: *policy.Provider, spec: CreateCommandSpec) !SessionPaths {
     var paths = try pathsForId(allocator, provider, spec.id);
     errdefer paths.deinit(allocator);
 
@@ -128,11 +128,11 @@ pub fn createCommandSession(allocator: std.mem.Allocator, msr_bin: []const u8, p
         null;
     defer if (size_arg) |arg| allocator.free(arg);
     try argv.appendSlice(allocator, &.{
-        msr_bin,
+        host_bin,
         paths.control_path,
         "--headless",
         "--",
-        msr_bin,
+        host_bin,
         paths.data_path,
     });
     if (size_arg) |arg| try argv.appendSlice(allocator, &.{ "--size", arg });

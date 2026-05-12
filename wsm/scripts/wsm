@@ -206,24 +206,24 @@ canonical_id_for_sock() {
   local rel
   rel="${sock#$WSM_ROOT_RESOLVED/}"
   [[ "$rel" != "$sock" ]] || {
-    if [[ "$sock" == "$WSM_ROOT_RESOLVED"/*.msr ]]; then
+    if [[ "$sock" == "$WSM_ROOT_RESOLVED"/*.wsm ]]; then
       rel="$(basename -- "$sock")"
     else
       return 1
     fi
   }
-  [[ "$rel" == *.msr ]] || return 1
-  printf '%s\n' "${rel%.msr}"
+  [[ "$rel" == *.wsm ]] || return 1
+  printf '%s\n' "${rel%.wsm}"
 }
 
 sock_for_canonical() {
   local id="$1"
-  printf '%s/%s.msr\n' "$WSM_ROOT_RESOLVED" "$id"
+  printf '%s/%s.wsm\n' "$WSM_ROOT_RESOLVED" "$id"
 }
 
 typescript_for_sock() {
   local sock="$1"
-  printf '%s\n' "${sock%.msr}.typescript"
+  printf '%s\n' "${sock%.wsm}.typescript"
 }
 
 shell_join_argv() {
@@ -294,7 +294,7 @@ current_node_dir() {
 }
 
 list_ids() {
-  find "$WSM_ROOT_RESOLVED" \( -type s -o -type f \) -name '*.msr' 2>/dev/null | \
+  find "$WSM_ROOT_RESOLVED" \( -type s -o -type f \) -name '*.wsm' 2>/dev/null | \
     while IFS= read -r path; do
       canonical_id_for_sock "$path" || true
     done | LC_ALL=C sort -u
@@ -460,8 +460,8 @@ direct_child_ids_of() {
 
 dir_session_names() {
   local dir="$1"
-  find "$dir" -maxdepth 1 \( -type s -o -type f \) -name '*.msr' -printf '%f\n' 2>/dev/null | \
-    sed 's/\.msr$//' | LC_ALL=C sort
+  find "$dir" -maxdepth 1 \( -type s -o -type f \) -name '*.wsm' -printf '%f\n' 2>/dev/null | \
+    sed 's/\.wsm$//' | LC_ALL=C sort
 }
 
 require_log_view_context() {
@@ -483,18 +483,18 @@ resolve_nav_target() {
       current_dir="$(current_node_dir)" || return 1
       mapfile -t names < <(dir_session_names "$current_dir")
       [[ ${#names[@]} -gt 0 ]] || return 1
-      canonical_id_for_sock "$current_dir/${names[0]}.msr"
+      canonical_id_for_sock "$current_dir/${names[0]}.wsm"
       ;;
     last)
       current_dir="$(current_node_dir)" || return 1
       mapfile -t names < <(dir_session_names "$current_dir")
       [[ ${#names[@]} -gt 0 ]] || return 1
-      canonical_id_for_sock "$current_dir/${names[$((${#names[@]} - 1))]}.msr"
+      canonical_id_for_sock "$current_dir/${names[$((${#names[@]} - 1))]}.wsm"
       ;;
     prev|next)
       current_dir="$(current_node_dir)" || return 1
       current_name="${MSR_SESSION##*/}"
-      current_name="${current_name%.msr}"
+      current_name="${current_name%.wsm}"
       mapfile -t names < <(dir_session_names "$current_dir")
       [[ ${#names[@]} -gt 0 ]] || return 1
       last=$((${#names[@]} - 1))
@@ -502,15 +502,15 @@ resolve_nav_target() {
         if [[ "${names[$i]}" == "$current_name" ]]; then
           if [[ "$op" == "prev" ]]; then
             if [[ $i -gt 0 ]]; then
-              canonical_id_for_sock "$current_dir/${names[$((i-1))]}.msr"
+              canonical_id_for_sock "$current_dir/${names[$((i-1))]}.wsm"
             else
-              canonical_id_for_sock "$current_dir/${names[$last]}.msr"
+              canonical_id_for_sock "$current_dir/${names[$last]}.wsm"
             fi
           else
             if [[ $i -lt $last ]]; then
-              canonical_id_for_sock "$current_dir/${names[$((i+1))]}.msr"
+              canonical_id_for_sock "$current_dir/${names[$((i+1))]}.wsm"
             else
-              canonical_id_for_sock "$current_dir/${names[0]}.msr"
+              canonical_id_for_sock "$current_dir/${names[0]}.wsm"
             fi
           fi
           return 0

@@ -134,7 +134,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
 
-    // msr
+    // session host runtime (installed as both host and msr during migration)
     const exe_root = b.createModule(.{
         .root_source_file = b.path("msr/src/main.zig"),
         .target = target,
@@ -149,11 +149,31 @@ pub fn build(b: *std.Build) void {
     exe_root.addImport("server", server_mod);
     exe_root.addImport("ptyio_tty_size", tty_size_mod);
 
-    const exe = b.addExecutable(.{
+    const msr_exe = b.addExecutable(.{
         .name = "msr",
         .root_module = exe_root,
     });
-    b.installArtifact(exe);
+    b.installArtifact(msr_exe);
+
+    const host_exe_root = b.createModule(.{
+        .root_source_file = b.path("msr/src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    host_exe_root.linkSystemLibrary("util", .{});
+    host_exe_root.addImport("host", host_mod);
+    host_exe_root.addImport("host_runtime", host_runtime_mod);
+    host_exe_root.addImport("host_control", host_control_mod);
+    host_exe_root.addImport("host_repl", host_repl_mod);
+    host_exe_root.addImport("server", server_mod);
+    host_exe_root.addImport("ptyio_tty_size", tty_size_mod);
+
+    const host_exe = b.addExecutable(.{
+        .name = "host",
+        .root_module = host_exe_root,
+    });
+    b.installArtifact(host_exe);
 
     const attach_root = b.createModule(.{
         .root_source_file = b.path("attach/src/main.zig"),
@@ -197,10 +217,15 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(wsm_exe);
 
-    const run_cmd = b.addRunArtifact(exe);
+    const run_cmd = b.addRunArtifact(msr_exe);
     if (b.args) |args| run_cmd.addArgs(args);
-    const run_step = b.step("run", "Run the msr executable");
+    const run_step = b.step("run", "Run the compatibility msr executable");
     run_step.dependOn(&run_cmd.step);
+
+    const run_host_cmd = b.addRunArtifact(host_exe);
+    if (b.args) |args| run_host_cmd.addArgs(args);
+    const run_host_step = b.step("run-host", "Run the host executable");
+    run_host_step.dependOn(&run_host_cmd.step);
 
     const byte_queue_tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("ptyio/src/stream/byte_queue.zig"), .target = target, .optimize = optimize, .link_libc = true,
@@ -458,13 +483,13 @@ pub fn build(b: *std.Build) void {
     const test_fd_stream_step = b.step("test-fd-stream", "Run fd_stream tests");
     test_fd_stream_step.dependOn(&run_fd_stream_tests.step);
 
-    const test_host_runtime_step = b.step("test-host-runtime", "Run msr host_runtime tests");
+    const test_host_runtime_step = b.step("test-host-runtime", "Run host_runtime tests");
     test_host_runtime_step.dependOn(&run_host_runtime_tests.step);
 
-    const test_host_control_step = b.step("test-host-control", "Run msr host_control tests");
+    const test_host_control_step = b.step("test-host-control", "Run host_control tests");
     test_host_control_step.dependOn(&run_host_control_tests.step);
 
-    const test_host_client_step = b.step("test-host-client", "Run msr host_client tests");
+    const test_host_client_step = b.step("test-host-client", "Run host_client tests");
     test_host_client_step.dependOn(&run_host_client_tests.step);
 
     const test_wsm_ui_state_step = b.step("test-wsm-ui-state", "Run wsm ui_state tests");
@@ -478,7 +503,7 @@ pub fn build(b: *std.Build) void {
 
     const smoke_cmd = b.addSystemCommand(&.{ "python3", "-u", "msr/scripts/smoke_msr_binary.py" });
     smoke_cmd.setCwd(b.path("."));
-    const smoke_step = b.step("smoke-binary", "Run real-binary smoke test for msr");
+    const smoke_step = b.step("smoke-binary", "Run real-binary smoke test for the host runtime");
     smoke_step.dependOn(b.getInstallStep());
     smoke_step.dependOn(&smoke_cmd.step);
 

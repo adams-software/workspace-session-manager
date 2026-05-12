@@ -29,10 +29,10 @@ _wsm_complete() {
     fi
 
     [[ -d "$root" ]] || return 0
-    find "$root" \( -type s -o -type f \) -name '*.msr' 2>/dev/null | while IFS= read -r path; do
+    find "$root" \( -type s -o -type f \) -name '*.wsm' 2>/dev/null | while IFS= read -r path; do
       local rel="${path#$root/}"
       [[ "$rel" == "$path" ]] && rel="$(basename -- "$path")"
-      printf '%s\n' "${rel%.msr}"
+      printf '%s\n' "${rel%.wsm}"
     done | LC_ALL=C sort -u
   }
 
