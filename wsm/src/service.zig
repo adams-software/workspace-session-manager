@@ -60,9 +60,6 @@ pub const AttachedSession = struct {
         self.link.detach();
     }
 
-    pub fn altCycle(self: *AttachedSession) !void {
-        try self.link.altCycle();
-    }
 };
 
 pub const SessionInfo = struct {
@@ -83,6 +80,16 @@ pub const SessionHealth = enum {
     stale_data_socket,
     stale_control_socket,
     stale_both,
+};
+
+pub const AttachState = enum {
+    ready,
+    missing_data,
+    stale_data_socket,
+    stale_control_socket,
+    stale_both,
+    data_not_connectable,
+    control_not_connectable,
 };
 
 pub const CleanupStatus = enum {
@@ -134,15 +141,13 @@ pub const WorkspaceService = struct {
     allocator: std.mem.Allocator,
     msr_bin: []const u8,
     vpty_bin: []const u8,
-    alt_bin: []const u8,
     scroll_bin: []const u8,
 
-    pub fn init(allocator: std.mem.Allocator, msr_bin: []const u8, vpty_bin: []const u8, alt_bin: []const u8, scroll_bin: []const u8) WorkspaceService {
+    pub fn init(allocator: std.mem.Allocator, msr_bin: []const u8, vpty_bin: []const u8, scroll_bin: []const u8) WorkspaceService {
         return .{
             .allocator = allocator,
             .msr_bin = msr_bin,
             .vpty_bin = vpty_bin,
-            .alt_bin = alt_bin,
             .scroll_bin = scroll_bin,
         };
     }
@@ -152,8 +157,6 @@ pub const WorkspaceService = struct {
             .id = id,
             .shell = shell,
             .vpty_bin = self.vpty_bin,
-            .alt_bin = self.alt_bin,
-            .scroll_bin = self.scroll_bin,
             .cols = cols,
             .rows = rows,
         });
@@ -370,6 +373,23 @@ pub const WorkspaceService = struct {
         return entry.health;
     }
 
+    pub fn attachState(self: *WorkspaceService, provider: *policy.Provider, id: []const u8) !AttachState {
+        const entry = try self.cleanupEntry(provider, id);
+        defer entry.deinit(self.allocator);
+
+        switch (entry.health) {
+            .missing_data => return .missing_data,
+            .stale_data_socket => return .stale_data_socket,
+            .stale_control_socket => return .stale_control_socket,
+            .stale_both => return .stale_both,
+            .live => {},
+        }
+
+        if (!try isConnectableSocket(entry.info.session.paths.data_path)) return .data_not_connectable;
+        if (entry.info.control_path_exists and !try isConnectableSocket(entry.info.session.paths.control_path)) return .control_not_connectable;
+        return .ready;
+    }
+
     pub fn killSession(self: *WorkspaceService, provider: *policy.Provider, id: []const u8, sig: KillSignal) !void {
         var attached = try self.attachOnce(provider, id);
         defer attached.deinit();
@@ -404,7 +424,6 @@ pub const WorkspaceService = struct {
         try link.attach(.{
             .data_path = paths.data_path,
             .control_path = if (pathExists(paths.control_path)) paths.control_path else null,
-            .alt_path = if (pathExists(paths.alt_path)) paths.alt_path else null,
         });
         return .{ .link = link };
     }
@@ -438,6 +457,26 @@ fn isStaleSocket(path: []const u8) !bool {
 
     const e = std.posix.errno(-1);
     if (e == .CONNREFUSED or e == .NOENT) return true;
+    if (e == .ACCES) return error.PermissionDenied;
+    return false;
+}
+
+fn isConnectableSocket(path: []const u8) !bool {
+    var addr: c.struct_sockaddr_un = undefined;
+    @memset(std.mem.asBytes(&addr), 0);
+    addr.sun_family = c.AF_UNIX;
+    std.mem.copyForwards(u8, addr.sun_path[0..path.len], path);
+    addr.sun_path[path.len] = 0;
+
+    const fd = c.socket(c.AF_UNIX, c.SOCK_STREAM, 0);
+    if (fd < 0) return error.IoError;
+    defer _ = c.close(fd);
+
+    const rc = c.connect(fd, @as(*const c.struct_sockaddr, @ptrCast(&addr)), @intCast(@sizeOf(c.struct_sockaddr_un)));
+    if (rc == 0) return true;
+
+    const e = std.posix.errno(-1);
+    if (e == .CONNREFUSED or e == .NOENT or e == .NOTSOCK) return false;
     if (e == .ACCES) return error.PermissionDenied;
     return false;
 }

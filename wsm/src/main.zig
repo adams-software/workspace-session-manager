@@ -282,7 +282,7 @@ const App = struct {
             .attach => |target| self.allocator.free(target),
             else => {},
         }
-        return self.executor.run(&self.provider, resolved) catch |err| .{ .err = try std.fmt.allocPrint(self.allocator, "action failed: {s}", .{@errorName(err)}) };
+        return self.executor.runSized(&self.provider, resolved, self.term.tty_fd, .{ .cols = self.layout.outer_cols, .rows = self.layout.main_rows }) catch |err| .{ .err = try std.fmt.allocPrint(self.allocator, "action failed: {s}", .{@errorName(err)}) };
     }
 
     fn applyExecResult(self: *App, exec_result: executor_mod.Result) !void {
@@ -304,11 +304,25 @@ const App = struct {
                 try self.provider.setCurrentSession(id);
                 _ = self.bar_state.clearNotice();
                 _ = self.executor.forwardResize(self.layout.outer_cols, self.layout.main_rows) catch {};
+                const pump_result = self.executor.pumpAttachedOutput(&self.provider, self.term.tty_fd) catch |err| {
+                    const msg = try std.fmt.allocPrint(self.allocator, "post-attach sync failed: {s}", .{@errorName(err)});
+                    _ = self.bar_state.setExternalError(msg);
+                    self.allocator.free(msg);
+                    return;
+                };
+                switch (pump_result) {
+                    .err => |msg| {
+                        defer self.allocator.free(msg);
+                        _ = self.bar_state.setExternalError(msg);
+                    },
+                    else => {},
+                }
             },
             .detached => {
                 try self.provider.setCurrentSession(null);
                 _ = self.bar_state.clearNotice();
             },
+            .idle => {},
         }
     }
 
@@ -322,6 +336,7 @@ const App = struct {
             .detached => {
                 if (!self.executor.isInteractiveAttached()) self.should_exit = true;
             },
+            .idle => {},
             .err => {
                 try self.applyExecResult(pump_result);
                 if (!self.executor.isInteractiveAttached()) self.should_exit = true;
@@ -329,7 +344,6 @@ const App = struct {
             .info => |msg| {
                 defer self.allocator.free(msg);
                 debugLog("wsm pump info len={d} attached={}\n", .{ msg.len, self.executor.isInteractiveAttached() });
-                if (!self.executor.isInteractiveAttached() and msg.len == 0) self.should_exit = true;
             },
             else => {},
         }
@@ -365,8 +379,28 @@ fn currentOuterSize(term: *TerminalState) !OuterSize {
     };
 }
 
+fn setRuntimeExitMessage(app: *App, allocator: std.mem.Allocator, comptime context: []const u8, err: anyerror) !void {
+    const msg = try std.fmt.allocPrint(allocator, "wsm runtime error ({s}): {s}", .{ context, @errorName(err) });
+    defer allocator.free(msg);
+    if (app.exit_message) |existing| allocator.free(existing);
+    app.exit_message = try allocator.dupe(u8, msg);
+    _ = app.bar_state.setExternalError(msg);
+    app.should_exit = true;
+}
+
 fn keyFromInput(bytes: []const u8, hotkey: KeyBinding) ?ui_state.Key {
     if (bytes.len == 0) return null;
+    if (bytes.len >= 3 and bytes[0] == 0x1b and bytes[1] == '[') {
+        return switch (bytes[2]) {
+            'A' => .up,
+            'B' => .down,
+            'C' => .right,
+            'D' => .left,
+            'H' => .home,
+            'F' => .end,
+            else => null,
+        };
+    }
     const b = bytes[0];
     if (hotkey.ctrl and b >= 0x01 and b <= 0x1a and ('a' + (b - 1)) == hotkey.ch) return .ctrl_g;
     return ui_state.Key.fromByte(b);
@@ -420,13 +454,18 @@ fn runInteractive(allocator: std.mem.Allocator, mode: cli_main.Mode) !void {
 
     var app = try App.init(allocator, &term, mode);
 
-    try app.render();
+    app.render() catch |err| {
+        try setRuntimeExitMessage(&app, allocator, "render", err);
+    };
 
     var tty_buf: [256]u8 = undefined;
     while (!app.should_exit) {
         if (ResizeState.pending) {
             ResizeState.pending = false;
-            try app.handleResize();
+            app.handleResize() catch |err| {
+                try setRuntimeExitMessage(&app, allocator, "resize", err);
+                continue;
+            };
         }
 
         var pfds: [2]c.struct_pollfd = .{
@@ -451,7 +490,10 @@ fn runInteractive(allocator: std.mem.Allocator, mode: cli_main.Mode) !void {
             const n = c.read(term.tty_fd, &tty_buf, tty_buf.len);
             if (n > 0) {
                 const used: usize = @intCast(n);
-                _ = try app.handleTTYInput(tty_buf[0..used]);
+                _ = app.handleTTYInput(tty_buf[0..used]) catch |err| {
+                    try setRuntimeExitMessage(&app, allocator, "tty input", err);
+                    continue;
+                };
             } else if (n < 0) {
                 const err = std.posix.errno(-1);
                 if (err != .AGAIN and err != .INTR) return Error.Unexpected;
@@ -466,10 +508,24 @@ fn runInteractive(allocator: std.mem.Allocator, mode: cli_main.Mode) !void {
                 return Error.Unexpected;
             }
             if ((rev & (c.POLLHUP | c.POLLERR)) != 0) {
-                try app.handlePumpResult(try app.executor.pumpAttachedOutput(&app.provider, term.tty_fd));
+                const pump_result = app.executor.pumpAttachedOutput(&app.provider, term.tty_fd) catch |err| {
+                    try setRuntimeExitMessage(&app, allocator, "pump attached output", err);
+                    continue;
+                };
+                app.handlePumpResult(pump_result) catch |err| {
+                    try setRuntimeExitMessage(&app, allocator, "handle pump result", err);
+                    continue;
+                };
             }
             if ((rev & c.POLLIN) != 0) {
-                try app.handlePumpResult(try app.executor.pumpAttachedOutput(&app.provider, term.tty_fd));
+                const pump_result = app.executor.pumpAttachedOutput(&app.provider, term.tty_fd) catch |err| {
+                    try setRuntimeExitMessage(&app, allocator, "pump attached output", err);
+                    continue;
+                };
+                app.handlePumpResult(pump_result) catch |err| {
+                    try setRuntimeExitMessage(&app, allocator, "handle pump result", err);
+                    continue;
+                };
             }
         }
     }

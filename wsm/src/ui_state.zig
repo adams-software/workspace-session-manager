@@ -5,6 +5,7 @@ pub const Mode = enum {
     active_menu,
     prompt_attach,
     prompt_create,
+    prompt_kill,
 };
 
 pub const InlineNoticeKind = enum {
@@ -57,11 +58,10 @@ pub const Action = union(enum) {
     detach,
     prev,
     next,
-    first,
-    last,
     in,
     out,
     logs,
+    kill,
     attach: []const u8,
     create: []const u8,
 };
@@ -108,6 +108,7 @@ pub const State = struct {
             .active_menu => self.handleActiveMenu(ctx, key),
             .prompt_attach => self.handlePromptAttach(ctx, key),
             .prompt_create => self.handlePromptCreate(key),
+            .prompt_kill => self.handlePromptKill(key),
         };
     }
 
@@ -171,8 +172,6 @@ pub const State = struct {
                 break :blk .{ .rerender = true };
             },
             .ctrl_c => .{ .rerender = true, .action = .detach },
-            .home => .{ .rerender = true, .action = .first },
-            .end => .{ .rerender = true, .action = .last },
             .left => .{ .rerender = true, .action = .prev },
             .right => .{ .rerender = true, .action = .next },
             .down => .{ .rerender = true, .action = .in },
@@ -187,18 +186,15 @@ pub const State = struct {
                     self.enterPrompt(.prompt_create);
                     break :blk .{ .rerender = true };
                 },
+                'x' => blk: {
+                    self.enterPrompt(.prompt_kill);
+                    break :blk .{ .rerender = true };
+                },
                 'h' => .{ .rerender = true, .action = .prev },
-                'l' => .{ .rerender = true, .action = .next },
                 'j' => .{ .rerender = true, .action = .in },
                 'k' => .{ .rerender = true, .action = .out },
-                '0' => .{ .rerender = true, .action = .first },
-                '$' => .{ .rerender = true, .action = .last },
-                'p' => .{ .rerender = true, .action = .prev },
                 'n' => .{ .rerender = true, .action = .next },
-                'i' => .{ .rerender = true, .action = .in },
-                'o' => .{ .rerender = true, .action = .out },
-                'f' => .{ .rerender = true, .action = .first },
-                'e' => .{ .rerender = true, .action = .last },
+                'l' => .{ .rerender = true, .action = .next },
                 'g' => .{ .rerender = true, .action = .logs },
                 else => .{},
             },
@@ -322,6 +318,22 @@ pub const State = struct {
             .printable => |ch| blk: {
                 self.insertChar(ch);
                 break :blk .{ .rerender = true };
+            },
+            else => .{},
+        };
+    }
+
+    fn handlePromptKill(self: *State, key: Key) StepResult {
+        return switch (key) {
+            .ctrl_g, .esc => blk: {
+                self.mode = .active_menu;
+                self.notice_kind = .none;
+                self.notice_text.clearRetainingCapacity();
+                break :blk .{ .rerender = true };
+            },
+            .enter => blk: {
+                self.mode = .passive;
+                break :blk .{ .rerender = true, .action = .kill };
             },
             else => .{},
         };

@@ -23,6 +23,7 @@ pub const ResolvedAction = union(enum) {
     quit,
     detach,
     logs,
+    kill,
     nav: []u8,
     attach: []u8,
     create: []u8,
@@ -36,7 +37,7 @@ pub const Provider = struct {
     active_summary: std.ArrayList(u8),
     attach_candidates: []ui_state.Candidate,
 
-    pub const NavOp = enum { first, last, prev, next, in, out };
+    pub const NavOp = enum { prev, next, in, out };
 
     pub const BarModel = struct {
         workspace: []const u8,
@@ -95,36 +96,58 @@ pub const Provider = struct {
 
     pub fn refresh(self: *Provider) !void {
         self.passive_label_buf.clearRetainingCapacity();
-        self.active_summary.clearRetainingCapacity();
+        var next_active_summary = std.ArrayList(u8){};
+        defer next_active_summary.deinit(self.allocator);
 
         if (self.current_session.len == 0) {
+            self.active_summary.clearRetainingCapacity();
             try self.passive_label_buf.appendSlice(self.allocator, "detached");
             return;
         }
 
         try self.passive_label_buf.writer(self.allocator).print("{s}/{s}", .{ self.root, self.current_session });
 
-        if (self.current_session.len == 0 or isScrollSession(self.current_session)) return;
+        if (self.current_session.len == 0 or isScrollSession(self.current_session)) {
+            self.active_summary.clearRetainingCapacity();
+            return;
+        }
 
-        const first = try self.resolveNavTarget(.first);
-        defer if (first) |s| self.allocator.free(s);
         const prev = try self.resolveNavTarget(.prev);
         defer if (prev) |s| self.allocator.free(s);
         const next = try self.resolveNavTarget(.next);
         defer if (next) |s| self.allocator.free(s);
-        const last = try self.resolveNavTarget(.last);
-        defer if (last) |s| self.allocator.free(s);
         const child = try self.resolveNavTarget(.in);
         defer if (child) |s| self.allocator.free(s);
         const parent = try self.resolveNavTarget(.out);
         defer if (parent) |s| self.allocator.free(s);
 
-        if (first) |target| try appendTag(&self.active_summary, self.allocator, "home", basename(target));
-        if (prev) |target| try appendTag(&self.active_summary, self.allocator, "prev", basename(target));
-        if (next) |target| try appendTag(&self.active_summary, self.allocator, "next", basename(target));
-        if (child) |target| try appendTag(&self.active_summary, self.allocator, "in", basename(target));
-        if (parent) |target| try appendTag(&self.active_summary, self.allocator, "out", basename(target));
-        if (last) |target| try appendTag(&self.active_summary, self.allocator, "end", basename(target));
+        if (prev) |target| {
+            const label = try relativeSiblingLabelAlloc(self.allocator, target);
+            defer self.allocator.free(label);
+            try appendTag(&next_active_summary, self.allocator, "←", label);
+        } else try appendTag(&next_active_summary, self.allocator, "←", "_");
+
+        if (child) |target| {
+            const label = try relativeChildLabelAlloc(self.allocator, target);
+            defer self.allocator.free(label);
+            try appendTag(&next_active_summary, self.allocator, "↓", label);
+        } else try appendTag(&next_active_summary, self.allocator, "↓", "_");
+
+        if (parent) |target| {
+            const label = try relativeParentLabelAlloc(self.allocator, target);
+            defer self.allocator.free(label);
+            try appendTag(&next_active_summary, self.allocator, "↑", label);
+        } else try appendTag(&next_active_summary, self.allocator, "↑", "_");
+
+        if (next) |target| {
+            const label = try relativeSiblingLabelAlloc(self.allocator, target);
+            defer self.allocator.free(label);
+            try appendTag(&next_active_summary, self.allocator, "→", label);
+        } else try appendTag(&next_active_summary, self.allocator, "→", "_");
+
+        self.active_summary.deinit(self.allocator);
+        self.active_summary = next_active_summary;
+        next_active_summary = .{};
     }
 
     pub fn currentSessionIsScroll(self: *const Provider) bool {
@@ -137,6 +160,7 @@ pub const Provider = struct {
 
     pub fn refreshAttachCandidates(self: *Provider, query: []const u8) !void {
         freeCandidates(self.allocator, self.attach_candidates);
+        self.attach_candidates = &.{};
         self.attach_candidates = try self.queryCandidates(query);
     }
 
@@ -145,10 +169,9 @@ pub const Provider = struct {
             .quit => .quit,
             .detach => .detach,
             .logs => .logs,
+            .kill => .kill,
             .prev => .{ .nav = (try self.resolveNavTarget(.prev)) orelse try self.allocator.dupe(u8, "") },
             .next => .{ .nav = (try self.resolveNavTarget(.next)) orelse try self.allocator.dupe(u8, "") },
-            .first => .{ .nav = (try self.resolveNavTarget(.first)) orelse try self.allocator.dupe(u8, "") },
-            .last => .{ .nav = (try self.resolveNavTarget(.last)) orelse try self.allocator.dupe(u8, "") },
             .in => .{ .nav = (try self.resolveNavTarget(.in)) orelse try self.allocator.dupe(u8, "") },
             .out => .{ .nav = (try self.resolveNavTarget(.out)) orelse try self.allocator.dupe(u8, "") },
             .attach => |query| blk: {
@@ -171,22 +194,10 @@ pub const Provider = struct {
         if (self.current_session.len == 0) return null;
         const current_dir = currentNodeDir(self.current_session);
         switch (op) {
-            .first => {
-                const names = try self.dirSessionNames(current_dir);
-                defer self.freeStringSlice(names);
-                if (names.len == 0) return null;
-                return try self.joinCanonical(current_dir, names[0]);
-            },
-            .last => {
-                const names = try self.dirSessionNames(current_dir);
-                defer self.freeStringSlice(names);
-                if (names.len == 0) return null;
-                return try self.joinCanonical(current_dir, names[names.len - 1]);
-            },
             .prev, .next => {
                 const names = try self.dirSessionNames(current_dir);
                 defer self.freeStringSlice(names);
-                if (names.len == 0) return null;
+                if (names.len <= 1) return null;
                 const current_name = basename(self.current_session);
                 for (names, 0..) |name, i| {
                     if (std.mem.eql(u8, name, current_name)) {
@@ -195,6 +206,7 @@ pub const Provider = struct {
                             .next => if (i + 1 < names.len) i + 1 else 0,
                             else => unreachable,
                         };
+                        if (std.mem.eql(u8, names[idx], current_name)) return null;
                         return try self.joinCanonical(current_dir, names[idx]);
                     }
                 }
@@ -255,9 +267,15 @@ pub const Provider = struct {
                 const joined = try std.fs.path.join(self.allocator, &.{ dir_path, entry.name });
                 switch (entry.kind) {
                     .directory => try stack.append(self.allocator, joined),
-                    .file => {
+                    .file, .unix_domain_socket => {
                         if (std.mem.endsWith(u8, entry.name, ".msr")) {
-                            if (try self.canonicalIdForSock(joined)) |id| try out.append(self.allocator, id);
+                            if (try self.canonicalIdForSock(joined)) |id| {
+                                if (isScrollSession(id)) {
+                                    self.allocator.free(id);
+                                } else {
+                                    try out.append(self.allocator, id);
+                                }
+                            }
                             self.allocator.free(joined);
                         } else self.allocator.free(joined);
                     },
@@ -324,7 +342,7 @@ pub const Provider = struct {
         var out = std.ArrayList([]u8){};
         errdefer self.freeOwnedStrings(out.items);
         while (try iter.next()) |entry| {
-            if (entry.kind != .file) continue;
+            if (entry.kind != .file and entry.kind != .unix_domain_socket) continue;
             if (!std.mem.endsWith(u8, entry.name, ".msr")) continue;
             try out.append(self.allocator, try self.allocator.dupe(u8, entry.name[0 .. entry.name.len - 4]));
         }
@@ -363,9 +381,20 @@ fn appendTag(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, prefix: []co
     if (buf.items.len > 0) try buf.appendSlice(allocator, " ");
     try buf.appendSlice(allocator, "[");
     try buf.appendSlice(allocator, prefix);
-    try buf.appendSlice(allocator, " ");
+    try buf.appendSlice(allocator, "] ");
     try buf.appendSlice(allocator, value);
-    try buf.appendSlice(allocator, "]");
+}
+
+fn relativeSiblingLabelAlloc(allocator: std.mem.Allocator, sibling: []const u8) ![]u8 {
+    return try std.fmt.allocPrint(allocator, "./{s}", .{basename(sibling)});
+}
+
+fn relativeParentLabelAlloc(allocator: std.mem.Allocator, parent: []const u8) ![]u8 {
+    return try std.fmt.allocPrint(allocator, "../{s}", .{basename(parent)});
+}
+
+fn relativeChildLabelAlloc(allocator: std.mem.Allocator, child: []const u8) ![]u8 {
+    return try std.fmt.allocPrint(allocator, "./{s}", .{child});
 }
 
 fn basename(path: []const u8) []const u8 {

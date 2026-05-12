@@ -22,20 +22,29 @@ pub fn buildLine(
 
     switch (state.mode) {
         .passive => {
-            try buf.appendSlice(allocator, model.passive_label);
-            if (model.passive_label.len > 0) try buf.appendSlice(allocator, "   ");
-            try buf.appendSlice(allocator, "^g menu");
+            if (model.scroll_view and model.session.len > 0) {
+                try buf.appendSlice(allocator, "logs: ");
+                try buf.appendSlice(allocator, model.session);
+                if (std.mem.endsWith(u8, model.session, ".scroll")) {
+                    buf.items.len -= ".scroll".len;
+                }
+                try buf.appendSlice(allocator, "   q exit");
+            } else {
+                try buf.appendSlice(allocator, model.passive_label);
+                if (model.passive_label.len > 0) try buf.appendSlice(allocator, "   ");
+                try buf.appendSlice(allocator, "^g menu");
+            }
         },
         .active_menu => {
             try appendHeader(&buf, allocator, model);
             if (model.workspace.len > 0 and model.active_summary.len > 0) {
                 try buf.appendSlice(allocator, "   ");
                 try buf.appendSlice(allocator, model.active_summary);
-                try buf.appendSlice(allocator, "   ");
+                try buf.appendSlice(allocator, "  |  ");
             } else if (model.workspace.len > 0) {
                 try buf.appendSlice(allocator, "   ");
             }
-            try buf.appendSlice(allocator, "[d]detach [a]attach [c]create [g]logs [esc/^g]back");
+            try buf.appendSlice(allocator, "[a]ttach [c]reate [g]logs [d]etach [x]kill [esc]");
         },
         .prompt_attach => {
             try appendHeader(&buf, allocator, model);
@@ -57,6 +66,11 @@ pub fn buildLine(
             try buf.appendSlice(allocator, "create> ");
             try buf.appendSlice(allocator, state.input());
             try buf.appendSlice(allocator, "   [enter]create [esc]back");
+        },
+        .prompt_kill => {
+            try appendHeader(&buf, allocator, model);
+            if (model.workspace.len > 0) try buf.appendSlice(allocator, "   ");
+            try buf.appendSlice(allocator, "kill current session? [enter]TERM [esc]cancel");
         },
     }
 
