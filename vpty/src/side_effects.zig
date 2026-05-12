@@ -109,7 +109,9 @@ pub const SideEffectForwarder = struct {
 
     fn isPassthroughCsi(self: *SideEffectForwarder) bool {
         const csi = self.csi_buf.items;
-        return std.mem.eql(u8, csi, "\x1b[?2004h") or
+        return std.mem.eql(u8, csi, "\x1b[?1h") or
+            std.mem.eql(u8, csi, "\x1b[?1l") or
+            std.mem.eql(u8, csi, "\x1b[?2004h") or
             std.mem.eql(u8, csi, "\x1b[?2004l") or
             std.mem.eql(u8, csi, "\x1b[?1004h") or
             std.mem.eql(u8, csi, "\x1b[?1004l") or
@@ -383,6 +385,34 @@ test "focus reporting enable is passed through and removed from screen bytes" {
     try std.testing.expectEqualStrings("ab", result.screen_bytes);
     try std.testing.expectEqual(@as(usize, 1), stdout_actor.controls.items.len);
     try std.testing.expectEqualStrings("\x1b[?1004h", stdout_actor.controls.items[0]);
+}
+
+test "application cursor mode enable is passed through and removed from screen bytes" {
+    const allocator = std.testing.allocator;
+    var actor = TestStdoutActor.init(allocator);
+    defer actor.deinit();
+
+    var forwarder = SideEffectForwarder.init(allocator);
+    defer forwarder.deinit();
+
+    const result = try forwarder.feed(&actor, "\x1b[?1hhello");
+    try std.testing.expectEqualStrings("hello", result.screen_bytes);
+    try std.testing.expectEqual(@as(usize, 1), actor.controls.items.len);
+    try std.testing.expectEqualStrings("\x1b[?1h", actor.controls.items[0]);
+}
+
+test "application cursor mode disable is passed through and removed from screen bytes" {
+    const allocator = std.testing.allocator;
+    var actor = TestStdoutActor.init(allocator);
+    defer actor.deinit();
+
+    var forwarder = SideEffectForwarder.init(allocator);
+    defer forwarder.deinit();
+
+    const result = try forwarder.feed(&actor, "\x1b[?1lbye");
+    try std.testing.expectEqualStrings("bye", result.screen_bytes);
+    try std.testing.expectEqual(@as(usize, 1), actor.controls.items.len);
+    try std.testing.expectEqualStrings("\x1b[?1l", actor.controls.items[0]);
 }
 
 test "mouse reporting enable is passed through and removed from screen bytes" {
