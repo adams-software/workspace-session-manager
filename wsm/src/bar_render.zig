@@ -91,5 +91,5 @@ test "buildLine renders passive text and menu hint" {
     const line = try buildLine(std.testing.allocator, &state, .{ .workspace = "", .session = "", .passive_label = "backend", .logs_exit_hint = false, .active_summary = "", .attach_candidates = &.{}, .detached = false, .scroll_view = false }, 20);
     defer std.testing.allocator.free(line);
 
-    try std.testing.expectEqualStrings("backend             ", line);
+    try std.testing.expectEqualStrings("backend   ^g menu   ", line);
 }
