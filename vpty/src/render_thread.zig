@@ -157,6 +157,21 @@ pub const RenderThread = struct {
             self.applyPendingRequests();
 
             if (self.renderer.needsRender()) {
+                if (self.stdout_thread.pendingBytes() > 0) {
+                    if (self.stop_requested.load(.seq_cst)) break;
+
+                    var pfd_busy = c.struct_pollfd{
+                        .fd = self.wake_pipe.readFd(),
+                        .events = c.POLLIN,
+                        .revents = 0,
+                    };
+                    _ = c.poll(&pfd_busy, 1, 10);
+                    if ((pfd_busy.revents & c.POLLIN) != 0) {
+                        self.drainWakePipe();
+                    }
+                    continue;
+                }
+
                 self.shared_model.lock();
                 const captured = self.renderer.takeSnapshot(&self.shared_model.model);
                 self.shared_model.unlock();

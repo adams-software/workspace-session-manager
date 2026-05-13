@@ -295,9 +295,10 @@ pub const Provider = struct {
         errdefer freeCandidates(self.allocator, out.items);
         for (ids) |id| {
             if (query.len != 0 and std.mem.indexOf(u8, id, query) == null and std.mem.indexOf(u8, basename(id), query) == null) continue;
+            const owned = try self.allocator.dupe(u8, id);
             try out.append(self.allocator, .{
-                .label = try self.allocator.dupe(u8, id),
-                .value = try self.allocator.dupe(u8, id),
+                .label = owned,
+                .value = owned,
             });
         }
         return try out.toOwnedSlice(self.allocator);
@@ -417,7 +418,7 @@ pub fn freeCandidates(allocator: std.mem.Allocator, items: []ui_state.Candidate)
     if (items.len == 0) return;
     for (items) |item| {
         allocator.free(item.label);
-        allocator.free(item.value);
+        if (item.value.ptr != item.label.ptr) allocator.free(item.value);
     }
     allocator.free(items);
 }

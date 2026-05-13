@@ -17,6 +17,11 @@ pub const SurfaceState = struct {
     has_drawn: bool = false,
 };
 
+const PendingSnapshot = struct {
+    version: u64,
+    snapshot: host.HostScreenSnapshot,
+};
+
 pub const RenderProduct = struct {
     version: u64,
     snapshot: host.HostScreenSnapshot,
@@ -35,7 +40,7 @@ pub const Renderer = struct {
     pending_output_version: u64 = 0,
 
     committed_snapshot: ?host.HostScreenSnapshot = null,
-    pending_snapshot: ?host.HostScreenSnapshot = null,
+    pending_snapshot: ?PendingSnapshot = null,
 
     stdout_thread: *StdoutThread,
     viewport: Viewport = .{},
@@ -156,7 +161,7 @@ pub const Renderer = struct {
         owned_product.patch.deinit(std.heap.page_allocator);
         self.pending_surface_state = owned_product.next_surface_state;
         self.pending_output_version = self.last_generated_version;
-        self.replacePendingSnapshot(owned_product.snapshot);
+        self.replacePendingSnapshot(.{ .version = owned_product.version, .snapshot = owned_product.snapshot });
     }
 
     pub fn setViewport(self: *Renderer, viewport: Viewport) void {
@@ -172,6 +177,10 @@ pub const Renderer = struct {
         self.last_generated_version = 0;
         self.needs_render = true;
         self.force_full_render = true;
+        if (self.pending_snapshot) |*pending| {
+            host.freeScreenSnapshot(std.heap.page_allocator, &pending.snapshot);
+            self.pending_snapshot = null;
+        }
         self.ensureBufferCapacity();
     }
 
@@ -181,11 +190,18 @@ pub const Renderer = struct {
                 self.surface_state = state;
                 self.pending_surface_state = null;
 
-                if (self.pending_snapshot) |snapshot| {
-                    if (self.committed_snapshot) |*old| {
-                        host.freeScreenSnapshot(std.heap.page_allocator, old);
+                if (self.pending_snapshot) |pending| {
+                    if (pending.version == notice.version) {
+                        const committed = pending.snapshot;
+                        if (self.committed_snapshot) |*old| {
+                            host.freeScreenSnapshot(std.heap.page_allocator, old);
+                        }
+                        self.committed_snapshot = committed;
+                    } else {
+                        var discarded = pending.snapshot;
+                        host.freeScreenSnapshot(std.heap.page_allocator, &discarded);
+                        self.force_full_render = true;
                     }
-                    self.committed_snapshot = snapshot;
                     self.pending_snapshot = null;
                 }
 
@@ -209,17 +225,17 @@ pub const Renderer = struct {
             host.freeScreenSnapshot(std.heap.page_allocator, snapshot);
             self.committed_snapshot = null;
         }
-        if (self.pending_snapshot) |*snapshot| {
-            host.freeScreenSnapshot(std.heap.page_allocator, snapshot);
+        if (self.pending_snapshot) |*pending| {
+            host.freeScreenSnapshot(std.heap.page_allocator, &pending.snapshot);
             self.pending_snapshot = null;
         }
     }
 
-    fn replacePendingSnapshot(self: *Renderer, snapshot: host.HostScreenSnapshot) void {
+    fn replacePendingSnapshot(self: *Renderer, pending: PendingSnapshot) void {
         if (self.pending_snapshot) |*old| {
-            host.freeScreenSnapshot(std.heap.page_allocator, old);
+            host.freeScreenSnapshot(std.heap.page_allocator, &old.snapshot);
         }
-        self.pending_snapshot = snapshot;
+        self.pending_snapshot = pending;
     }
 
     fn clipVirtualCursor(self: *Renderer, cursor: VirtualCursor) VirtualCursor {
@@ -414,4 +430,3 @@ test "renderer clips virtual cursor to viewport before emitting patch" {
     try std.testing.expectEqual(@as(u16, 2), clipped.col);
     try std.testing.expect(clipped.visible);
 }
-
