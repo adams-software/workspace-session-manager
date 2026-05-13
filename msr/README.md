@@ -2,7 +2,7 @@
 
 This package contains the generic session host runtime in this repository.
 
-Most users will start with `wsm`, but this package is the lowest-level runtime layer that directly manages session-backed processes. During the current migration, it installs both `host` and `msr` entrypoints.
+Most users will start with `wsm`, but this package is the lowest-level runtime layer that directly manages session-backed processes. It installs the `host` runtime entrypoint.
 
 ## Quick usage
 
@@ -12,41 +12,19 @@ See the full command surface:
 host --help
 ```
 
-The legacy `msr` entrypoint still works during migration:
+Run the host directly against a socket path:
 
 ```bash
-msr --help
+host /tmp/demo.sock -- /bin/bash -i
 ```
 
-Or for an explicit current-session context:
+Run a headless host:
 
 ```bash
-MSR_SESSION=/tmp/demo.msr host --help
+host /tmp/demo.sock --headless -- /bin/bash -i
 ```
 
-Create a session:
-
-```bash
-host create /tmp/demo.msr -- bash
-```
-
-Create a session that waits for first attach before starting the child:
-
-```bash
-host create --wait-attach /tmp/demo.msr -- nvim
-```
-
-Attach:
-
-```bash
-host attach /tmp/demo.msr
-```
-
-Inspect session status:
-
-```bash
-host status /tmp/demo.msr
-```
+This package is the low-level runtime layer. For workspace-scoped session naming, creation, logs, and navigation, use `wsm`.
 
 ## What lives here
 
@@ -83,7 +61,6 @@ The main binaries are emitted to:
 
 ```text
 zig-out/bin/host
-zig-out/bin/msr
 ```
 
 For a repo-local shell environment, source:

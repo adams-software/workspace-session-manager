@@ -19,15 +19,14 @@ zig-out/bin/
 
 Main binaries:
 
-- `zig-out/bin/msr`
+- `zig-out/bin/host`
 - `zig-out/bin/vpty`
 - `zig-out/bin/alt`
 - `zig-out/bin/scroll`
 
-User-facing scripts:
+Primary user-facing entrypoint:
 
-- `wsm/scripts/wsm`
-- `wsm/scripts/wsm_menu`
+- `zig-out/bin/wsm`
 
 ## Build a distributable bundle
 
@@ -86,20 +85,15 @@ You can override the install prefix:
 PREFIX=/usr/local sh install.sh
 ```
 
-## First session with msr
+## First session with host
 
-Create and attach to a session:
-
-```bash
-msr create -a /tmp/demo.msr -- bash
-```
-
-In another shell, you can inspect or reattach:
+Run the low-level host runtime directly:
 
 ```bash
-msr status /tmp/demo.msr
-msr attach /tmp/demo.msr
+host /tmp/demo.sock -- /bin/bash -i
 ```
+
+This is the generic single-child host process. Most users should prefer `wsm`, which handles workspace naming and session discovery on top.
 
 ## First session with wsm
 
@@ -133,6 +127,6 @@ This is still an actively evolving tool suite.
 
 A practical current read is:
 
-- `msr` is the core runtime
+- `host` is the core runtime
 - `wsm` is the operator-facing naming/navigation layer
 - `vpty` and `alt` are still under active terminal UX refinement

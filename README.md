@@ -111,7 +111,6 @@ If you want the lower-level tools directly:
 
 ```bash
 host
-msr
 vpty
 alt
 scroll
@@ -125,9 +124,9 @@ Workspace session manager.
 The main user-facing entrypoint for workspace-wide naming, lookup, and navigation.
 
 ### `msr/`
-Generic session host runtime.
+Generic session host runtime (`host` binary; legacy package path retained for now).
 
-Responsible for creating sessions, attaching and detaching, and core status / wait / terminate operations. During the current migration, this package installs both `host` and `msr` entrypoints.
+Responsible for creating sessions, attaching and detaching, and core status / wait / terminate operations. This package currently installs the `host` runtime entrypoint.
 
 ### `vpty/`
 Terminal integration and rendering layer.
@@ -155,7 +154,7 @@ Low-level PTY / stream / tty helpers shared by runtime-facing packages.
 A practical mental model is:
 
 - `wsm` is the main workspace-facing command
-- `host` is the generic session host runtime (`msr` remains as a compatibility entrypoint during migration)
+- `host` is the generic session host runtime
 - `vpty` handles terminal modeling and redraw behavior
 - `alt` switches between PTY-backed sides with a configurable hotkey
 - `scroll` turns transcript files into terminal-aware linear output for logs/replay
@@ -175,7 +174,7 @@ This repo is active engineering work, not a frozen product surface.
 A practical current read is:
 
 - `wsm` is the ergonomic operator-facing layer
-- `host`/`msr` is the runtime foundation
+- `host` is the runtime foundation
 - `vpty` is an implementation-heavy terminal subsystem under active refinement
 - `alt` is part of the intended tool suite and still evolving
 
@@ -199,7 +198,6 @@ zig-out/bin/
 Current binaries include:
 
 - `zig-out/bin/host`
-- `zig-out/bin/msr`
 - `zig-out/bin/vpty`
 - `zig-out/bin/alt`
 - `zig-out/bin/scroll`

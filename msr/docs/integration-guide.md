@@ -1,6 +1,6 @@
-# msr integration guide
+# host integration guide
 
-This guide explains how to integrate with the current `msr` split:
+This guide explains how to integrate with the current host-runtime split:
 
 - the **host control client** over stdin/stdout
 - the **child PTY attach client** over the Unix socket byte stream
@@ -9,7 +9,7 @@ These are separate surfaces with different jobs.
 
 ## Mental model
 
-Current `msr` has two integration paths:
+The current host runtime has two integration paths:
 
 1. **host control path**
    - transport: host process `stdin` / `stdout`
@@ -124,7 +124,7 @@ This is the intended shape for other libraries:
 
 A library integrating with host control usually needs:
 
-1. launch or otherwise obtain the `msr` host process
+1. launch or otherwise obtain the `host` process
 2. keep handles to its stdin/stdout
 3. create a line-oriented reader/writer wrapper
 4. call the generic or typed `host_client` helpers
@@ -132,7 +132,7 @@ A library integrating with host control usually needs:
 
 ### Example flow
 
-1. start `msr <socket-path> [--size <cols>x<rows>] [--] <cmd...>`
+1. start `host <socket-path> [--size <cols>x<rows>] [--] <cmd...>`
 2. wait for startup output such as:
    - `event socket_listening path=...`
    - `event ready`
@@ -178,7 +178,7 @@ So attach clients should be resilient to disconnect/replacement.
 
 ## Typical PTY attach setup
 
-1. wait until the host socket exists and `msr` is ready
+1. wait until the host socket exists and `host` is ready
 2. connect to the Unix socket
 3. start duplex copy:
    - local input -> socket
@@ -278,7 +278,7 @@ Avoid these patterns:
 
 ## Current recommended starting point
 
-If you are integrating `msr` into another library or app:
+If you are integrating the host runtime into another library or app:
 
 1. start with `host_client.zig` for control
 2. start with `attach/src/main.zig` as the model for terminal attach

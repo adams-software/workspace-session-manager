@@ -55,12 +55,14 @@ pub const Executor = struct {
     return_session_id: ?[]u8,
 
     pub fn init(allocator: std.mem.Allocator, root: []const u8) !Executor {
+        const tool_paths = try cli_main.resolveToolPaths(allocator);
+        errdefer tool_paths.deinit(allocator);
         return .{
             .allocator = allocator,
             .root = try allocator.dupe(u8, root),
-            .host_bin = try allocator.dupe(u8, "zig-out/bin/host"),
-            .vpty_bin = try allocator.dupe(u8, "zig-out/bin/vpty"),
-            .logs_viewer_bin = try allocator.dupe(u8, "wsm/scripts/wsm_logs_viewer"),
+            .host_bin = tool_paths.host_bin,
+            .vpty_bin = tool_paths.vpty_bin,
+            .logs_viewer_bin = tool_paths.logs_viewer_bin,
             .link = null,
             .interactive_attached = false,
             .current_session_id = null,

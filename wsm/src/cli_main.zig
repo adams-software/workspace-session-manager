@@ -3,6 +3,39 @@ const policy = @import("policy.zig");
 const service_mod = @import("service.zig");
 const argv_parse = @import("argv_parse");
 
+pub const ToolPaths = struct {
+    host_bin: []u8,
+    vpty_bin: []u8,
+    logs_viewer_bin: []u8,
+
+    pub fn deinit(self: ToolPaths, allocator: std.mem.Allocator) void {
+        allocator.free(self.host_bin);
+        allocator.free(self.vpty_bin);
+        allocator.free(self.logs_viewer_bin);
+    }
+};
+
+pub fn resolveToolPaths(allocator: std.mem.Allocator) !ToolPaths {
+    const exe_path = try std.fs.selfExePathAlloc(allocator);
+    defer allocator.free(exe_path);
+    const exe_dir = std.fs.path.dirname(exe_path) orelse ".";
+
+    return .{
+        .host_bin = try resolveToolPath(allocator, "WSM_HOST_BIN", exe_dir, "host", "zig-out/bin/host"),
+        .vpty_bin = try resolveToolPath(allocator, "WSM_VPTY_BIN", exe_dir, "vpty", "zig-out/bin/vpty"),
+        .logs_viewer_bin = try resolveToolPath(allocator, "WSM_LOGS_VIEWER_BIN", exe_dir, "wsm_logs_viewer", "wsm/scripts/wsm_logs_viewer"),
+    };
+}
+
+fn resolveToolPath(allocator: std.mem.Allocator, env_name: []const u8, exe_dir: []const u8, sibling_name: []const u8, fallback: []const u8) ![]u8 {
+    if (std.posix.getenv(env_name)) |override| return try allocator.dupe(u8, override);
+
+    const sibling = try std.fs.path.join(allocator, &.{ exe_dir, sibling_name });
+    defer allocator.free(sibling);
+    std.fs.accessAbsolute(sibling, .{}) catch return try allocator.dupe(u8, fallback);
+    return try allocator.dupe(u8, sibling);
+}
+
 pub const Mode = union(enum) {
     help,
     interactive_attach: []const u8,
@@ -117,7 +150,9 @@ fn presentSummary(allocator: std.mem.Allocator, info: service_mod.SessionInfo) !
 pub fn runCommand(allocator: std.mem.Allocator, root: []const u8, mode: Mode, stdout_file: std.fs.File) !u8 {
     var provider = try policy.Provider.init(allocator, root, null);
     defer provider.deinit();
-    var service = service_mod.WorkspaceService.init(allocator, "zig-out/bin/host", "zig-out/bin/vpty", "wsm/scripts/wsm_logs_viewer");
+    const tool_paths = try resolveToolPaths(allocator);
+    defer tool_paths.deinit(allocator);
+    var service = service_mod.WorkspaceService.init(allocator, tool_paths.host_bin, tool_paths.vpty_bin, tool_paths.logs_viewer_bin);
 
     switch (mode) {
         .help => {

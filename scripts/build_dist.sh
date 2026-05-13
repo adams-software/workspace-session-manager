@@ -8,10 +8,8 @@ DIST_ROOT="$REPO_ROOT/dist/$TARGET_NAME"
 BIN_DIR="$DIST_ROOT/bin"
 COMPLETIONS_DIR="$DIST_ROOT/completions"
 TARBALL="$REPO_ROOT/dist/workspace-session-manager-$TARGET_NAME.tar.gz"
-LEGACY_TARBALL="$REPO_ROOT/dist/msr-$TARGET_NAME.tar.gz"
-
 rm -rf "$DIST_ROOT"
-rm -f "$TARBALL" "$LEGACY_TARBALL"
+rm -f "$TARBALL"
 mkdir -p "$BIN_DIR" "$COMPLETIONS_DIR"
 
 (
@@ -19,13 +17,11 @@ mkdir -p "$BIN_DIR" "$COMPLETIONS_DIR"
   zig build
 )
 
-install -m 0755 "$REPO_ROOT/zig-out/bin/msr" "$BIN_DIR/msr"
+install -m 0755 "$REPO_ROOT/zig-out/bin/wsm" "$BIN_DIR/wsm"
+install -m 0755 "$REPO_ROOT/zig-out/bin/host" "$BIN_DIR/host"
 install -m 0755 "$REPO_ROOT/zig-out/bin/vpty" "$BIN_DIR/vpty"
-install -m 0755 "$REPO_ROOT/zig-out/bin/alt" "$BIN_DIR/alt"
 install -m 0755 "$REPO_ROOT/zig-out/bin/scroll" "$BIN_DIR/scroll"
-install -m 0755 "$REPO_ROOT/wsm/scripts/wsm" "$BIN_DIR/wsm"
-install -m 0755 "$REPO_ROOT/wsm/scripts/wsm_menu" "$BIN_DIR/wsm_menu"
-install -m 0755 "$REPO_ROOT/wsm/scripts/wsm_menu_alt" "$BIN_DIR/wsm_menu_alt"
+install -m 0755 "$REPO_ROOT/wsm/scripts/wsm_logs_viewer" "$BIN_DIR/wsm_logs_viewer"
 
 install -m 0644 "$REPO_ROOT/wsm/scripts/wsm_completion.bash" "$COMPLETIONS_DIR/wsm"
 
@@ -52,7 +48,7 @@ cat > "$DIST_ROOT/README.txt" <<'EOS'
 workspace-session-manager distribution bundle
 
 Contents:
-- bin/: user-facing commands
+- bin/: commands (`wsm` public, `host` runtime helper, companion tools)
 - completions/: bash completion autoload files
 - install.sh: POSIX sh installer (defaults to ~/.local)
 - vendored libvterm is compiled into `vpty` and `scroll`; no separate system libvterm runtime package is required
