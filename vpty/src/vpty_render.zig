@@ -46,6 +46,7 @@ pub const Renderer = struct {
     viewport: Viewport = .{},
     needs_render: bool = true,
     force_full_render: bool = true,
+    allow_next_render_despite_backlog: bool = false,
     last_generated_version: u64 = 0,
     render_buf: std.ArrayList(u8) = .{},
 
@@ -75,6 +76,10 @@ pub const Renderer = struct {
 
     pub fn needsRender(self: *const Renderer) bool {
         return self.needs_render;
+    }
+
+    pub fn shouldBypassBacklogCoalescing(self: *const Renderer) bool {
+        return self.allow_next_render_despite_backlog;
     }
 
     pub fn takeSnapshot(self: *Renderer, model: *const TerminalModel) ?struct { version: u64, snapshot: host.HostScreenSnapshot } {
@@ -118,6 +123,7 @@ pub const Renderer = struct {
             tryBuildChangedRowsPatch(self, &patch, &self.committed_snapshot.?, &owned_snapshot);
         }
         self.force_full_render = false;
+        self.allow_next_render_despite_backlog = false;
 
         patch.cursor = self.clipVirtualCursor(.{
             .visible = owned_snapshot.cursor_visible,
@@ -166,6 +172,7 @@ pub const Renderer = struct {
 
     pub fn setViewport(self: *Renderer, viewport: Viewport) void {
         self.viewport = viewport;
+        self.allow_next_render_despite_backlog = true;
         self.reset();
     }
 
@@ -177,6 +184,7 @@ pub const Renderer = struct {
         self.last_generated_version = 0;
         self.needs_render = true;
         self.force_full_render = true;
+        self.allow_next_render_despite_backlog = true;
         if (self.pending_snapshot) |*pending| {
             host.freeScreenSnapshot(std.heap.page_allocator, &pending.snapshot);
             self.pending_snapshot = null;

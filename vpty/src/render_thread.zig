@@ -157,7 +157,7 @@ pub const RenderThread = struct {
             self.applyPendingRequests();
 
             if (self.renderer.needsRender()) {
-                if (self.stdout_thread.pendingBytes() > 0) {
+                if (self.stdout_thread.pendingBytes() > 0 and !self.renderer.shouldBypassBacklogCoalescing()) {
                     if (self.stop_requested.load(.seq_cst)) break;
 
                     var pfd_busy = c.struct_pollfd{
