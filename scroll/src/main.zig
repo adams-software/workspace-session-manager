@@ -398,6 +398,14 @@ fn defaultTerminalSize() struct { rows: u16, cols: u16 } {
 }
 
 pub fn main() !u8 {
+    return run() catch |err| {
+        const name = @errorName(err);
+        if (std.mem.eql(u8, name, "BrokenPipe") or std.mem.eql(u8, name, "WriteFailed")) return 0;
+        return err;
+    };
+}
+
+fn run() !u8 {
     const allocator = std.heap.smp_allocator;
     const argv = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, argv);

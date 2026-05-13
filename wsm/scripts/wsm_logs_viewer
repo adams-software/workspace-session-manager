@@ -6,4 +6,20 @@ if [[ $# -ne 1 ]]; then
   exit 2
 fi
 
-exec "$(dirname "$0")/../../zig-out/bin/scroll" --ansi "$1" | less -R
+SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
+
+if [[ -x "$SCRIPT_DIR/scroll" ]]; then
+  SCROLL_BIN="$SCRIPT_DIR/scroll"
+elif [[ -x "$SCRIPT_DIR/../../zig-out/bin/scroll" ]]; then
+  SCROLL_BIN="$SCRIPT_DIR/../../zig-out/bin/scroll"
+else
+  echo "wsm_logs_viewer: could not find scroll helper" >&2
+  exit 1
+fi
+
+trap 'stty sane 2>/dev/null || true; clear 2>/dev/null || true' EXIT
+
+stty sane 2>/dev/null || true
+clear 2>/dev/null || true
+
+"$SCROLL_BIN" --ansi "$1" | less -R -X

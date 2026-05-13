@@ -2,26 +2,26 @@
 
 This package contains the generic session host runtime in this repository.
 
-Most users will start with `wsm`, but this package is the lowest-level runtime layer that directly manages session-backed processes. It installs the `host` runtime entrypoint.
+Most users will start with `wsm`, but this package is the lowest-level runtime layer that directly manages session-backed processes. In the normal install layout, `wsm` finds `host` as a private helper instead of exposing it as a public command on `PATH`.
 
 ## Quick usage
 
-See the full command surface:
+See the full command surface from a repo checkout:
 
 ```bash
-host --help
+zig-out/bin/host --help
 ```
 
 Run the host directly against a socket path:
 
 ```bash
-host /tmp/demo.sock -- /bin/bash -i
+zig-out/bin/host /tmp/demo.sock -- /bin/bash -i
 ```
 
 Run a headless host:
 
 ```bash
-host /tmp/demo.sock --headless -- /bin/bash -i
+zig-out/bin/host /tmp/demo.sock --headless -- /bin/bash -i
 ```
 
 This package is the low-level runtime layer. For workspace-scoped session naming, creation, logs, and navigation, use `wsm`.

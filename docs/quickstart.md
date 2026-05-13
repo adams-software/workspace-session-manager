@@ -45,7 +45,8 @@ dist/workspace-session-manager-linux-x86_64.tar.gz
 
 The staged dist bundle includes:
 
-- `bin/` — commands
+- `bin/` — public commands
+- `libexec/wsm/` — private runtime helpers used by `wsm`
 - `completions/` — bash completions
 - `install.sh` — simple installer
 - `README.txt` — dist note
@@ -62,7 +63,8 @@ No separate `libvterm0` runtime package is required. `vpty` and `scroll` vendor 
 
 By default this installs to:
 
-- `~/.local/bin`
+- `~/.local/bin` (`wsm`)
+- `~/.local/libexec/wsm` (private runtime helpers)
 - `~/.local/share/bash-completion/completions`
 
 The installed completion files use command-name autoload filenames:
@@ -87,13 +89,13 @@ PREFIX=/usr/local sh install.sh
 
 ## First session with host
 
-Run the low-level host runtime directly:
+If you are developing from a repo checkout, you can run the low-level host runtime directly:
 
 ```bash
-host /tmp/demo.sock -- /bin/bash -i
+zig-out/bin/host /tmp/demo.sock -- /bin/bash -i
 ```
 
-This is the generic single-child host process. Most users should prefer `wsm`, which handles workspace naming and session discovery on top.
+This is the generic single-child host process. Most users should prefer `wsm`, which handles workspace naming and session discovery on top. The normal installer does not expose `host` on `PATH`.
 
 ## First session with wsm
 
@@ -127,6 +129,6 @@ This is still an actively evolving tool suite.
 
 A practical current read is:
 
-- `host` is the core runtime
+- `host` is the core runtime behind `wsm`
 - `wsm` is the operator-facing naming/navigation layer
 - `vpty` and `alt` are still under active terminal UX refinement

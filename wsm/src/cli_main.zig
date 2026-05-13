@@ -19,21 +19,41 @@ pub fn resolveToolPaths(allocator: std.mem.Allocator) !ToolPaths {
     const exe_path = try std.fs.selfExePathAlloc(allocator);
     defer allocator.free(exe_path);
     const exe_dir = std.fs.path.dirname(exe_path) orelse ".";
+    const exe_parent = std.fs.path.dirname(exe_dir) orelse exe_dir;
+
+    const private_host = try std.fs.path.join(allocator, &.{ exe_parent, "libexec", "wsm", "host" });
+    defer allocator.free(private_host);
+    const private_vpty = try std.fs.path.join(allocator, &.{ exe_parent, "libexec", "wsm", "vpty" });
+    defer allocator.free(private_vpty);
+    const private_logs = try std.fs.path.join(allocator, &.{ exe_parent, "libexec", "wsm", "wsm_logs_viewer" });
+    defer allocator.free(private_logs);
+    const sibling_host = try std.fs.path.join(allocator, &.{ exe_dir, "host" });
+    defer allocator.free(sibling_host);
+    const sibling_vpty = try std.fs.path.join(allocator, &.{ exe_dir, "vpty" });
+    defer allocator.free(sibling_vpty);
+    const sibling_logs = try std.fs.path.join(allocator, &.{ exe_dir, "wsm_logs_viewer" });
+    defer allocator.free(sibling_logs);
 
     return .{
-        .host_bin = try resolveToolPath(allocator, "WSM_HOST_BIN", exe_dir, "host", "zig-out/bin/host"),
-        .vpty_bin = try resolveToolPath(allocator, "WSM_VPTY_BIN", exe_dir, "vpty", "zig-out/bin/vpty"),
-        .logs_viewer_bin = try resolveToolPath(allocator, "WSM_LOGS_VIEWER_BIN", exe_dir, "wsm_logs_viewer", "wsm/scripts/wsm_logs_viewer"),
+        .host_bin = try resolveToolPath(allocator, "WSM_HOST_BIN", &.{ private_host, sibling_host, "zig-out/bin/host" }),
+        .vpty_bin = try resolveToolPath(allocator, "WSM_VPTY_BIN", &.{ private_vpty, sibling_vpty, "zig-out/bin/vpty" }),
+        .logs_viewer_bin = try resolveToolPath(allocator, "WSM_LOGS_VIEWER_BIN", &.{ private_logs, sibling_logs, "wsm/scripts/wsm_logs_viewer" }),
     };
 }
 
-fn resolveToolPath(allocator: std.mem.Allocator, env_name: []const u8, exe_dir: []const u8, sibling_name: []const u8, fallback: []const u8) ![]u8 {
+fn resolveToolPath(allocator: std.mem.Allocator, env_name: []const u8, candidates: []const []const u8) ![]u8 {
     if (std.posix.getenv(env_name)) |override| return try allocator.dupe(u8, override);
 
-    const sibling = try std.fs.path.join(allocator, &.{ exe_dir, sibling_name });
-    defer allocator.free(sibling);
-    std.fs.accessAbsolute(sibling, .{}) catch return try allocator.dupe(u8, fallback);
-    return try allocator.dupe(u8, sibling);
+    for (candidates) |candidate| {
+        if (candidate.len == 0) continue;
+        if (std.fs.path.isAbsolute(candidate)) {
+            std.fs.accessAbsolute(candidate, .{}) catch continue;
+        } else {
+            std.fs.cwd().access(candidate, .{}) catch continue;
+        }
+        return try allocator.dupe(u8, candidate);
+    }
+    return try allocator.dupe(u8, candidates[candidates.len - 1]);
 }
 
 pub const Mode = union(enum) {

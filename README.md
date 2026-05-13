@@ -37,7 +37,11 @@ Install from the unpacked bundle:
 sh install.sh
 ```
 
-By default this installs commands into `~/.local/bin`.
+By default this installs:
+- `wsm` into `~/.local/bin`
+- private runtime helpers into `~/.local/libexec/wsm`
+
+So `wsm` is the only public command added to `PATH` by the standard install.
 
 ## Quick usage
 
@@ -107,14 +111,7 @@ wsm --menu-key ctrl-g create test
 WSM_MENU_KEY=ctrl-g wsm create test
 ```
 
-If you want the lower-level tools directly:
-
-```bash
-host
-vpty
-alt
-scroll
-```
+If you want the lower-level tools directly, they still exist in the repo and build output, but the normal install keeps the runtime helpers private so `wsm` is the only public command on `PATH`.
 
 ## Package map
 
@@ -124,9 +121,9 @@ Workspace session manager.
 The main user-facing entrypoint for workspace-wide naming, lookup, and navigation.
 
 ### `msr/`
-Generic session host runtime (`host` binary; legacy package path retained for now).
+Generic session host runtime (internal `host` helper; legacy package path retained for now).
 
-Responsible for creating sessions, attaching and detaching, and core status / wait / terminate operations. This package currently installs the `host` runtime entrypoint.
+Responsible for creating sessions, attaching and detaching, and core status / wait / terminate operations. End users normally enter through `wsm`, which locates this helper privately at install time.
 
 ### `vpty/`
 Terminal integration and rendering layer.
@@ -154,7 +151,7 @@ Low-level PTY / stream / tty helpers shared by runtime-facing packages.
 A practical mental model is:
 
 - `wsm` is the main workspace-facing command
-- `host` is the generic session host runtime
+- `host` is the generic session host runtime used behind `wsm`
 - `vpty` handles terminal modeling and redraw behavior
 - `alt` switches between PTY-backed sides with a configurable hotkey
 - `scroll` turns transcript files into terminal-aware linear output for logs/replay
@@ -174,7 +171,7 @@ This repo is active engineering work, not a frozen product surface.
 A practical current read is:
 
 - `wsm` is the ergonomic operator-facing layer
-- `host` is the runtime foundation
+- `host` is the runtime foundation behind `wsm`
 - `vpty` is an implementation-heavy terminal subsystem under active refinement
 - `alt` is part of the intended tool suite and still evolving
 
