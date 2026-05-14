@@ -22,4 +22,4 @@ trap 'stty sane 2>/dev/null || true; clear 2>/dev/null || true' EXIT
 stty sane 2>/dev/null || true
 clear 2>/dev/null || true
 
-"$SCROLL_BIN" --ansi "$1" | less -R -X
+"$SCROLL_BIN" --ansi "$1" | less +G -R -X

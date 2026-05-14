@@ -433,7 +433,7 @@ replay_canonical() {
   }
 
   if [[ -x "$SCROLL_BIN" ]] && command -v less >/dev/null 2>&1; then
-    exec bash -lc 'stty sane; clear; "$1" --ansi "$2" | less -R' _ "$SCROLL_BIN" "$log_file"
+    exec bash -lc 'stty sane; clear; "$1" --ansi "$2" | less +G -R -X' _ "$SCROLL_BIN" "$log_file"
   fi
 
   exec bash -lc 'stty sane; clear; cat "$1"; printf "\n\n-- end of transcript --\n"; printf "[enter] close... "; IFS= read -r _; exit 0' _ "$log_file"
@@ -788,5 +788,4 @@ case "$cmd" in
     exit 1
     ;;
 esac
-
 
