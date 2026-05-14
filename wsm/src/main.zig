@@ -430,7 +430,7 @@ pub fn main() !void {
     }
 
     switch (mode) {
-        .help, .list, .inspect, .cleanup, .create_detached, .kill => {
+        .help, .list, .inspect, .log, .cleanup, .create_detached, .kill => {
             const root = cli_main.resolveWorkspace(allocator, args) catch |err| {
                 if (err == error.MissingWorkspace) {
                     try cli_main.printHelp(allocator, std.fs.File.stdout(), null, std.posix.getenv("WSM_SESSION_ID"));

@@ -281,7 +281,7 @@ None are required to start.
 
 - `alt` switching logic
 - live PTY host loop
-- `wsm_menu`
+- old `wsm` shell/menu orchestration
 - `msr` session control
 - live output plumbing
 

@@ -2,18 +2,18 @@ _wsm_complete() {
   local cur prev words cword
   _init_completion -n : || return
 
-  local long_commands="create attach detach current status exists terminate first last prev next list root menu log"
-  local global_flags="--root"
+  local long_commands="help create attach list inspect log cleanup kill"
+  local global_flags="--workspace"
 
   __wsm_ids() {
     local root_override=""
     local i=1
     while [[ $i -lt ${#words[@]} ]]; do
-      if [[ "${words[$i]}" == "--root" && $((i+1)) -lt ${#words[@]} ]]; then
+      if [[ "${words[$i]}" == "--workspace" && $((i+1)) -lt ${#words[@]} ]]; then
         root_override="${words[$((i+1))]}"
         break
-      elif [[ "${words[$i]}" == --root=* ]]; then
-        root_override="${words[$i]#--root=}"
+      elif [[ "${words[$i]}" == --workspace=* ]]; then
+        root_override="${words[$i]#--workspace=}"
         break
       fi
       ((i++))
@@ -25,7 +25,7 @@ _wsm_complete() {
     elif [[ -n "${WSM_ROOT:-}" ]]; then
       root="$WSM_ROOT"
     else
-      root="$PWD"
+      return 0
     fi
 
     [[ -d "$root" ]] || return 0
@@ -69,9 +69,9 @@ _wsm_complete() {
     done | LC_ALL=C sort -u
   }
 
-  if [[ "$cur" == --root=* ]]; then
-    local root_prefix="--root="
-    local root_cur="${cur#--root=}"
+  if [[ "$cur" == --workspace=* ]]; then
+    local root_prefix="--workspace="
+    local root_cur="${cur#--workspace=}"
     COMPREPLY=( $(compgen -d -- "$root_cur") )
     local i
     for i in "${!COMPREPLY[@]}"; do
@@ -85,13 +85,13 @@ _wsm_complete() {
     return
   fi
 
-  if [[ "$prev" == "--root" ]]; then
+  if [[ "$prev" == "--workspace" ]]; then
     _filedir -d
     return
   fi
 
   local cmd_index=1
-  if [[ "${words[1]}" == "--root" ]]; then
+  if [[ "${words[1]}" == "--workspace" ]]; then
     if [[ $cword -eq 2 ]]; then
       _filedir -d
       return
@@ -101,7 +101,7 @@ _wsm_complete() {
       return
     fi
     cmd_index=3
-  elif [[ "${words[1]}" == --root=* ]]; then
+  elif [[ "${words[1]}" == --workspace=* ]]; then
     if [[ $cword -eq 2 ]]; then
       COMPREPLY=( $(compgen -W "$long_commands $global_flags" -- "$cur") )
       return
@@ -116,13 +116,13 @@ _wsm_complete() {
   fi
 
   case "$cmd" in
-    c|create|a|attach|s|status|e|exists|terminate)
+    create|attach|inspect|log|kill)
       if [[ $cword -eq $((cmd_index + 1)) ]]; then
         mapfile -t COMPREPLY < <(__wsm_pathish_candidates "$cur")
         return
       fi
       ;;
-    detach|current|first|last|prev|next|list|help|--help)
+    help|list|cleanup)
       COMPREPLY=()
       return
       ;;

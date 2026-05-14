@@ -63,6 +63,7 @@ pub const Mode = union(enum) {
     create_detached: []const u8,
     list,
     inspect: []const u8,
+    log: ?[]const u8,
     cleanup: bool,
     kill: struct { id: []const u8, force: bool },
 
@@ -72,6 +73,7 @@ pub const Mode = union(enum) {
             .interactive_create_attach => |id| allocator.free(id),
             .create_detached => |id| allocator.free(id),
             .inspect => |id| allocator.free(id),
+            .log => |maybe_id| if (maybe_id) |id| allocator.free(id),
             .kill => |args| allocator.free(args.id),
             else => {},
         }
@@ -87,6 +89,10 @@ pub fn parseMode(allocator: std.mem.Allocator, argv: []const []const u8) !Mode {
     const command = parsed.command orelse return .help;
     if (std.mem.eql(u8, command, "help")) return .help;
     if (std.mem.eql(u8, command, "list")) return .list;
+    if (std.mem.eql(u8, command, "log")) {
+        if (parsed.positionals.len >= 1) return .{ .log = try allocator.dupe(u8, parsed.positionals[0]) };
+        return .{ .log = null };
+    }
     if (std.mem.eql(u8, command, "cleanup")) return .{ .cleanup = argv_parse.hasOption(parsed, &.{"apply"}) };
     if (std.mem.eql(u8, command, "kill")) {
         if (parsed.positionals.len < 1) return .help;
@@ -122,6 +128,7 @@ pub fn printHelp(allocator: std.mem.Allocator, file: std.fs.File, workspace_root
             "  attach <id>               Attach interactively\n" ++
             "  list                      List sessions\n" ++
             "  inspect <id>              Inspect one session\n" ++
+            "  log [id]                  View transcript for a session\n" ++
             "  cleanup                   Dry-run stale socket cleanup\n" ++
             "  cleanup --apply           Apply stale socket cleanup\n" ++
             "  kill <id>                 Send TERM to session child\n" ++
@@ -209,6 +216,32 @@ pub fn runCommand(allocator: std.mem.Allocator, root: []const u8, mode: Mode, st
             defer allocator.free(line);
             try stdout_file.writeAll(line);
             return 0;
+        },
+        .log => |maybe_id| {
+            const session_id = maybe_id orelse std.posix.getenv("WSM_SESSION_ID") orelse {
+                try stdout_file.writeAll("log failed: session id required (pass an id or run from inside a session)\n");
+                return 1;
+            };
+            const transcript = try service.transcriptPath(&provider, session_id);
+            defer allocator.free(transcript);
+            std.fs.accessAbsolute(transcript, .{}) catch {
+                const msg = try std.fmt.allocPrint(allocator, "log failed for {s}: transcript not found\n", .{session_id});
+                defer allocator.free(msg);
+                try stdout_file.writeAll(msg);
+                return 1;
+            };
+
+            const argv = [_][]const u8{ tool_paths.logs_viewer_bin, transcript };
+            var child = std.process.Child.init(&argv, allocator);
+            child.stdin_behavior = .Inherit;
+            child.stdout_behavior = .Inherit;
+            child.stderr_behavior = .Inherit;
+            const term = try child.spawnAndWait();
+            return switch (term) {
+                .Exited => |code| code,
+                .Signal => 128,
+                else => 1,
+            };
         },
         .cleanup => |apply| {
             const header = try std.fmt.allocPrint(allocator, "{s:<20} {s:<20} {s:<14} {s}\n", .{ "SESSION", "HEALTH", "PRESENT", "ACTION" });

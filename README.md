@@ -85,29 +85,23 @@ If you want a specific command instead of your default shell:
 wsm create api/dev -- npm run dev
 ```
 
-Open the workspace menu (hotkey ctrl-g):
+Open the in-session action menu after attaching (hotkey ctrl-g):
 
 ```bash
-wsm menu
+wsm attach test
+# then press ctrl-g inside the session
 ```
 
-Detach from the current session:
-
-```bash
-wsm detach
-```
-
-Reattach later:
+To leave an attached session, use the in-session detach flow (for example the action menu or your detach hotkey), then reattach later:
 
 ```bash
 wsm attach test
 ```
 
-The menu hotkey uses the same key-spec format as `alt`. The default is `ctrl-g`.
-Override it per command with `--menu-key <spec>` or via `WSM_MENU_KEY`.
+The in-session action menu hotkey is `ctrl-g`.
+Override it via `WSM_MENU_KEY`.
 
 ```bash
-wsm --menu-key ctrl-g create test
 WSM_MENU_KEY=ctrl-g wsm create test
 ```
 

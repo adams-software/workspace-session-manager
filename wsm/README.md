@@ -16,7 +16,7 @@ wsm --help
 Create and attach to a workspace session:
 
 ```bash
-wsm create -a api/dev -- bash
+wsm create api/dev -- bash
 ```
 
 Reattach later:
@@ -25,13 +25,13 @@ Reattach later:
 wsm attach api/dev
 ```
 
-Open the interactive menu:
+View logs for a session:
 
 ```bash
-wsm menu
+wsm log api/dev
 ```
 
-The menu path is still evolving. Log viewing currently uses paired temporary sessions like `<session>.scroll` rather than the older `alt`-based prototype.
+Inside an attached session, press `ctrl-g` to open the in-session action menu. Log viewing uses paired temporary sessions like `<session>.scroll` rather than the older `alt`-based prototype.
 
 The paired logs path is backed by `scroll`, which can replay a transcript from a
 path or stdin:
@@ -45,12 +45,12 @@ cat /path/to/session.typescript | scroll
 When run with no input target from an interactive terminal, `scroll` shows its
 help instead of waiting on stdin.
 
-`wsm` now expects an explicit workspace root via `WSM_ROOT` or `--root`.
+`wsm` now expects an explicit workspace root via `WSM_ROOT` or `--workspace`.
 It should not silently treat the current directory as the workspace root.
 
 ## What lives here
 
-- `scripts/` — the `wsm` command, interactive menu flow, completion, and smoke coverage
+- `scripts/` — shell helpers like log viewing, completion, and smoke coverage
 - `docs/` — package-local documentation as the command surface matures
 
 ## Role in the repo
@@ -64,16 +64,11 @@ Conceptually:
 
 ## Current status
 
-This is a script-first package.
-
-Today, most of its behavior lives in shell scripts rather than Zig code. That is intentional.
+This is now primarily a Zig package with a few supporting shell helpers.
 
 ## Developer notes
 
-The main entrypoints are:
-
-- `wsm/scripts/wsm`
-- `wsm/scripts/wsm_menu`
+The main entrypoint is `zig-out/bin/wsm`.
 
 For local development, source:
 

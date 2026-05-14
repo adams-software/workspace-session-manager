@@ -79,7 +79,7 @@ The installed completion files use command-name autoload filenames:
 scroll --ansi <session.typescript> | less -R
 ```
 
-When `scroll` and `less` are available, this is used automatically by `wsm log` and the `wsm_menu` log action. If either is unavailable, `wsm` falls back to raw transcript display.
+When `scroll` and `less` are available, this is used automatically by `wsm log`. If either is unavailable, `wsm` falls back to raw transcript display.
 
 You can override the install prefix:
 

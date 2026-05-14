@@ -7,6 +7,7 @@ BIN_DIR="${MSR_BIN_DIR:-$REPO_ROOT/zig-out/bin}"
 WSM_BIN="${WSM_BIN:-$BIN_DIR/wsm}"
 HOST_BIN="${HOST_BIN:-$BIN_DIR/host}"
 TMP="$(mktemp -d)"
+LOG_VIEWER_SHIM="$TMP/log_viewer.sh"
 
 cleanup() {
   WSM_ROOT="$TMP" "$WSM_BIN" kill demo >/dev/null 2>&1 || true
@@ -36,6 +37,17 @@ printf '%s\n' "$INSPECT_OUT"
 printf '%s\n' "$INSPECT_OUT" | grep -q '^SESSION'
 printf '%s\n' "$INSPECT_OUT" | grep -q 'demo'
 printf '%s\n' "$INSPECT_OUT" | grep -Eq 'live|stale_control_socket'
+
+printf '=== wsm log ===\n'
+cat > "$LOG_VIEWER_SHIM" <<'EOS'
+#!/bin/sh
+cat "$1"
+EOS
+chmod +x "$LOG_VIEWER_SHIM"
+printf 'hello from transcript\n' > "$TMP/demo.typescript"
+LOG_OUT="$(WSM_ROOT="$TMP" WSM_LOGS_VIEWER_BIN="$LOG_VIEWER_SHIM" "$WSM_BIN" log demo)"
+printf '%s\n' "$LOG_OUT"
+printf '%s\n' "$LOG_OUT" | grep -q 'hello from transcript'
 
 printf '=== wsm kill ===\n'
 KILL_OUT="$(WSM_ROOT="$TMP" "$WSM_BIN" kill demo)"
