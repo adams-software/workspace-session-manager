@@ -80,8 +80,8 @@ pub fn createSession(allocator: std.mem.Allocator, host_bin: []const u8, provide
     const primary_cmd = try std.fmt.allocPrint(allocator, "exec script -q -f -c {s} {s}", .{ inner_cmd_quoted, log_path });
     defer allocator.free(primary_cmd);
 
+    try appendDetachedHostPrefix(allocator, &argv, host_bin);
     try argv.appendSlice(allocator, &.{
-        host_bin,
         paths.control_path,
         "--headless",
         "--",
@@ -101,7 +101,11 @@ pub fn createSession(allocator: std.mem.Allocator, host_bin: []const u8, provide
     var child = std.process.Child.init(argv.items, allocator);
     child.stdin_behavior = .Ignore;
     child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Inherit;
+    // Detached sessions must not keep the launching terminal as a live stderr
+    // dependency; otherwise SSH hangups can still tear down the runtime.
+    child.stderr_behavior = .Ignore;
+    // Keep a separate process group even when setsid is unavailable.
+    child.pgid = 0;
     try child.spawn();
     try waitSocketPathExists(paths.data_path, 2000);
     try waitSocketPathExists(paths.control_path, 2000);
@@ -127,8 +131,8 @@ pub fn createCommandSession(allocator: std.mem.Allocator, host_bin: []const u8, 
     else
         null;
     defer if (size_arg) |arg| allocator.free(arg);
+    try appendDetachedHostPrefix(allocator, &argv, host_bin);
     try argv.appendSlice(allocator, &.{
-        host_bin,
         paths.control_path,
         "--headless",
         "--",
@@ -146,7 +150,8 @@ pub fn createCommandSession(allocator: std.mem.Allocator, host_bin: []const u8, 
     var child = std.process.Child.init(argv.items, allocator);
     child.stdin_behavior = .Ignore;
     child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Inherit;
+    child.stderr_behavior = .Ignore;
+    child.pgid = 0;
     try child.spawn();
     try waitSocketPathExists(paths.data_path, 2000);
     try waitSocketPathExists(paths.control_path, 2000);
@@ -161,6 +166,21 @@ fn waitSocketPathExists(path: []const u8, timeout_ms: u64) !void {
         std.Thread.sleep(20 * std.time.ns_per_ms);
     }
     return error.SessionNotReady;
+}
+
+fn appendDetachedHostPrefix(allocator: std.mem.Allocator, argv: *std.ArrayList([]const u8), host_bin: []const u8) !void {
+    const setsid_candidates = [_][]const u8{
+        "/usr/bin/setsid",
+        "/bin/setsid",
+    };
+
+    for (setsid_candidates) |candidate| {
+        std.fs.accessAbsolute(candidate, .{}) catch continue;
+        try argv.appendSlice(allocator, &.{ candidate, host_bin });
+        return;
+    }
+
+    try argv.append(allocator, host_bin);
 }
 
 fn pathExists(path: []const u8) bool {

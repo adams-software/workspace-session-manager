@@ -26,6 +26,20 @@ printf '%s\n' "$CREATE_OUT" | grep -q '^created demo$'
 [[ -S "$TMP/demo.wsm" || -f "$TMP/demo.wsm" ]]
 [[ -S "$TMP/demo.ctl" || -f "$TMP/demo.ctl" ]]
 
+printf '=== detached host is isolated from launcher process group ===\n'
+HOST_PID="$(pgrep -f "$HOST_BIN $TMP/demo.ctl --headless -- $HOST_BIN $TMP/demo.wsm" | tail -n 1)"
+[[ -n "$HOST_PID" ]]
+LAUNCHER_PGID="$(ps -o pgid= -p "$$" | tr -d ' ')"
+HOST_PGID="$(ps -o pgid= -p "$HOST_PID" | tr -d ' ')"
+[[ -n "$LAUNCHER_PGID" ]]
+[[ -n "$HOST_PGID" ]]
+[[ "$HOST_PGID" != "$LAUNCHER_PGID" ]]
+LAUNCHER_SID="$(ps -o sid= -p "$$" | tr -d ' ')"
+HOST_SID="$(ps -o sid= -p "$HOST_PID" | tr -d ' ')"
+[[ -n "$LAUNCHER_SID" ]]
+[[ -n "$HOST_SID" ]]
+[[ "$HOST_SID" != "$LAUNCHER_SID" ]]
+
 printf '=== wsm list ===\n'
 LIST_OUT="$(WSM_ROOT="$TMP" "$WSM_BIN" list)"
 printf '%s\n' "$LIST_OUT"
