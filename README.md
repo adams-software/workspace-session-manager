@@ -43,6 +43,33 @@ By default this installs:
 
 So `wsm` is the only public command added to `PATH` by the standard install.
 
+## Troubleshooting
+
+### Repo build vs installed binary mismatch
+
+It is possible to have a clean repo checkout while your installed `wsm` under
+`~/.local/bin` is still from an older experiment build.
+
+Check which binary you are actually running:
+
+```bash
+which wsm
+ls -l ~/.local/bin/wsm ~/.local/libexec/wsm/{host,vpty,scroll,wsm_logs_viewer}
+ls -l zig-out/bin/{wsm,host,vpty,scroll}
+```
+
+If behavior differs between the repo build and the installed command, rebuild
+and reinstall the local dist bundle:
+
+```bash
+./scripts/build_dist.sh
+cd dist/linux-x86_64
+sh install.sh
+```
+
+A common symptom of an install mismatch is that `zig-out/bin/wsm` behaves
+correctly while `~/.local/bin/wsm` shows stale behavior.
+
 ## Quick usage
 
 Set up a workspace root and optional menu hotkey in your shell environment:

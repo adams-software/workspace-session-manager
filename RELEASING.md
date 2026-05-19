@@ -21,6 +21,13 @@ PREFIX="$TMP_PREFIX" sh dist/linux-x86_64/install.sh
 PATH="$TMP_PREFIX/bin:/usr/bin:/bin" WSM_ROOT="$TMP_PREFIX/sessions" wsm help
 ```
 
+Then do one real installed-binary interactive sanity check, not just `help`:
+
+1. `PATH="$TMP_PREFIX/bin:/usr/bin:/bin" WSM_ROOT="$TMP_PREFIX/sessions" wsm create test`
+2. Type `echo hi`
+3. Confirm the command executes and returns to the in-session prompt
+4. Detach or terminate the session cleanly
+
 Expected install layout:
 
 - `bin/wsm`

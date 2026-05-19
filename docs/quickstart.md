@@ -87,6 +87,25 @@ You can override the install prefix:
 PREFIX=/usr/local sh install.sh
 ```
 
+## Troubleshooting installed-vs-repo behavior
+
+If `zig-out/bin/wsm` and your installed `wsm` behave differently, verify which
+binary your shell is actually resolving:
+
+```bash
+which wsm
+ls -l ~/.local/bin/wsm ~/.local/libexec/wsm/{host,vpty,scroll,wsm_logs_viewer}
+ls -l zig-out/bin/{wsm,host,vpty,scroll}
+```
+
+When in doubt, rebuild the local distribution bundle and reinstall it:
+
+```bash
+./scripts/build_dist.sh
+cd dist/linux-x86_64
+sh install.sh
+```
+
 ## First session with host
 
 If you are developing from a repo checkout, you can run the low-level host runtime directly:
