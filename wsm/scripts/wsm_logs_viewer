@@ -6,6 +6,12 @@ if [[ $# -ne 1 ]]; then
   exit 2
 fi
 
+TRANSCRIPT_PATH="$1"
+if [[ ! -f "$TRANSCRIPT_PATH" ]]; then
+  echo "wsm_logs_viewer: transcript not found: $TRANSCRIPT_PATH" >&2
+  exit 1
+fi
+
 SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
 
 if [[ -x "$SCRIPT_DIR/scroll" ]]; then
@@ -17,9 +23,4 @@ else
   exit 1
 fi
 
-trap 'stty sane 2>/dev/null || true; clear 2>/dev/null || true' EXIT
-
-stty sane 2>/dev/null || true
-clear 2>/dev/null || true
-
-"$SCROLL_BIN" --ansi "$1" | less +G -R -X
+"$SCROLL_BIN" --ansi "$TRANSCRIPT_PATH" | less -R -X

@@ -22,18 +22,9 @@ pub fn buildLine(
 
     switch (state.mode) {
         .passive => {
-            if (model.scroll_view and model.session.len > 0) {
-                try buf.appendSlice(allocator, "logs: ");
-                try buf.appendSlice(allocator, model.session);
-                if (std.mem.endsWith(u8, model.session, ".scroll")) {
-                    buf.items.len -= ".scroll".len;
-                }
-                try buf.appendSlice(allocator, "   q exit");
-            } else {
-                try buf.appendSlice(allocator, model.passive_label);
-                if (model.passive_label.len > 0) try buf.appendSlice(allocator, "   ");
-                try buf.appendSlice(allocator, "^g menu");
-            }
+            try buf.appendSlice(allocator, model.passive_label);
+            if (model.passive_label.len > 0) try buf.appendSlice(allocator, "   ");
+            try buf.appendSlice(allocator, "^g menu");
         },
         .active_menu => {
             try appendHeader(&buf, allocator, model);
@@ -88,7 +79,7 @@ test "buildLine renders passive text and menu hint" {
     var state = ui_state.State.init(std.testing.allocator);
     defer state.deinit();
 
-    const line = try buildLine(std.testing.allocator, &state, .{ .workspace = "", .session = "", .passive_label = "backend", .logs_exit_hint = false, .active_summary = "", .attach_candidates = &.{}, .detached = false, .scroll_view = false }, 20);
+    const line = try buildLine(std.testing.allocator, &state, .{ .workspace = "", .session = "", .passive_label = "backend", .active_summary = "", .attach_candidates = &.{}, .detached = false }, 20);
     defer std.testing.allocator.free(line);
 
     try std.testing.expectEqualStrings("backend   ^g menu   ", line);

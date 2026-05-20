@@ -6,19 +6,6 @@ pub const Error = error{
     AmbiguousTarget,
 };
 
-pub fn scrollSessionId(allocator: std.mem.Allocator, base_id: []const u8) ![]u8 {
-    return std.fmt.allocPrint(allocator, "{s}.scroll", .{base_id});
-}
-
-pub fn scrollBaseId(allocator: std.mem.Allocator, id: []const u8) !?[]u8 {
-    if (!std.mem.endsWith(u8, id, ".scroll")) return null;
-    return try allocator.dupe(u8, id[0 .. id.len - ".scroll".len]);
-}
-
-pub fn isScrollSession(id: []const u8) bool {
-    return std.mem.endsWith(u8, id, ".scroll");
-}
-
 pub const ResolvedAction = union(enum) {
     quit,
     detach,
@@ -43,11 +30,9 @@ pub const Provider = struct {
         workspace: []const u8,
         session: []const u8,
         passive_label: []const u8,
-        logs_exit_hint: bool,
         active_summary: []const u8,
         attach_candidates: []const ui_state.Candidate,
         detached: bool,
-        scroll_view: bool,
     };
 
     pub fn init(allocator: std.mem.Allocator, root: []const u8, current_session: ?[]const u8) !Provider {
@@ -86,11 +71,9 @@ pub const Provider = struct {
             .workspace = self.root,
             .session = if (self.current_session.len == 0) "detached" else self.current_session,
             .passive_label = self.passiveLabel(),
-            .logs_exit_hint = isScrollSession(self.current_session),
             .active_summary = self.active_summary.items,
             .attach_candidates = self.attach_candidates,
             .detached = self.current_session.len == 0,
-            .scroll_view = isScrollSession(self.current_session),
         };
     }
 
@@ -107,7 +90,7 @@ pub const Provider = struct {
 
         try self.passive_label_buf.writer(self.allocator).print("{s}/{s}", .{ self.root, self.current_session });
 
-        if (self.current_session.len == 0 or isScrollSession(self.current_session)) {
+        if (self.current_session.len == 0) {
             self.active_summary.clearRetainingCapacity();
             return;
         }
@@ -148,10 +131,6 @@ pub const Provider = struct {
         self.active_summary.deinit(self.allocator);
         self.active_summary = next_active_summary;
         next_active_summary = .{};
-    }
-
-    pub fn currentSessionIsScroll(self: *const Provider) bool {
-        return isScrollSession(self.current_session);
     }
 
     fn passiveLabel(self: *const Provider) []const u8 {
@@ -269,13 +248,7 @@ pub const Provider = struct {
                     .directory => try stack.append(self.allocator, joined),
                     .file, .unix_domain_socket => {
                         if (std.mem.endsWith(u8, entry.name, ".wsm")) {
-                            if (try self.canonicalIdForSock(joined)) |id| {
-                                if (isScrollSession(id)) {
-                                    self.allocator.free(id);
-                                } else {
-                                    try out.append(self.allocator, id);
-                                }
-                            }
+                            if (try self.canonicalIdForSock(joined)) |id| try out.append(self.allocator, id);
                             self.allocator.free(joined);
                         } else self.allocator.free(joined);
                     },

@@ -140,14 +140,12 @@ pub const WorkspaceService = struct {
     allocator: std.mem.Allocator,
     host_bin: []const u8,
     vpty_bin: []const u8,
-    scroll_bin: []const u8,
 
-    pub fn init(allocator: std.mem.Allocator, host_bin: []const u8, vpty_bin: []const u8, scroll_bin: []const u8) WorkspaceService {
+    pub fn init(allocator: std.mem.Allocator, host_bin: []const u8, vpty_bin: []const u8) WorkspaceService {
         return .{
             .allocator = allocator,
             .host_bin = host_bin,
             .vpty_bin = vpty_bin,
-            .scroll_bin = scroll_bin,
         };
     }
 
@@ -156,22 +154,6 @@ pub const WorkspaceService = struct {
             .id = id,
             .shell = shell,
             .vpty_bin = self.vpty_bin,
-            .cols = cols,
-            .rows = rows,
-        });
-        defer paths.deinit(self.allocator);
-
-        return .{
-            .id = try self.allocator.dupe(u8, paths.id),
-            .paths = try session_primitives.pathsForId(self.allocator, provider, paths.id),
-        };
-    }
-
-    pub fn createCommand(self: *WorkspaceService, provider: *policy.Provider, id: []const u8, argv: []const []const u8, cols: ?u16, rows: ?u16) !SessionRef {
-        var paths = try session_primitives.createCommandSession(self.allocator, self.host_bin, provider, .{
-            .id = id,
-            .vpty_bin = self.vpty_bin,
-            .argv = argv,
             .cols = cols,
             .rows = rows,
         });
@@ -193,15 +175,6 @@ pub const WorkspaceService = struct {
         };
     }
 
-    pub fn createCommandAndAttach(self: *WorkspaceService, provider: *policy.Provider, id: []const u8, argv: []const []const u8, cols: ?u16, rows: ?u16) !CreateAttachResult {
-        const session = try self.createCommand(provider, id, argv, cols, rows);
-        errdefer session.deinit(self.allocator);
-        const attached = try self.attachWithRetry(provider, session.id, 2000);
-        return .{
-            .session = session,
-            .attached = attached,
-        };
-    }
 
     pub fn attach(self: *WorkspaceService, provider: *policy.Provider, id: []const u8) !AttachResult {
         const attached = try self.attachOnce(provider, id);

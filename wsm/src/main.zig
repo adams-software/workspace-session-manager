@@ -124,13 +124,6 @@ const App = struct {
             }
             const initial_pump = app.executor.pumpAttachedOutput(&app.provider, term.tty_fd) catch null;
             if (initial_pump) |pump_result| switch (pump_result) {
-                .reattached => |id| {
-                    defer allocator.free(id);
-                    try app.provider.setCurrentSession(id);
-                    _ = app.bar_state.clearNotice();
-                    _ = app.executor.forwardResize(app.layout.outer_cols, app.layout.main_rows) catch {};
-                    try app.render();
-                },
                 else => {},
             };
             if (!app.executor.isInteractiveAttached()) {
@@ -197,10 +190,6 @@ const App = struct {
     fn handleTTYInput(self: *App, bytes: []const u8) !bool {
         if (bytes.len == 0) return false;
 
-        if (self.provider.currentSessionIsScroll()) {
-            return try self.executor.forwardInput(bytes);
-        }
-
         if (self.bar_state.mode == .passive) {
             if (keyFromInput(bytes, self.hotkey)) |key| {
                 switch (key) {
@@ -259,9 +248,7 @@ const App = struct {
         }
 
         if (action == .logs) {
-            self.bar_state.enterPassive();
-            const exec_result = try self.executor.openLogs(&self.provider, .{ .cols = self.layout.outer_cols, .rows = self.layout.main_rows });
-            try self.applyExecResult(exec_result);
+            try self.openLogsLocal();
             return;
         }
 
@@ -285,6 +272,25 @@ const App = struct {
         return self.executor.runSized(&self.provider, resolved, self.term.tty_fd, .{ .cols = self.layout.outer_cols, .rows = self.layout.main_rows }) catch |err| .{ .err = try std.fmt.allocPrint(self.allocator, "action failed: {s}", .{@errorName(err)}) };
     }
 
+    fn openLogsLocal(self: *App) !void {
+        self.bar_state.enterPassive();
+        try self.clearBar();
+        try writeAll(self.term.tty_fd, EXIT_RESET);
+        self.term.raw_mode.restore();
+
+        const exec_result: executor_mod.Result = self.executor.viewLogsLocal(&self.provider) catch |err| .{
+            .err = try std.fmt.allocPrint(self.allocator, "logs failed: {s}", .{@errorName(err)}),
+        };
+
+        self.term.raw_mode = enterRawMode(self.term.tty_fd) catch return Error.RawModeFailed;
+        try writeAll(self.term.tty_fd, ENTER_ALT_SCREEN);
+        self.size = try currentOuterSize(self.term);
+        self.layout = bar_layout.compute(self.size.cols, self.size.rows, self.bar_state.mode);
+        try self.applyExecResult(exec_result);
+        try self.refreshPolicy();
+        try self.render();
+    }
+
     fn applyExecResult(self: *App, exec_result: executor_mod.Result) !void {
         switch (exec_result) {
             .info => |msg| {
@@ -299,7 +305,7 @@ const App = struct {
                     self.exit_message = try self.allocator.dupe(u8, msg);
                 }
             },
-            .attached, .reattached => |id| {
+            .attached => |id| {
                 defer self.allocator.free(id);
                 try self.provider.setCurrentSession(id);
                 _ = self.bar_state.clearNotice();
@@ -328,11 +334,6 @@ const App = struct {
 
     fn handlePumpResult(self: *App, pump_result: executor_mod.Result) !void {
         switch (pump_result) {
-            .reattached => {
-                try self.applyExecResult(pump_result);
-                try self.refreshPolicy();
-                try self.render();
-            },
             .detached => {
                 if (!self.executor.isInteractiveAttached()) self.should_exit = true;
             },

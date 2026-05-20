@@ -179,7 +179,7 @@ pub fn runCommand(allocator: std.mem.Allocator, root: []const u8, mode: Mode, st
     defer provider.deinit();
     const tool_paths = try resolveToolPaths(allocator);
     defer tool_paths.deinit(allocator);
-    var service = service_mod.WorkspaceService.init(allocator, tool_paths.host_bin, tool_paths.vpty_bin, tool_paths.logs_viewer_bin);
+    var service = service_mod.WorkspaceService.init(allocator, tool_paths.host_bin, tool_paths.vpty_bin);
 
     switch (mode) {
         .help => {
