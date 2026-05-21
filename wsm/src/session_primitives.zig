@@ -23,6 +23,7 @@ pub const CreateSpec = struct {
     id: []const u8,
     shell: []const u8,
     vpty_bin: []const u8,
+    ptylog_bin: []const u8,
     cols: ?u16 = null,
     rows: ?u16 = null,
 };
@@ -63,14 +64,12 @@ pub fn createSession(allocator: std.mem.Allocator, host_bin: []const u8, provide
     else
         null;
     defer if (size_arg) |arg| allocator.free(arg);
-    const log_path = try std.fmt.allocPrint(allocator, "{s}.typescript", .{paths.data_path[0 .. paths.data_path.len - 4]});
+    const transcript_path = try std.fmt.allocPrint(allocator, "{s}.typescript", .{paths.data_path[0 .. paths.data_path.len - 4]});
+    defer allocator.free(transcript_path);
+    const log_path = try std.fmt.allocPrint(allocator, "{s}.log", .{paths.data_path[0 .. paths.data_path.len - 4]});
     defer allocator.free(log_path);
     const inner_cmd = try std.fmt.allocPrint(allocator, "WSM_SESSION_ID={s} exec {s} -i", .{ spec.id, spec.shell });
     defer allocator.free(inner_cmd);
-    const inner_cmd_quoted = try std.fmt.allocPrint(allocator, "\"{s}\"", .{inner_cmd});
-    defer allocator.free(inner_cmd_quoted);
-    const primary_cmd = try std.fmt.allocPrint(allocator, "exec script -q -f -c {s} {s}", .{ inner_cmd_quoted, log_path });
-    defer allocator.free(primary_cmd);
 
     try appendDetachedHostPrefix(allocator, &argv, host_bin);
     try argv.appendSlice(allocator, &.{
@@ -85,9 +84,15 @@ pub fn createSession(allocator: std.mem.Allocator, host_bin: []const u8, provide
         "--",
         spec.vpty_bin,
         "--",
+        spec.ptylog_bin,
+        "--transcript",
+        transcript_path,
+        "--log",
+        log_path,
+        "--",
         "/bin/bash",
         "-lc",
-        primary_cmd,
+        inner_cmd,
     });
 
     var child = std.process.Child.init(argv.items, allocator);

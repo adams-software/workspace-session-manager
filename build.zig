@@ -392,6 +392,14 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
 
+    const scroll_log_core_mod = b.addModule("scroll_log_core", .{
+        .root_source_file = b.path("scroll/src/log_core.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    scroll_log_core_mod.addImport("term_engine", term_engine_mod);
+
     // scroll spike
     const scroll_root = b.createModule(.{
         .root_source_file = b.path("scroll/src/main.zig"),
@@ -406,6 +414,24 @@ pub fn build(b: *std.Build) void {
         .root_module = scroll_root,
     });
     b.installArtifact(scroll_exe);
+
+    const ptylog_root = b.createModule(.{
+        .root_source_file = b.path("ptylog/src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    ptylog_root.linkSystemLibrary("util", .{});
+    ptylog_root.addImport("byte_queue", byte_queue_mod);
+    ptylog_root.addImport("fd_stream", fd_stream_mod);
+    ptylog_root.addImport("host", host_mod);
+    ptylog_root.addImport("ptyio_tty_size", ptyio_tty_size_mod);
+    ptylog_root.addImport("scroll_log_core", scroll_log_core_mod);
+    const ptylog_exe = b.addExecutable(.{
+        .name = "ptylog",
+        .root_module = ptylog_root,
+    });
+    b.installArtifact(ptylog_exe);
 
     // alt
     const alt_root = b.createModule(.{

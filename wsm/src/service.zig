@@ -140,12 +140,14 @@ pub const WorkspaceService = struct {
     allocator: std.mem.Allocator,
     host_bin: []const u8,
     vpty_bin: []const u8,
+    ptylog_bin: []const u8,
 
-    pub fn init(allocator: std.mem.Allocator, host_bin: []const u8, vpty_bin: []const u8) WorkspaceService {
+    pub fn init(allocator: std.mem.Allocator, host_bin: []const u8, vpty_bin: []const u8, ptylog_bin: []const u8) WorkspaceService {
         return .{
             .allocator = allocator,
             .host_bin = host_bin,
             .vpty_bin = vpty_bin,
+            .ptylog_bin = ptylog_bin,
         };
     }
 
@@ -154,6 +156,7 @@ pub const WorkspaceService = struct {
             .id = id,
             .shell = shell,
             .vpty_bin = self.vpty_bin,
+            .ptylog_bin = self.ptylog_bin,
             .cols = cols,
             .rows = rows,
         });

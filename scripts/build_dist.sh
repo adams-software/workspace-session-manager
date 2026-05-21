@@ -21,6 +21,7 @@ mkdir -p "$BIN_DIR" "$LIBEXEC_DIR" "$COMPLETIONS_DIR"
 install -m 0755 "$REPO_ROOT/zig-out/bin/wsm" "$BIN_DIR/wsm"
 install -m 0755 "$REPO_ROOT/zig-out/bin/host" "$LIBEXEC_DIR/host"
 install -m 0755 "$REPO_ROOT/zig-out/bin/vpty" "$LIBEXEC_DIR/vpty"
+install -m 0755 "$REPO_ROOT/zig-out/bin/ptylog" "$LIBEXEC_DIR/ptylog"
 install -m 0755 "$REPO_ROOT/zig-out/bin/scroll" "$LIBEXEC_DIR/scroll"
 install -m 0755 "$REPO_ROOT/wsm/scripts/wsm_logs_viewer" "$LIBEXEC_DIR/wsm_logs_viewer"
 

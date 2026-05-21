@@ -6,11 +6,13 @@ const argv_parse = @import("argv_parse");
 pub const ToolPaths = struct {
     host_bin: []u8,
     vpty_bin: []u8,
+    ptylog_bin: []u8,
     logs_viewer_bin: []u8,
 
     pub fn deinit(self: ToolPaths, allocator: std.mem.Allocator) void {
         allocator.free(self.host_bin);
         allocator.free(self.vpty_bin);
+        allocator.free(self.ptylog_bin);
         allocator.free(self.logs_viewer_bin);
     }
 };
@@ -25,18 +27,23 @@ pub fn resolveToolPaths(allocator: std.mem.Allocator) !ToolPaths {
     defer allocator.free(private_host);
     const private_vpty = try std.fs.path.join(allocator, &.{ exe_parent, "libexec", "wsm", "vpty" });
     defer allocator.free(private_vpty);
+    const private_ptylog = try std.fs.path.join(allocator, &.{ exe_parent, "libexec", "wsm", "ptylog" });
+    defer allocator.free(private_ptylog);
     const private_logs = try std.fs.path.join(allocator, &.{ exe_parent, "libexec", "wsm", "wsm_logs_viewer" });
     defer allocator.free(private_logs);
     const sibling_host = try std.fs.path.join(allocator, &.{ exe_dir, "host" });
     defer allocator.free(sibling_host);
     const sibling_vpty = try std.fs.path.join(allocator, &.{ exe_dir, "vpty" });
     defer allocator.free(sibling_vpty);
+    const sibling_ptylog = try std.fs.path.join(allocator, &.{ exe_dir, "ptylog" });
+    defer allocator.free(sibling_ptylog);
     const sibling_logs = try std.fs.path.join(allocator, &.{ exe_dir, "wsm_logs_viewer" });
     defer allocator.free(sibling_logs);
 
     return .{
         .host_bin = try resolveToolPath(allocator, "WSM_HOST_BIN", &.{ private_host, sibling_host, "zig-out/bin/host" }),
         .vpty_bin = try resolveToolPath(allocator, "WSM_VPTY_BIN", &.{ private_vpty, sibling_vpty, "zig-out/bin/vpty" }),
+        .ptylog_bin = try resolveToolPath(allocator, "WSM_PTYLOG_BIN", &.{ private_ptylog, sibling_ptylog, "zig-out/bin/ptylog" }),
         .logs_viewer_bin = try resolveToolPath(allocator, "WSM_LOGS_VIEWER_BIN", &.{ private_logs, sibling_logs, "wsm/scripts/wsm_logs_viewer" }),
     };
 }
@@ -179,7 +186,7 @@ pub fn runCommand(allocator: std.mem.Allocator, root: []const u8, mode: Mode, st
     defer provider.deinit();
     const tool_paths = try resolveToolPaths(allocator);
     defer tool_paths.deinit(allocator);
-    var service = service_mod.WorkspaceService.init(allocator, tool_paths.host_bin, tool_paths.vpty_bin);
+    var service = service_mod.WorkspaceService.init(allocator, tool_paths.host_bin, tool_paths.vpty_bin, tool_paths.ptylog_bin);
 
     switch (mode) {
         .help => {
