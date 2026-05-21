@@ -23,4 +23,7 @@ else
   exit 1
 fi
 
+trap 'printf "\033[0m\033[?25h\033[?1049l\033(B"' EXIT
+printf "\033[?1049h\033[2J\033[H\033[?25h"
+
 "$SCROLL_BIN" --ansi "$TRANSCRIPT_PATH" | less -R -X

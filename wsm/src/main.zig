@@ -286,6 +286,20 @@ const App = struct {
         try writeAll(self.term.tty_fd, ENTER_ALT_SCREEN);
         self.size = try currentOuterSize(self.term);
         self.layout = bar_layout.compute(self.size.cols, self.size.rows, self.bar_state.mode);
+        _ = self.executor.forwardResize(self.layout.outer_cols, self.layout.main_rows) catch {};
+        const pump_result = self.executor.pumpAttachedOutput(&self.provider, self.term.tty_fd) catch |err| {
+            const msg = try std.fmt.allocPrint(self.allocator, "post-log sync failed: {s}", .{@errorName(err)});
+            _ = self.bar_state.setExternalError(msg);
+            self.allocator.free(msg);
+            return;
+        };
+        switch (pump_result) {
+            .err => |msg| {
+                defer self.allocator.free(msg);
+                _ = self.bar_state.setExternalError(msg);
+            },
+            else => {},
+        }
         try self.applyExecResult(exec_result);
         try self.refreshPolicy();
         try self.render();

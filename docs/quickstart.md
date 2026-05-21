@@ -79,7 +79,9 @@ The installed completion files use command-name autoload filenames:
 scroll --ansi <session.typescript> | less -R
 ```
 
-When `scroll` and `less` are available, this is used automatically by `wsm log`. If either is unavailable, `wsm` falls back to raw transcript display.
+When `scroll` and `less` are available, this is used automatically by
+`wsm log` and by the in-session `logs` action. The standard install bundles
+the required helpers under `~/.local/libexec/wsm`.
 
 You can override the install prefix:
 

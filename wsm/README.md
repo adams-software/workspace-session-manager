@@ -31,10 +31,12 @@ View logs for a session:
 wsm log api/dev
 ```
 
-Inside an attached session, press `ctrl-g` to open the in-session action menu. Log viewing uses paired temporary sessions like `<session>.scroll` rather than the older `alt`-based prototype.
+Inside an attached session, the `logs` action temporarily drops out to the
+outer `wsm` client tty, runs the local transcript viewer, then returns to the
+session UI. It does not create a child log-view session.
 
-The paired logs path is backed by `scroll`, which can replay a transcript from a
-path or stdin:
+The logs path is backed by `scroll`, which can replay a transcript from a path
+or stdin:
 
 ```bash
 scroll /path/to/session.typescript
