@@ -3,6 +3,7 @@ const ByteQueue = @import("byte_queue").ByteQueue;
 const fd_stream = @import("fd_stream");
 const PtyChildHost = @import("host").PtyChildHost;
 const getTtySize = @import("ptyio_tty_size").getTtySize;
+const enterRawMode = @import("ptyio_raw_mode").enterRawMode;
 const log_core = @import("scroll_log_core");
 
 const c = @cImport({
@@ -116,6 +117,10 @@ fn readIntoQueuePty(allocator: std.mem.Allocator, fd: c_int, queue: *ByteQueue, 
 
 fn run(allocator: std.mem.Allocator, config: Config) !u8 {
     defer allocator.free(config.child_argv);
+
+    const stdin_is_tty = c.isatty(std.posix.STDIN_FILENO) == 1;
+    var raw_mode = if (stdin_is_tty) try enterRawMode(std.posix.STDIN_FILENO) else null;
+    defer if (raw_mode) |*guard| guard.restore();
 
     var transcript_file = try createOutput(config.transcript_path);
     defer transcript_file.close();

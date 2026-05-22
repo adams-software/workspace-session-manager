@@ -83,6 +83,25 @@ printf '%s\n' "$KILL2_OUT" | grep -q '^signaled promptdemo (KILL)$'
 grep -q '\$' "$TMP/promptdemo.log"
 grep -q '\$' "$TMP/promptdemo.typescript"
 
+printf '=== attached ctrl-c stays inside the session ===\n'
+CREATE3_OUT="$(WSM_ROOT="$TMP" "$WSM_BIN" create -d ctrldemo)"
+printf '%s\n' "$CREATE3_OUT"
+printf '%s\n' "$CREATE3_OUT" | grep -q '^created ctrldemo$'
+tmux kill-session -t wsmsmokectrl 2>/dev/null || true
+tmux new-session -d -s wsmsmokectrl "cd '$REPO_ROOT' && WSM_ROOT='$TMP' '$WSM_BIN' attach ctrldemo"
+sleep 1
+tmux has-session -t wsmsmokectrl
+tmux send-keys -t wsmsmokectrl:0.0 C-c
+sleep 1
+ATTACH_CAPTURE="$(tmux capture-pane -pt wsmsmokectrl:0.0 || true)"
+printf '%s\n' "$ATTACH_CAPTURE"
+printf '%s\n' "$ATTACH_CAPTURE" | grep -q '\^C'
+INSPECT2_OUT="$(WSM_ROOT="$TMP" "$WSM_BIN" inspect ctrldemo)"
+printf '%s\n' "$INSPECT2_OUT"
+printf '%s\n' "$INSPECT2_OUT" | grep -Eq 'ctrldemo[[:space:]]+live'
+tmux kill-session -t wsmsmokectrl 2>/dev/null || true
+WSM_ROOT="$TMP" "$WSM_BIN" kill -f ctrldemo >/dev/null 2>&1 || true
+
 printf '=== wsm cleanup report ===\n'
 CLEANUP_OUT="$(WSM_ROOT="$TMP" "$WSM_BIN" cleanup)"
 printf '%s\n' "$CLEANUP_OUT"

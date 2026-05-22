@@ -434,6 +434,7 @@ pub fn build(b: *std.Build) void {
     ptylog_root.addImport("byte_queue", byte_queue_mod);
     ptylog_root.addImport("fd_stream", fd_stream_mod);
     ptylog_root.addImport("host", host_mod);
+    ptylog_root.addImport("ptyio_raw_mode", raw_mode_mod);
     ptylog_root.addImport("ptyio_tty_size", ptyio_tty_size_mod);
     ptylog_root.addImport("scroll_log_core", scroll_log_core_mod);
     const ptylog_exe = b.addExecutable(.{

@@ -556,7 +556,9 @@ const VptyRuntime = struct {
 
         const handlers = SignalHandlers{
             .old_winch = c.signal(c.SIGWINCH, handleSigwinch),
-            .old_int = c.signal(c.SIGINT, handleTerminationSignal),
+            // Interactive Ctrl-C should reach the child PTY application, not tear
+            // down the vpty wrapper itself. Ignore host-side SIGINT while running.
+            .old_int = c.signal(c.SIGINT, c.SIG_IGN),
             .old_term = c.signal(c.SIGTERM, handleTerminationSignal),
         };
 
