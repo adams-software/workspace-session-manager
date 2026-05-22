@@ -17,14 +17,13 @@ const io_chunk_size = 64 * 1024;
 var winch_changed = false;
 
 const Config = struct {
-    transcript_path: []const u8,
     log_path: []const u8,
     child_argv: []const []const u8,
 };
 
 fn usage() void {
     std.debug.print(
-        "NAME\n  ptylog - PTY passthrough logger\n\nUSAGE\n  ptylog --transcript <path> --log <path> -- <command> [args...]\n",
+        "NAME\n  ptylog - PTY passthrough logger\n\nUSAGE\n  ptylog --log <path> -- <command> [args...]\n",
         .{},
     );
 }
@@ -34,7 +33,6 @@ fn handleSigwinch(_: c_int) callconv(.c) void {
 }
 
 fn parseArgs(allocator: std.mem.Allocator, argv: []const []const u8) !Config {
-    var transcript_path: ?[]const u8 = null;
     var log_path: ?[]const u8 = null;
     var child_start: ?usize = null;
 
@@ -46,12 +44,6 @@ fn parseArgs(allocator: std.mem.Allocator, argv: []const []const u8) !Config {
             break;
         }
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) return error.ShowHelp;
-        if (std.mem.eql(u8, arg, "--transcript")) {
-            i += 1;
-            if (i >= argv.len) return error.InvalidArgs;
-            transcript_path = argv[i];
-            continue;
-        }
         if (std.mem.eql(u8, arg, "--log")) {
             i += 1;
             if (i >= argv.len) return error.InvalidArgs;
@@ -65,7 +57,6 @@ fn parseArgs(allocator: std.mem.Allocator, argv: []const []const u8) !Config {
     if (start >= argv.len) return error.InvalidArgs;
 
     return .{
-        .transcript_path = transcript_path orelse return error.InvalidArgs,
         .log_path = log_path orelse return error.InvalidArgs,
         .child_argv = try allocator.dupe([]const u8, argv[start..]),
     };
@@ -121,9 +112,6 @@ fn run(allocator: std.mem.Allocator, config: Config) !u8 {
     const stdin_is_tty = c.isatty(std.posix.STDIN_FILENO) == 1;
     var raw_mode = if (stdin_is_tty) try enterRawMode(std.posix.STDIN_FILENO) else null;
     defer if (raw_mode) |*guard| guard.restore();
-
-    var transcript_file = try createOutput(config.transcript_path);
-    defer transcript_file.close();
 
     var log_file = try createOutput(config.log_path);
     defer log_file.close();
@@ -192,7 +180,6 @@ fn run(allocator: std.mem.Allocator, config: Config) !u8 {
             if (!pty_rx.isEmpty()) {
                 const bytes = pty_rx.readableSlice();
                 try stdout_tx.append(allocator, bytes);
-                try transcript_file.writeAll(bytes);
                 try logger.feed(bytes);
                 try logger.flushLive(&log_writer.interface);
                 try log_writer.interface.flush();

@@ -158,13 +158,13 @@ pub const Executor = struct {
     pub fn viewLogsLocal(self: *Executor, provider: *policy.Provider) !Result {
         const base_id = self.current_session_id orelse return .{ .err = try self.allocator.dupe(u8, "no current session") };
                 var service = service_mod.WorkspaceService.init(self.allocator, self.host_bin, self.vpty_bin, self.ptylog_bin);
-        const transcript = try service.transcriptPath(provider, base_id);
-        defer self.allocator.free(transcript);
-        std.fs.accessAbsolute(transcript, .{}) catch {
-            return .{ .err = try std.fmt.allocPrint(self.allocator, "logs failed for {s}: transcript not found", .{base_id}) };
+        const log_path = try service.logPath(provider, base_id);
+        defer self.allocator.free(log_path);
+        std.fs.accessAbsolute(log_path, .{}) catch {
+            return .{ .err = try std.fmt.allocPrint(self.allocator, "logs failed for {s}: log not found", .{base_id}) };
         };
 
-        const argv = [_][]const u8{ self.logs_viewer_bin, transcript };
+        const argv = [_][]const u8{ self.logs_viewer_bin, log_path };
         var child = std.process.Child.init(&argv, self.allocator);
         child.stdin_behavior = .Inherit;
         child.stdout_behavior = .Inherit;

@@ -2,28 +2,17 @@
 set -euo pipefail
 
 if [[ $# -ne 1 ]]; then
-  echo "usage: wsm_logs_viewer <typescript-path>" >&2
+  echo "usage: wsm_logs_viewer <log-path>" >&2
   exit 2
 fi
 
-TRANSCRIPT_PATH="$1"
-if [[ ! -f "$TRANSCRIPT_PATH" ]]; then
-  echo "wsm_logs_viewer: transcript not found: $TRANSCRIPT_PATH" >&2
-  exit 1
-fi
-
-SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
-
-if [[ -x "$SCRIPT_DIR/scroll" ]]; then
-  SCROLL_BIN="$SCRIPT_DIR/scroll"
-elif [[ -x "$SCRIPT_DIR/../../zig-out/bin/scroll" ]]; then
-  SCROLL_BIN="$SCRIPT_DIR/../../zig-out/bin/scroll"
-else
-  echo "wsm_logs_viewer: could not find scroll helper" >&2
+LOG_PATH="$1"
+if [[ ! -f "$LOG_PATH" ]]; then
+  echo "wsm_logs_viewer: log not found: $LOG_PATH" >&2
   exit 1
 fi
 
 trap 'printf "\033[0m\033[?25h\033[?1049l\033(B"' EXIT
 printf "\033[?1049h\033[2J\033[H\033[?25h"
 
-"$SCROLL_BIN" --ansi "$TRANSCRIPT_PATH" | less -R -X
+less +G -R -X "$LOG_PATH"

@@ -60,10 +60,10 @@ cat > "$LOG_VIEWER_SHIM" <<'EOS'
 cat "$1"
 EOS
 chmod +x "$LOG_VIEWER_SHIM"
-printf 'hello from transcript\n' > "$TMP/demo.typescript"
+printf 'hello from log\n' > "$TMP/demo.log"
 LOG_OUT="$(WSM_ROOT="$TMP" WSM_LOGS_VIEWER_BIN="$LOG_VIEWER_SHIM" "$WSM_BIN" log demo)"
 printf '%s\n' "$LOG_OUT"
-printf '%s\n' "$LOG_OUT" | grep -q 'hello from transcript'
+printf '%s\n' "$LOG_OUT" | grep -q 'hello from log'
 
 printf '=== wsm kill ===\n'
 KILL_OUT="$(WSM_ROOT="$TMP" "$WSM_BIN" kill demo)"
@@ -79,9 +79,8 @@ KILL2_OUT="$(WSM_ROOT="$TMP" "$WSM_BIN" kill -f promptdemo)"
 printf '%s\n' "$KILL2_OUT"
 printf '%s\n' "$KILL2_OUT" | grep -q '^signaled promptdemo (KILL)$'
 [[ -f "$TMP/promptdemo.log" ]]
-[[ -f "$TMP/promptdemo.typescript" ]]
 grep -q '\$' "$TMP/promptdemo.log"
-grep -q '\$' "$TMP/promptdemo.typescript"
+[[ ! -e "$TMP/promptdemo.typescript" ]]
 
 printf '=== attached ctrl-c stays inside the session ===\n'
 CREATE3_OUT="$(WSM_ROOT="$TMP" "$WSM_BIN" create -d ctrldemo)"

@@ -64,8 +64,6 @@ pub fn createSession(allocator: std.mem.Allocator, host_bin: []const u8, provide
     else
         null;
     defer if (size_arg) |arg| allocator.free(arg);
-    const transcript_path = try std.fmt.allocPrint(allocator, "{s}.typescript", .{paths.data_path[0 .. paths.data_path.len - 4]});
-    defer allocator.free(transcript_path);
     const log_path = try std.fmt.allocPrint(allocator, "{s}.log", .{paths.data_path[0 .. paths.data_path.len - 4]});
     defer allocator.free(log_path);
     const inner_cmd = try std.fmt.allocPrint(allocator, "WSM_SESSION_ID={s} exec {s} -i", .{ spec.id, spec.shell });
@@ -85,8 +83,6 @@ pub fn createSession(allocator: std.mem.Allocator, host_bin: []const u8, provide
         spec.vpty_bin,
         "--",
         spec.ptylog_bin,
-        "--transcript",
-        transcript_path,
         "--log",
         log_path,
         "--",

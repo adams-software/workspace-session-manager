@@ -95,10 +95,11 @@ pub const Builder = struct {
                 if (line.eol) try self.flushPending();
             },
             .ansi => {
+                const cells = trimTrailingBlankCells(line.cells);
                 if (self.pending_styled_hyperlinks.len == 0) {
                     self.pending_styled_hyperlinks = try self.cloneHyperlinks(snapshot);
                 }
-                try self.pending_styled_cells.appendSlice(self.allocator, line.cells);
+                try self.pending_styled_cells.appendSlice(self.allocator, cells);
                 if (line.eol) try self.flushPending();
             },
         }
@@ -301,12 +302,20 @@ pub const StreamLogger = struct {
     pub fn flushLive(self: *StreamLogger, writer: anytype) !void {
         const had_committed = self.builder.out.items.len != 0;
         if (had_committed) {
-            if (self.last_live_tail.items.len > 0 and !std.mem.endsWith(u8, self.last_live_tail.items, "\n")) {
-                try writer.writeAll("\n");
+            const committed = try self.takeCommittedBytes();
+            defer self.allocator.free(committed);
+
+            var bytes_to_append = committed;
+            if (self.last_live_tail.items.len > 0) {
+                const live_prefix = comparableTailPrefix(self.last_live_tail.items);
+                if (committed.len >= live_prefix.len and std.mem.startsWith(u8, committed, live_prefix)) {
+                    bytes_to_append = committed[live_prefix.len..];
+                } else if (!std.mem.endsWith(u8, self.last_live_tail.items, "\n")) {
+                    try writer.writeAll("\n");
+                }
             }
-            try self.builder.drainTo(writer);
+            if (bytes_to_append.len > 0) try writer.writeAll(bytes_to_append);
             self.last_live_tail.clearRetainingCapacity();
-            return;
         }
 
         const tail = try renderVisibleTail(self.allocator, self.builder.format, &self.engine);
@@ -318,20 +327,20 @@ pub const StreamLogger = struct {
         }
         if (std.mem.eql(u8, tail, self.last_live_tail.items)) return;
 
-        var bytes_to_append = tail;
         if (self.last_live_tail.items.len > 0) {
-            if (tail.len > self.last_live_tail.items.len and std.mem.startsWith(u8, tail, self.last_live_tail.items)) {
-                bytes_to_append = tail[self.last_live_tail.items.len..];
-            } else if (tail.len < self.last_live_tail.items.len and std.mem.startsWith(u8, self.last_live_tail.items, tail)) {
-                self.last_live_tail.clearRetainingCapacity();
-                try self.last_live_tail.appendSlice(self.allocator, tail);
-                return;
-            } else if (!std.mem.endsWith(u8, self.last_live_tail.items, "\n")) {
-                try writer.writeAll("\n");
+            const live_prefix = comparableTailPrefix(self.last_live_tail.items);
+            if (tail.len > live_prefix.len and std.mem.startsWith(u8, tail, live_prefix)) {
+                const suffix = tail[live_prefix.len..];
+                if (std.mem.indexOfScalar(u8, suffix, '\n') != null) {
+                    try writer.writeAll(suffix);
+                }
             }
+            self.last_live_tail.clearRetainingCapacity();
+            try self.last_live_tail.appendSlice(self.allocator, tail);
+            return;
         }
 
-        if (bytes_to_append.len > 0) try writer.writeAll(bytes_to_append);
+        try writer.writeAll(tail);
 
         self.last_live_tail.clearRetainingCapacity();
         try self.last_live_tail.appendSlice(self.allocator, tail);
@@ -340,10 +349,19 @@ pub const StreamLogger = struct {
     pub fn finish(self: *StreamLogger, writer: anytype) !void {
         const had_committed = self.builder.out.items.len != 0;
         if (had_committed) {
-            if (self.last_live_tail.items.len > 0 and !std.mem.endsWith(u8, self.last_live_tail.items, "\n")) {
-                try writer.writeAll("\n");
+            const committed = try self.takeCommittedBytes();
+            defer self.allocator.free(committed);
+
+            var bytes_to_append = committed;
+            if (self.last_live_tail.items.len > 0) {
+                const live_prefix = comparableTailPrefix(self.last_live_tail.items);
+                if (committed.len >= live_prefix.len and std.mem.startsWith(u8, committed, live_prefix)) {
+                    bytes_to_append = committed[live_prefix.len..];
+                } else if (!std.mem.endsWith(u8, self.last_live_tail.items, "\n")) {
+                    try writer.writeAll("\n");
+                }
             }
-            try self.builder.drainTo(writer);
+            if (bytes_to_append.len > 0) try writer.writeAll(bytes_to_append);
             self.last_live_tail.clearRetainingCapacity();
         }
 
@@ -363,7 +381,29 @@ pub const StreamLogger = struct {
         self.last_live_tail.clearRetainingCapacity();
         try self.last_live_tail.appendSlice(self.allocator, tail);
     }
+
+    fn takeCommittedBytes(self: *StreamLogger) ![]u8 {
+        var out = std.ArrayList(u8){};
+        defer out.deinit(self.allocator);
+        try self.builder.drainTo(out.writer(self.allocator));
+        return try out.toOwnedSlice(self.allocator);
+    }
+
+    pub fn hasLiveTail(self: *const StreamLogger) bool {
+        return self.last_live_tail.items.len != 0;
+    }
+
+    pub fn hasPendingCommitted(self: *const StreamLogger) bool {
+        return self.builder.out.items.len != 0;
+    }
 };
+
+fn comparableTailPrefix(tail: []const u8) []const u8 {
+    if (std.mem.endsWith(u8, tail, "\x1b[0m")) {
+        return tail[0 .. tail.len - 4];
+    }
+    return tail;
+}
 
 pub fn replayReader(allocator: std.mem.Allocator, format: OutputFormat, rows: u16, cols: u16, reader: anytype, writer: anytype) !void {
     var logger = try StreamLogger.init(allocator, format, rows, cols);
@@ -404,6 +444,9 @@ fn renderVisibleTail(allocator: std.mem.Allocator, format: OutputFormat, engine:
     var out = std.ArrayList(u8){};
     defer out.deinit(allocator);
     try builder.drainTo(out.writer(allocator));
+    if (out.items.len > 0 and out.items[out.items.len - 1] == '\n') {
+        out.items.len -= 1;
+    }
     return try out.toOwnedSlice(allocator);
 }
 
@@ -437,6 +480,23 @@ fn encodeCell(buf: *[32]u8, cell: term_engine.HostScreenCell) []const u8 {
     }
 
     return buf[0..written];
+}
+
+fn isBlankCell(cell: term_engine.HostScreenCell) bool {
+    if (cell.width == 0) return true;
+    if (cell.chars_len == 0) return true;
+    if (cell.chars_len == 1 and cell.chars[0] == ' ') return true;
+    return false;
+}
+
+fn trimTrailingBlankCells(cells: []const term_engine.HostScreenCell) []const term_engine.HostScreenCell {
+    var end = cells.len;
+    while (end > 0) {
+        const cell = cells[end - 1];
+        if (!isBlankCell(cell)) break;
+        end -= 1;
+    }
+    return cells[0..end];
 }
 
 fn cellSliceToUtf8(allocator: std.mem.Allocator, cells: []const term_engine.HostScreenCell) ![]u8 {
@@ -492,7 +552,7 @@ test "stream logger flushLive emits visible tail without committed newline" {
     defer out.deinit(allocator);
     try logger.flushLive(out.writer(allocator));
 
-    try std.testing.expectEqualStrings("prompt> ", out.items);
+    try std.testing.expectEqualStrings("prompt>", out.items);
 }
 
 test "stream logger flushLive dedupes unchanged visible tail" {
@@ -507,10 +567,10 @@ test "stream logger flushLive dedupes unchanged visible tail" {
     try logger.flushLive(out.writer(allocator));
     try logger.flushLive(out.writer(allocator));
 
-    try std.testing.expectEqualStrings("prompt> ", out.items);
+    try std.testing.expectEqualStrings("prompt>", out.items);
 }
 
-test "stream logger flushLive appends prompt growth as suffix" {
+test "stream logger flushLive suppresses prompt-growth snapshots until commit" {
     const allocator = std.testing.allocator;
     var logger = try StreamLogger.init(allocator, .plain, 24, 80);
     defer logger.deinit();
@@ -523,7 +583,7 @@ test "stream logger flushLive appends prompt growth as suffix" {
     try logger.feed("x");
     try logger.flushLive(out.writer(allocator));
 
-    try std.testing.expectEqualStrings("prompt> x", out.items);
+    try std.testing.expectEqualStrings("prompt>", out.items);
 }
 
 test "stream logger finish does not duplicate previously flushed live tail" {
@@ -538,7 +598,7 @@ test "stream logger finish does not duplicate previously flushed live tail" {
     try logger.flushLive(out.writer(allocator));
     try logger.finish(out.writer(allocator));
 
-    try std.testing.expectEqualStrings("prompt> ", out.items);
+    try std.testing.expectEqualStrings("prompt>", out.items);
 }
 
 test "stream logger flushLive includes committed line plus prompt tail" {
@@ -552,7 +612,23 @@ test "stream logger flushLive includes committed line plus prompt tail" {
     try logger.feed("hello\r\nprompt> ");
     try logger.flushLive(out.writer(allocator));
 
-    try std.testing.expectEqualStrings("hello\nprompt> ", out.items);
+    try std.testing.expectEqualStrings("hello\nprompt>", out.items);
+}
+
+test "stream logger flushLive does not duplicate committed prompt line after live growth" {
+    const allocator = std.testing.allocator;
+    var logger = try StreamLogger.init(allocator, .plain, 24, 80);
+    defer logger.deinit();
+
+    var out = std.ArrayList(u8){};
+    defer out.deinit(allocator);
+
+    try logger.feed("prompt> ls");
+    try logger.flushLive(out.writer(allocator));
+    try logger.feed("\r\nfile.txt\r\nprompt> ");
+    try logger.flushLive(out.writer(allocator));
+
+    try std.testing.expectEqualStrings("prompt> ls\nfile.txt\nprompt>", out.items);
 }
 
 test "stream logger flushLive suppresses alt-screen body and resumes shell tail" {
@@ -568,5 +644,5 @@ test "stream logger flushLive suppresses alt-screen body and resumes shell tail"
     try logger.feed("\x1b[?1049l$ echo done\r\ndone\r\n$ ");
     try logger.flushLive(out.writer(allocator));
 
-    try std.testing.expectEqualStrings("$ nvim foo.txt\n$ echo done\ndone\n$ ", out.items);
+    try std.testing.expectEqualStrings("$ nvim foo.txt\n$ echo done\ndone\n$", out.items);
 }

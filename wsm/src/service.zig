@@ -63,13 +63,13 @@ pub const AttachedSession = struct {
 
 pub const SessionInfo = struct {
     session: SessionRef,
-    transcript_path: []u8,
+    log_path: []u8,
     data_path_exists: bool,
     control_path_exists: bool,
 
     pub fn deinit(self: SessionInfo, allocator: std.mem.Allocator) void {
         self.session.deinit(allocator);
-        allocator.free(self.transcript_path);
+        allocator.free(self.log_path);
     }
 };
 
@@ -198,19 +198,19 @@ pub const WorkspaceService = struct {
         };
     }
 
-    pub fn transcriptPath(self: *WorkspaceService, provider: *policy.Provider, id: []const u8) ![]u8 {
+    pub fn logPath(self: *WorkspaceService, provider: *policy.Provider, id: []const u8) ![]u8 {
         const session = try self.sessionRef(provider, id);
         defer session.deinit(self.allocator);
-        return try std.fmt.allocPrint(self.allocator, "{s}.typescript", .{session.paths.data_path[0 .. session.paths.data_path.len - 4]});
+        return try std.fmt.allocPrint(self.allocator, "{s}.log", .{session.paths.data_path[0 .. session.paths.data_path.len - 4]});
     }
 
     pub fn sessionInfo(self: *WorkspaceService, provider: *policy.Provider, id: []const u8) !SessionInfo {
         const session = try self.sessionRef(provider, id);
         errdefer session.deinit(self.allocator);
-        const transcript_path = try self.transcriptPath(provider, id);
+        const log_path = try self.logPath(provider, id);
         return .{
             .session = session,
-            .transcript_path = transcript_path,
+            .log_path = log_path,
             .data_path_exists = pathExists(session.paths.data_path),
             .control_path_exists = pathExists(session.paths.control_path),
         };

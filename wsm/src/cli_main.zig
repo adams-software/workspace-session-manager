@@ -135,7 +135,7 @@ pub fn printHelp(allocator: std.mem.Allocator, file: std.fs.File, workspace_root
             "  attach <id>               Attach interactively\n" ++
             "  list                      List sessions\n" ++
             "  inspect <id>              Inspect one session\n" ++
-            "  log [id]                  View transcript for a session\n" ++
+            "  log [id]                  View log for a session\n" ++
             "  cleanup                   Dry-run stale socket cleanup\n" ++
             "  cleanup --apply           Apply stale socket cleanup\n" ++
             "  kill <id>                 Send TERM to session child\n" ++
@@ -174,7 +174,7 @@ fn presentSummary(allocator: std.mem.Allocator, info: service_mod.SessionInfo) !
     defer parts.deinit(allocator);
     if (info.data_path_exists) try parts.append(allocator, "data");
     if (info.control_path_exists) try parts.append(allocator, "ctl");
-    std.fs.accessAbsolute(info.transcript_path, .{}) catch {
+    std.fs.accessAbsolute(info.log_path, .{}) catch {
         return try std.mem.join(allocator, ",", parts.items);
     };
     try parts.append(allocator, "log");
@@ -229,16 +229,16 @@ pub fn runCommand(allocator: std.mem.Allocator, root: []const u8, mode: Mode, st
                 try stdout_file.writeAll("log failed: session id required (pass an id or run from inside a session)\n");
                 return 1;
             };
-            const transcript = try service.transcriptPath(&provider, session_id);
-            defer allocator.free(transcript);
-            std.fs.accessAbsolute(transcript, .{}) catch {
-                const msg = try std.fmt.allocPrint(allocator, "log failed for {s}: transcript not found\n", .{session_id});
+            const log_path = try service.logPath(&provider, session_id);
+            defer allocator.free(log_path);
+            std.fs.accessAbsolute(log_path, .{}) catch {
+                const msg = try std.fmt.allocPrint(allocator, "log failed for {s}: log not found\n", .{session_id});
                 defer allocator.free(msg);
                 try stdout_file.writeAll(msg);
                 return 1;
             };
 
-            const argv = [_][]const u8{ tool_paths.logs_viewer_bin, transcript };
+            const argv = [_][]const u8{ tool_paths.logs_viewer_bin, log_path };
             var child = std.process.Child.init(&argv, allocator);
             child.stdin_behavior = .Inherit;
             child.stdout_behavior = .Inherit;
