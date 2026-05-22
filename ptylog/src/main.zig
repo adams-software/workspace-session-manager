@@ -189,7 +189,8 @@ fn run(allocator: std.mem.Allocator, config: Config) !u8 {
                 try stdout_tx.append(allocator, bytes);
                 try transcript_file.writeAll(bytes);
                 try logger.feed(bytes);
-                try logger.flush(&log_writer.interface);
+                try logger.flushLive(&log_writer.interface);
+                try log_writer.interface.flush();
                 pty_rx.clear();
             }
         }

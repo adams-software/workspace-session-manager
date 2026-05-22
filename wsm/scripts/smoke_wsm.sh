@@ -6,6 +6,7 @@ REPO_ROOT="${MSR_REPO_ROOT:-$(cd -- "$SCRIPT_DIR/../.." && pwd)}"
 BIN_DIR="${MSR_BIN_DIR:-$REPO_ROOT/zig-out/bin}"
 WSM_BIN="${WSM_BIN:-$BIN_DIR/wsm}"
 HOST_BIN="${HOST_BIN:-$BIN_DIR/host}"
+PTYLOG_BIN="${PTYLOG_BIN:-$BIN_DIR/ptylog}"
 TMP="$(mktemp -d)"
 LOG_VIEWER_SHIM="$TMP/log_viewer.sh"
 
@@ -18,6 +19,7 @@ trap cleanup EXIT
 printf '=== build outputs present ===\n'
 [[ -x "$WSM_BIN" ]]
 [[ -x "$HOST_BIN" ]]
+[[ -x "$PTYLOG_BIN" ]]
 
 printf '=== wsm create detached ===\n'
 CREATE_OUT="$(WSM_ROOT="$TMP" "$WSM_BIN" create -d demo)"
@@ -67,6 +69,19 @@ printf '=== wsm kill ===\n'
 KILL_OUT="$(WSM_ROOT="$TMP" "$WSM_BIN" kill demo)"
 printf '%s\n' "$KILL_OUT"
 printf '%s\n' "$KILL_OUT" | grep -q '^signaled demo (TERM)$'
+
+printf '=== detached log prompt survives force kill ===\n'
+CREATE2_OUT="$(WSM_ROOT="$TMP" "$WSM_BIN" create -d promptdemo)"
+printf '%s\n' "$CREATE2_OUT"
+printf '%s\n' "$CREATE2_OUT" | grep -q '^created promptdemo$'
+sleep 1
+KILL2_OUT="$(WSM_ROOT="$TMP" "$WSM_BIN" kill -f promptdemo)"
+printf '%s\n' "$KILL2_OUT"
+printf '%s\n' "$KILL2_OUT" | grep -q '^signaled promptdemo (KILL)$'
+[[ -f "$TMP/promptdemo.log" ]]
+[[ -f "$TMP/promptdemo.typescript" ]]
+grep -q '\$' "$TMP/promptdemo.log"
+grep -q '\$' "$TMP/promptdemo.typescript"
 
 printf '=== wsm cleanup report ===\n'
 CLEANUP_OUT="$(WSM_ROOT="$TMP" "$WSM_BIN" cleanup)"

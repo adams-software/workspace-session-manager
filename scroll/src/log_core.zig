@@ -266,6 +266,7 @@ pub const StreamLogger = struct {
     allocator: std.mem.Allocator,
     engine: term_engine.Engine,
     builder: Builder,
+    last_live_tail: std.ArrayList(u8) = .{},
     prev_byte: ?u8 = null,
 
     pub fn init(allocator: std.mem.Allocator, format: OutputFormat, rows: u16, cols: u16) !StreamLogger {
@@ -278,6 +279,7 @@ pub const StreamLogger = struct {
     }
 
     pub fn deinit(self: *StreamLogger) void {
+        self.last_live_tail.deinit(self.allocator);
         self.builder.deinit();
         self.engine.deinit();
     }
@@ -296,9 +298,70 @@ pub const StreamLogger = struct {
         try self.builder.drainTo(writer);
     }
 
+    pub fn flushLive(self: *StreamLogger, writer: anytype) !void {
+        const had_committed = self.builder.out.items.len != 0;
+        if (had_committed) {
+            if (self.last_live_tail.items.len > 0 and !std.mem.endsWith(u8, self.last_live_tail.items, "\n")) {
+                try writer.writeAll("\n");
+            }
+            try self.builder.drainTo(writer);
+            self.last_live_tail.clearRetainingCapacity();
+            return;
+        }
+
+        const tail = try renderVisibleTail(self.allocator, self.builder.format, &self.engine);
+        defer self.allocator.free(tail);
+
+        if (tail.len == 0) {
+            self.last_live_tail.clearRetainingCapacity();
+            return;
+        }
+        if (std.mem.eql(u8, tail, self.last_live_tail.items)) return;
+
+        var bytes_to_append = tail;
+        if (self.last_live_tail.items.len > 0) {
+            if (tail.len > self.last_live_tail.items.len and std.mem.startsWith(u8, tail, self.last_live_tail.items)) {
+                bytes_to_append = tail[self.last_live_tail.items.len..];
+            } else if (tail.len < self.last_live_tail.items.len and std.mem.startsWith(u8, self.last_live_tail.items, tail)) {
+                self.last_live_tail.clearRetainingCapacity();
+                try self.last_live_tail.appendSlice(self.allocator, tail);
+                return;
+            } else if (!std.mem.endsWith(u8, self.last_live_tail.items, "\n")) {
+                try writer.writeAll("\n");
+            }
+        }
+
+        if (bytes_to_append.len > 0) try writer.writeAll(bytes_to_append);
+
+        self.last_live_tail.clearRetainingCapacity();
+        try self.last_live_tail.appendSlice(self.allocator, tail);
+    }
+
     pub fn finish(self: *StreamLogger, writer: anytype) !void {
-        try self.builder.appendVisibleTail(&self.engine);
-        try self.builder.drainTo(writer);
+        const had_committed = self.builder.out.items.len != 0;
+        if (had_committed) {
+            if (self.last_live_tail.items.len > 0 and !std.mem.endsWith(u8, self.last_live_tail.items, "\n")) {
+                try writer.writeAll("\n");
+            }
+            try self.builder.drainTo(writer);
+            self.last_live_tail.clearRetainingCapacity();
+        }
+
+        // In the live logger path, flushLive already materialized the latest
+        // visible tail. Avoid appending the same tail again on graceful exit.
+        if (self.last_live_tail.items.len > 0) return;
+
+        const tail = try renderVisibleTail(self.allocator, self.builder.format, &self.engine);
+        defer self.allocator.free(tail);
+        if (tail.len == 0 or std.mem.eql(u8, tail, self.last_live_tail.items)) return;
+
+        if (self.last_live_tail.items.len > 0 and !std.mem.endsWith(u8, self.last_live_tail.items, "\n")) {
+            try writer.writeAll("\n");
+        }
+        try writer.writeAll(tail);
+
+        self.last_live_tail.clearRetainingCapacity();
+        try self.last_live_tail.appendSlice(self.allocator, tail);
     }
 };
 
@@ -331,6 +394,17 @@ fn processPendingEvents(allocator: std.mem.Allocator, engine: *term_engine.Engin
         allocator.free(events);
     }
     try builder.processEvents(events);
+}
+
+fn renderVisibleTail(allocator: std.mem.Allocator, format: OutputFormat, engine: *term_engine.Engine) ![]u8 {
+    var builder = Builder.init(allocator, format);
+    defer builder.deinit();
+    try builder.appendVisibleTail(engine);
+
+    var out = std.ArrayList(u8){};
+    defer out.deinit(allocator);
+    try builder.drainTo(out.writer(allocator));
+    return try out.toOwnedSlice(allocator);
 }
 
 fn feedReplayBytes(engine: *term_engine.Engine, bytes: []const u8, prev_byte: *?u8) !void {
@@ -405,4 +479,94 @@ fn cellSliceToUtf8(allocator: std.mem.Allocator, cells: []const term_engine.Host
     }
 
     return out.toOwnedSlice(allocator);
+}
+
+test "stream logger flushLive emits visible tail without committed newline" {
+    const allocator = std.testing.allocator;
+    var logger = try StreamLogger.init(allocator, .plain, 24, 80);
+    defer logger.deinit();
+
+    try logger.feed("prompt> ");
+
+    var out = std.ArrayList(u8){};
+    defer out.deinit(allocator);
+    try logger.flushLive(out.writer(allocator));
+
+    try std.testing.expectEqualStrings("prompt> ", out.items);
+}
+
+test "stream logger flushLive dedupes unchanged visible tail" {
+    const allocator = std.testing.allocator;
+    var logger = try StreamLogger.init(allocator, .plain, 24, 80);
+    defer logger.deinit();
+
+    try logger.feed("prompt> ");
+
+    var out = std.ArrayList(u8){};
+    defer out.deinit(allocator);
+    try logger.flushLive(out.writer(allocator));
+    try logger.flushLive(out.writer(allocator));
+
+    try std.testing.expectEqualStrings("prompt> ", out.items);
+}
+
+test "stream logger flushLive appends prompt growth as suffix" {
+    const allocator = std.testing.allocator;
+    var logger = try StreamLogger.init(allocator, .plain, 24, 80);
+    defer logger.deinit();
+
+    var out = std.ArrayList(u8){};
+    defer out.deinit(allocator);
+
+    try logger.feed("prompt> ");
+    try logger.flushLive(out.writer(allocator));
+    try logger.feed("x");
+    try logger.flushLive(out.writer(allocator));
+
+    try std.testing.expectEqualStrings("prompt> x", out.items);
+}
+
+test "stream logger finish does not duplicate previously flushed live tail" {
+    const allocator = std.testing.allocator;
+    var logger = try StreamLogger.init(allocator, .plain, 24, 80);
+    defer logger.deinit();
+
+    var out = std.ArrayList(u8){};
+    defer out.deinit(allocator);
+
+    try logger.feed("prompt> ");
+    try logger.flushLive(out.writer(allocator));
+    try logger.finish(out.writer(allocator));
+
+    try std.testing.expectEqualStrings("prompt> ", out.items);
+}
+
+test "stream logger flushLive includes committed line plus prompt tail" {
+    const allocator = std.testing.allocator;
+    var logger = try StreamLogger.init(allocator, .plain, 24, 80);
+    defer logger.deinit();
+
+    var out = std.ArrayList(u8){};
+    defer out.deinit(allocator);
+
+    try logger.feed("hello\r\nprompt> ");
+    try logger.flushLive(out.writer(allocator));
+
+    try std.testing.expectEqualStrings("hello\nprompt> ", out.items);
+}
+
+test "stream logger flushLive suppresses alt-screen body and resumes shell tail" {
+    const allocator = std.testing.allocator;
+    var logger = try StreamLogger.init(allocator, .plain, 24, 80);
+    defer logger.deinit();
+
+    var out = std.ArrayList(u8){};
+    defer out.deinit(allocator);
+
+    try logger.feed("$ nvim foo.txt\r\n");
+    try logger.feed("\x1b[?1049h[editor noise]");
+    try logger.feed("\x1b[?1049l$ echo done\r\ndone\r\n$ ");
+    try logger.flushLive(out.writer(allocator));
+
+    try std.testing.expectEqualStrings("$ nvim foo.txt\n$ echo done\ndone\n$ ", out.items);
 }

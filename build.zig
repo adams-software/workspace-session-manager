@@ -415,6 +415,15 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(scroll_exe);
 
+    const scroll_log_core_test_root = b.createModule(.{
+        .root_source_file = b.path("scroll/src/log_core.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    scroll_log_core_test_root.addImport("term_engine", term_engine_mod);
+    const scroll_log_core_tests = b.addTest(.{ .root_module = scroll_log_core_test_root });
+
     const ptylog_root = b.createModule(.{
         .root_source_file = b.path("ptylog/src/main.zig"),
         .target = target,
@@ -481,6 +490,7 @@ pub fn build(b: *std.Build) void {
     const run_wsm_ui_state_tests = b.addRunArtifact(wsm_ui_state_tests);
     const run_wsm_bar_layout_tests = b.addRunArtifact(wsm_bar_layout_tests);
     const run_wsm_bar_render_tests = b.addRunArtifact(wsm_bar_render_tests);
+    const run_scroll_log_core_tests = b.addRunArtifact(scroll_log_core_tests);
 
     const test_step = b.step("test", "Run workspace tests");
     test_step.dependOn(&run_alt_tests.step);
@@ -493,6 +503,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_wsm_ui_state_tests.step);
     test_step.dependOn(&run_wsm_bar_layout_tests.step);
     test_step.dependOn(&run_wsm_bar_render_tests.step);
+    test_step.dependOn(&run_scroll_log_core_tests.step);
 
     const test_terminal_state_vterm_step = b.step("test-vterm", "Run libvterm adapter tests");
     test_terminal_state_vterm_step.dependOn(&run_terminal_state_vterm_tests.step);
@@ -527,10 +538,19 @@ pub fn build(b: *std.Build) void {
     const test_wsm_bar_render_step = b.step("test-wsm-bar-render", "Run wsm bar_render tests");
     test_wsm_bar_render_step.dependOn(&run_wsm_bar_render_tests.step);
 
+    const test_scroll_log_core_step = b.step("test-scroll-log-core", "Run scroll log-core tests");
+    test_scroll_log_core_step.dependOn(&run_scroll_log_core_tests.step);
+
     const smoke_cmd = b.addSystemCommand(&.{ "python3", "-u", "msr/scripts/smoke_msr_binary.py" });
     smoke_cmd.setCwd(b.path("."));
     const smoke_step = b.step("smoke-binary", "Run real-binary smoke test for the host runtime");
     smoke_step.dependOn(b.getInstallStep());
     smoke_step.dependOn(&smoke_cmd.step);
+
+    const smoke_wsm_cmd = b.addSystemCommand(&.{ "bash", "-u", "wsm/scripts/smoke_wsm.sh" });
+    smoke_wsm_cmd.setCwd(b.path("."));
+    const smoke_wsm_step = b.step("smoke-wsm", "Run real-binary smoke test for wsm");
+    smoke_wsm_step.dependOn(b.getInstallStep());
+    smoke_wsm_step.dependOn(&smoke_wsm_cmd.step);
 
 }
