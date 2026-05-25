@@ -267,7 +267,9 @@ pub const StreamLogger = struct {
     allocator: std.mem.Allocator,
     engine: term_engine.Engine,
     builder: Builder,
-    last_live_tail: std.ArrayList(u8) = .{},
+    live_tail: std.ArrayList(u8) = .{},
+    live_emitted_prefix: std.ArrayList(u8) = .{},
+    emitted_tail_lines: usize = 0,
     prev_byte: ?u8 = null,
 
     pub fn init(allocator: std.mem.Allocator, format: OutputFormat, rows: u16, cols: u16) !StreamLogger {
@@ -280,7 +282,8 @@ pub const StreamLogger = struct {
     }
 
     pub fn deinit(self: *StreamLogger) void {
-        self.last_live_tail.deinit(self.allocator);
+        self.live_tail.deinit(self.allocator);
+        self.live_emitted_prefix.deinit(self.allocator);
         self.builder.deinit();
         self.engine.deinit();
     }
@@ -300,86 +303,20 @@ pub const StreamLogger = struct {
     }
 
     pub fn flushLive(self: *StreamLogger, writer: anytype) !void {
-        const had_committed = self.builder.out.items.len != 0;
-        if (had_committed) {
-            const committed = try self.takeCommittedBytes();
-            defer self.allocator.free(committed);
-
-            var bytes_to_append = committed;
-            if (self.last_live_tail.items.len > 0) {
-                const live_prefix = comparableTailPrefix(self.last_live_tail.items);
-                if (committed.len >= live_prefix.len and std.mem.startsWith(u8, committed, live_prefix)) {
-                    bytes_to_append = committed[live_prefix.len..];
-                } else if (!std.mem.endsWith(u8, self.last_live_tail.items, "\n")) {
-                    try writer.writeAll("\n");
-                }
-            }
-            if (bytes_to_append.len > 0) try writer.writeAll(bytes_to_append);
-            self.last_live_tail.clearRetainingCapacity();
-        }
+        try self.flushCommitted(writer);
 
         const tail = try renderVisibleTail(self.allocator, self.builder.format, &self.engine);
         defer self.allocator.free(tail);
-
-        if (tail.len == 0) {
-            self.last_live_tail.clearRetainingCapacity();
-            return;
-        }
-        if (std.mem.eql(u8, tail, self.last_live_tail.items)) return;
-
-        if (self.last_live_tail.items.len > 0) {
-            const live_prefix = comparableTailPrefix(self.last_live_tail.items);
-            if (tail.len > live_prefix.len and std.mem.startsWith(u8, tail, live_prefix)) {
-                const suffix = tail[live_prefix.len..];
-                if (std.mem.indexOfScalar(u8, suffix, '\n') != null) {
-                    try writer.writeAll(suffix);
-                }
-            }
-            self.last_live_tail.clearRetainingCapacity();
-            try self.last_live_tail.appendSlice(self.allocator, tail);
-            return;
-        }
-
-        try writer.writeAll(tail);
-
-        self.last_live_tail.clearRetainingCapacity();
-        try self.last_live_tail.appendSlice(self.allocator, tail);
+        try self.promoteStableTailLines(writer, tail);
     }
 
     pub fn finish(self: *StreamLogger, writer: anytype) !void {
-        const had_committed = self.builder.out.items.len != 0;
-        if (had_committed) {
-            const committed = try self.takeCommittedBytes();
-            defer self.allocator.free(committed);
-
-            var bytes_to_append = committed;
-            if (self.last_live_tail.items.len > 0) {
-                const live_prefix = comparableTailPrefix(self.last_live_tail.items);
-                if (committed.len >= live_prefix.len and std.mem.startsWith(u8, committed, live_prefix)) {
-                    bytes_to_append = committed[live_prefix.len..];
-                } else if (!std.mem.endsWith(u8, self.last_live_tail.items, "\n")) {
-                    try writer.writeAll("\n");
-                }
-            }
-            if (bytes_to_append.len > 0) try writer.writeAll(bytes_to_append);
-            self.last_live_tail.clearRetainingCapacity();
-        }
-
-        // In the live logger path, flushLive already materialized the latest
-        // visible tail. Avoid appending the same tail again on graceful exit.
-        if (self.last_live_tail.items.len > 0) return;
+        try self.flushCommitted(writer);
 
         const tail = try renderVisibleTail(self.allocator, self.builder.format, &self.engine);
         defer self.allocator.free(tail);
-        if (tail.len == 0 or std.mem.eql(u8, tail, self.last_live_tail.items)) return;
-
-        if (self.last_live_tail.items.len > 0 and !std.mem.endsWith(u8, self.last_live_tail.items, "\n")) {
-            try writer.writeAll("\n");
-        }
-        try writer.writeAll(tail);
-
-        self.last_live_tail.clearRetainingCapacity();
-        try self.last_live_tail.appendSlice(self.allocator, tail);
+        try self.promoteStableTailLines(writer, tail);
+        try self.flushRemainingTail(writer, tail);
     }
 
     fn takeCommittedBytes(self: *StreamLogger) ![]u8 {
@@ -390,11 +327,74 @@ pub const StreamLogger = struct {
     }
 
     pub fn hasLiveTail(self: *const StreamLogger) bool {
-        return self.last_live_tail.items.len != 0;
+        return self.live_tail.items.len != 0;
     }
 
     pub fn hasPendingCommitted(self: *const StreamLogger) bool {
         return self.builder.out.items.len != 0;
+    }
+
+    fn flushCommitted(self: *StreamLogger, writer: anytype) !void {
+        if (self.builder.out.items.len == 0) return;
+
+        const committed = try self.takeCommittedBytes();
+        defer self.allocator.free(committed);
+        const bytes_to_append = self.consumeLivePrefix(committed);
+        if (bytes_to_append.len > 0) try writer.writeAll(bytes_to_append);
+    }
+
+    fn promoteStableTailLines(self: *StreamLogger, writer: anytype, tail: []const u8) !void {
+        if (tail.len == 0) {
+            self.live_tail.clearRetainingCapacity();
+            self.emitted_tail_lines = 0;
+            return;
+        }
+
+        const common = commonLinePrefixText(self.live_tail.items, tail);
+        self.emitted_tail_lines = @min(self.emitted_tail_lines, common);
+
+        const next_line_count = countLines(tail);
+        const stable_count = if (next_line_count == 0) 0 else next_line_count - 1;
+        if (stable_count > self.emitted_tail_lines) {
+            const start = lineStartOffset(tail, self.emitted_tail_lines);
+            const end = lineStartOffset(tail, stable_count);
+            const promoted = tail[start..end];
+            if (promoted.len > 0) {
+                try writer.writeAll(promoted);
+                try self.live_emitted_prefix.appendSlice(self.allocator, promoted);
+            }
+            self.emitted_tail_lines = stable_count;
+        }
+
+        self.live_tail.clearRetainingCapacity();
+        try self.live_tail.appendSlice(self.allocator, tail);
+    }
+
+    fn flushRemainingTail(self: *StreamLogger, writer: anytype, tail: []const u8) !void {
+        if (tail.len == 0) return;
+        const tail_line_count = countLines(tail);
+        if (self.emitted_tail_lines >= tail_line_count) return;
+
+        const start = lineStartOffset(tail, self.emitted_tail_lines);
+        const remaining = tail[start..];
+        if (remaining.len > 0) try writer.writeAll(remaining);
+
+        self.live_tail.clearRetainingCapacity();
+        self.live_emitted_prefix.clearRetainingCapacity();
+        self.emitted_tail_lines = 0;
+    }
+
+    fn consumeLivePrefix(self: *StreamLogger, committed: []const u8) []const u8 {
+        if (self.live_emitted_prefix.items.len == 0) return committed;
+
+        const live_prefix = comparableTailPrefix(self.live_emitted_prefix.items);
+        if (committed.len >= live_prefix.len and std.mem.startsWith(u8, committed, live_prefix)) {
+            self.live_emitted_prefix.clearRetainingCapacity();
+            return committed[live_prefix.len..];
+        }
+
+        self.live_emitted_prefix.clearRetainingCapacity();
+        return committed;
     }
 };
 
@@ -403,6 +403,34 @@ fn comparableTailPrefix(tail: []const u8) []const u8 {
         return tail[0 .. tail.len - 4];
     }
     return tail;
+}
+
+fn countLines(text: []const u8) usize {
+    if (text.len == 0) return 0;
+    return std.mem.count(u8, text, "\n") + 1;
+}
+
+fn commonLinePrefixText(a: []const u8, b: []const u8) usize {
+    var a_it = std.mem.splitScalar(u8, a, '\n');
+    var b_it = std.mem.splitScalar(u8, b, '\n');
+    var count: usize = 0;
+    while (true) {
+        const a_line = a_it.next() orelse break;
+        const b_line = b_it.next() orelse break;
+        if (!std.mem.eql(u8, a_line, b_line)) break;
+        count += 1;
+    }
+    return count;
+}
+
+fn lineStartOffset(text: []const u8, count: usize) usize {
+    if (count == 0 or text.len == 0) return 0;
+    var offset: usize = 0;
+    var lines_seen: usize = 0;
+    while (offset < text.len and lines_seen < count) : (offset += 1) {
+        if (text[offset] == '\n') lines_seen += 1;
+    }
+    return offset;
 }
 
 pub fn replayReader(allocator: std.mem.Allocator, format: OutputFormat, rows: u16, cols: u16, reader: anytype, writer: anytype) !void {
@@ -552,7 +580,7 @@ test "stream logger flushLive emits visible tail without committed newline" {
     defer out.deinit(allocator);
     try logger.flushLive(out.writer(allocator));
 
-    try std.testing.expectEqualStrings("prompt>", out.items);
+    try std.testing.expectEqualStrings("", out.items);
 }
 
 test "stream logger flushLive dedupes unchanged visible tail" {
@@ -567,7 +595,7 @@ test "stream logger flushLive dedupes unchanged visible tail" {
     try logger.flushLive(out.writer(allocator));
     try logger.flushLive(out.writer(allocator));
 
-    try std.testing.expectEqualStrings("prompt>", out.items);
+    try std.testing.expectEqualStrings("", out.items);
 }
 
 test "stream logger flushLive suppresses prompt-growth snapshots until commit" {
@@ -583,7 +611,7 @@ test "stream logger flushLive suppresses prompt-growth snapshots until commit" {
     try logger.feed("x");
     try logger.flushLive(out.writer(allocator));
 
-    try std.testing.expectEqualStrings("prompt>", out.items);
+    try std.testing.expectEqualStrings("", out.items);
 }
 
 test "stream logger finish does not duplicate previously flushed live tail" {
@@ -594,11 +622,11 @@ test "stream logger finish does not duplicate previously flushed live tail" {
     var out = std.ArrayList(u8){};
     defer out.deinit(allocator);
 
-    try logger.feed("prompt> ");
+    try logger.feed("hello\r\nprompt> ");
     try logger.flushLive(out.writer(allocator));
     try logger.finish(out.writer(allocator));
 
-    try std.testing.expectEqualStrings("prompt>", out.items);
+    try std.testing.expectEqualStrings("hello\nprompt>", out.items);
 }
 
 test "stream logger flushLive includes committed line plus prompt tail" {
@@ -612,7 +640,7 @@ test "stream logger flushLive includes committed line plus prompt tail" {
     try logger.feed("hello\r\nprompt> ");
     try logger.flushLive(out.writer(allocator));
 
-    try std.testing.expectEqualStrings("hello\nprompt>", out.items);
+    try std.testing.expectEqualStrings("hello\n", out.items);
 }
 
 test "stream logger flushLive does not duplicate committed prompt line after live growth" {
@@ -628,7 +656,7 @@ test "stream logger flushLive does not duplicate committed prompt line after liv
     try logger.feed("\r\nfile.txt\r\nprompt> ");
     try logger.flushLive(out.writer(allocator));
 
-    try std.testing.expectEqualStrings("prompt> ls\nfile.txt\nprompt>", out.items);
+    try std.testing.expectEqualStrings("prompt> ls\nfile.txt\n", out.items);
 }
 
 test "stream logger flushLive suppresses alt-screen body and resumes shell tail" {
@@ -644,5 +672,84 @@ test "stream logger flushLive suppresses alt-screen body and resumes shell tail"
     try logger.feed("\x1b[?1049l$ echo done\r\ndone\r\n$ ");
     try logger.flushLive(out.writer(allocator));
 
-    try std.testing.expectEqualStrings("$ nvim foo.txt\n$ echo done\ndone\n$", out.items);
+    try std.testing.expectEqualStrings("$ nvim foo.txt\n$ echo done\ndone\n", out.items);
+}
+
+test "stream logger finish flushes pending prompt tail after live stable lines" {
+    const allocator = std.testing.allocator;
+    var logger = try StreamLogger.init(allocator, .plain, 24, 80);
+    defer logger.deinit();
+
+    var out = std.ArrayList(u8){};
+    defer out.deinit(allocator);
+
+    try logger.feed("$ echo done\r\ndone\r\n$ ");
+    try logger.flushLive(out.writer(allocator));
+    try logger.finish(out.writer(allocator));
+
+    try std.testing.expectEqualStrings("$ echo done\ndone\n$", out.items);
+}
+
+test "stream logger finish preserves no-newline output tail" {
+    const allocator = std.testing.allocator;
+    var logger = try StreamLogger.init(allocator, .plain, 24, 80);
+    defer logger.deinit();
+
+    var out = std.ArrayList(u8){};
+    defer out.deinit(allocator);
+
+    try logger.feed("partial output");
+    try logger.flushLive(out.writer(allocator));
+    try logger.finish(out.writer(allocator));
+
+    try std.testing.expectEqualStrings("partial output", out.items);
+}
+
+test "stream logger suppresses line editing noise before command commit" {
+    const allocator = std.testing.allocator;
+    var logger = try StreamLogger.init(allocator, .plain, 24, 80);
+    defer logger.deinit();
+
+    var out = std.ArrayList(u8){};
+    defer out.deinit(allocator);
+
+    try logger.feed("prompt> lsx\x08 \x08");
+    try logger.flushLive(out.writer(allocator));
+    try logger.feed("\r\nfile.txt\r\nprompt> ");
+    try logger.flushLive(out.writer(allocator));
+    try logger.finish(out.writer(allocator));
+
+    try std.testing.expectEqualStrings("prompt> ls\nfile.txt\nprompt>", out.items);
+}
+
+test "stream logger finish preserves prompt tail across resize" {
+    const allocator = std.testing.allocator;
+    var logger = try StreamLogger.init(allocator, .plain, 24, 20);
+    defer logger.deinit();
+
+    var out = std.ArrayList(u8){};
+    defer out.deinit(allocator);
+
+    try logger.feed("prompt> echo hi");
+    try logger.flushLive(out.writer(allocator));
+    try logger.resize(24, 40);
+    try logger.finish(out.writer(allocator));
+
+    try std.testing.expectEqualStrings("prompt> echo hi", out.items);
+}
+
+test "stream logger live flush keeps multiple committed lines but defers final prompt" {
+    const allocator = std.testing.allocator;
+    var logger = try StreamLogger.init(allocator, .plain, 24, 80);
+    defer logger.deinit();
+
+    var out = std.ArrayList(u8){};
+    defer out.deinit(allocator);
+
+    try logger.feed("$ printf one\r\none\r\n$ printf two\r\ntwo\r\n$ ");
+    try logger.flushLive(out.writer(allocator));
+    try std.testing.expectEqualStrings("$ printf one\none\n$ printf two\ntwo\n", out.items);
+
+    try logger.finish(out.writer(allocator));
+    try std.testing.expectEqualStrings("$ printf one\none\n$ printf two\ntwo\n$", out.items);
 }

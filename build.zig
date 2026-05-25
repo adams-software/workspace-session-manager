@@ -554,4 +554,16 @@ pub fn build(b: *std.Build) void {
     smoke_wsm_step.dependOn(b.getInstallStep());
     smoke_wsm_step.dependOn(&smoke_wsm_cmd.step);
 
+    const stress_ptylog_cmd = b.addSystemCommand(&.{ "bash", "-u", "wsm/scripts/stress_ptylog.sh" });
+    stress_ptylog_cmd.setCwd(b.path("."));
+    const stress_ptylog_step = b.step("stress-ptylog", "Run direct ptylog stress coverage");
+    stress_ptylog_step.dependOn(b.getInstallStep());
+    stress_ptylog_step.dependOn(&stress_ptylog_cmd.step);
+
+    const smoke_wsm_logs_cmd = b.addSystemCommand(&.{ "bash", "-u", "wsm/scripts/smoke_wsm_logs.sh" });
+    smoke_wsm_logs_cmd.setCwd(b.path("."));
+    const smoke_wsm_logs_step = b.step("smoke-wsm-logs", "Run log-behavior smoke test for wsm");
+    smoke_wsm_logs_step.dependOn(b.getInstallStep());
+    smoke_wsm_logs_step.dependOn(&smoke_wsm_logs_cmd.step);
+
 }

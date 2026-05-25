@@ -15,6 +15,7 @@ const c = @cImport({
 const io_chunk_size = 64 * 1024;
 
 var winch_changed = false;
+var terminate_signal: c.sig_atomic_t = 0;
 
 const Config = struct {
     log_path: []const u8,
@@ -30,6 +31,10 @@ fn usage() void {
 
 fn handleSigwinch(_: c_int) callconv(.c) void {
     winch_changed = true;
+}
+
+fn handleTerminate(sig: c_int) callconv(.c) void {
+    terminate_signal = sig;
 }
 
 fn parseArgs(allocator: std.mem.Allocator, argv: []const []const u8) !Config {
@@ -146,6 +151,7 @@ fn run(allocator: std.mem.Allocator, config: Config) !u8 {
 
     var stdin_open = true;
     var pty_open = true;
+    var forwarded_terminate = false;
 
     while (true) {
         if (winch_changed) {
@@ -153,6 +159,12 @@ fn run(allocator: std.mem.Allocator, config: Config) !u8 {
             const next_size = currentSize();
             child.applySize(.{ .cols = next_size.cols, .rows = next_size.rows }) catch {};
             try logger.resize(next_size.rows, next_size.cols);
+        }
+
+        const requested_terminate: c_int = @intCast(terminate_signal);
+        if (requested_terminate != 0 and !forwarded_terminate) {
+            child.sendSignal(requested_terminate) catch {};
+            forwarded_terminate = true;
         }
 
         if (stdin_open) {
@@ -217,6 +229,10 @@ pub fn main() !void {
 
     const old_winch = c.signal(c.SIGWINCH, handleSigwinch);
     defer _ = c.signal(c.SIGWINCH, old_winch);
+    const old_term = c.signal(c.SIGTERM, handleTerminate);
+    defer _ = c.signal(c.SIGTERM, old_term);
+    const old_int = c.signal(c.SIGINT, handleTerminate);
+    defer _ = c.signal(c.SIGINT, old_int);
 
     const config = parseArgs(allocator, argv) catch |err| switch (err) {
         error.ShowHelp => {
