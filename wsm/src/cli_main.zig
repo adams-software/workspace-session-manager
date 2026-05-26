@@ -68,6 +68,7 @@ pub const Mode = union(enum) {
     interactive_attach: []const u8,
     interactive_create_attach: []const u8,
     create_detached: []const u8,
+    create_detached_alias: []const u8,
     list,
     inspect: []const u8,
     log: ?[]const u8,
@@ -79,6 +80,7 @@ pub const Mode = union(enum) {
             .interactive_attach => |id| allocator.free(id),
             .interactive_create_attach => |id| allocator.free(id),
             .create_detached => |id| allocator.free(id),
+            .create_detached_alias => |id| allocator.free(id),
             .inspect => |id| allocator.free(id),
             .log => |maybe_id| if (maybe_id) |id| allocator.free(id),
             .kill => |args| allocator.free(args.id),
@@ -95,13 +97,13 @@ pub fn parseMode(allocator: std.mem.Allocator, argv: []const []const u8) !Mode {
 
     const command = parsed.command orelse return .help;
     if (std.mem.eql(u8, command, "help")) return .help;
-    if (std.mem.eql(u8, command, "list")) return .list;
-    if (std.mem.eql(u8, command, "log")) {
+    if (std.mem.eql(u8, command, "list") or std.mem.eql(u8, command, "ls")) return .list;
+    if (std.mem.eql(u8, command, "log") or std.mem.eql(u8, command, "g")) {
         if (parsed.positionals.len >= 1) return .{ .log = try allocator.dupe(u8, parsed.positionals[0]) };
         return .{ .log = null };
     }
     if (std.mem.eql(u8, command, "cleanup")) return .{ .cleanup = argv_parse.hasOption(parsed, &.{"apply"}) };
-    if (std.mem.eql(u8, command, "kill")) {
+    if (std.mem.eql(u8, command, "kill") or std.mem.eql(u8, command, "x")) {
         if (parsed.positionals.len < 1) return .help;
         return .{ .kill = .{ .id = try allocator.dupe(u8, parsed.positionals[0]), .force = argv_parse.hasOption(parsed, &.{ "f", "force" }) } };
     }
@@ -109,11 +111,15 @@ pub fn parseMode(allocator: std.mem.Allocator, argv: []const []const u8) !Mode {
         if (parsed.positionals.len < 1) return .help;
         return .{ .inspect = try allocator.dupe(u8, parsed.positionals[0]) };
     }
-    if (std.mem.eql(u8, command, "attach")) {
+    if (std.mem.eql(u8, command, "attach") or std.mem.eql(u8, command, "a")) {
         if (parsed.positionals.len < 1) return .help;
         return .{ .interactive_attach = try allocator.dupe(u8, parsed.positionals[0]) };
     }
-    if (std.mem.eql(u8, command, "create")) {
+    if (std.mem.eql(u8, command, "cd")) {
+        if (parsed.positionals.len < 1) return .help;
+        return .{ .create_detached_alias = try allocator.dupe(u8, parsed.positionals[0]) };
+    }
+    if (std.mem.eql(u8, command, "create") or std.mem.eql(u8, command, "c")) {
         if (parsed.positionals.len < 1) return .help;
         if (argv_parse.hasOption(parsed, &.{ "d", "detached" })) {
             return .{ .create_detached = try allocator.dupe(u8, parsed.positionals[0]) };
@@ -130,16 +136,20 @@ pub fn printHelp(allocator: std.mem.Allocator, file: std.fs.File, workspace_root
             "  wsm <command> [args]\n\n" ++
             "COMMANDS\n" ++
             "  help                      Show help\n" ++
-            "  create <id>               Create and attach\n" ++
+            "  create | c <id>           Create and attach\n" ++
             "  create -d <id>            Create detached\n" ++
-            "  attach <id>               Attach interactively\n" ++
-            "  list                      List sessions\n" ++
+            "  cd <id>                   Create detached (alias)\n" ++
+            "  attach | a <id>           Attach interactively\n" ++
+            "  list | ls                 List sessions\n" ++
             "  inspect <id>              Inspect one session\n" ++
-            "  log [id]                  View log for a session\n" ++
+            "  log | g [id]              View log for a session\n" ++
             "  cleanup                   Dry-run stale socket cleanup\n" ++
             "  cleanup --apply           Apply stale socket cleanup\n" ++
-            "  kill <id>                 Send TERM to session child\n" ++
-            "  kill -f <id>              Send KILL to session child\n\n" ++
+            "  kill | x <id>             Send TERM to session child\n" ++
+            "  kill | x -f <id>          Send KILL to session child\n\n" ++
+            "NOTES\n" ++
+            "  Status-bar letters map to CLI aliases where that makes sense: a/c/g/x.\n" ++
+            "  The bar's [d]etach action is UI-local and does not have a top-level CLI alias.\n\n" ++
             "GLOBAL OPTIONS\n" ++
             "  --workspace <path>        Workspace root (fallback: WSM_ROOT)\n\n",
     );
@@ -281,7 +291,7 @@ pub fn runCommand(allocator: std.mem.Allocator, root: []const u8, mode: Mode, st
             }
             return 0;
         },
-        .create_detached => |id| {
+        .create_detached, .create_detached_alias => |id| {
             const shell = std.posix.getenv("SHELL") orelse "/bin/sh";
             const session = try service.create(&provider, id, shell, null, null);
             defer session.deinit(allocator);
@@ -307,4 +317,25 @@ pub fn runCommand(allocator: std.mem.Allocator, root: []const u8, mode: Mode, st
         },
         .interactive_attach, .interactive_create_attach => return 2,
     }
+}
+
+test "parseMode accepts attach alias" {
+    const argv = [_][]const u8{ "a", "demo" };
+    const mode = try parseMode(std.testing.allocator, &argv);
+    defer mode.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("demo", mode.interactive_attach);
+}
+
+test "parseMode accepts ls alias for list" {
+    const argv = [_][]const u8{ "ls" };
+    const mode = try parseMode(std.testing.allocator, &argv);
+    defer mode.deinit(std.testing.allocator);
+    try std.testing.expectEqual(Mode.list, mode);
+}
+
+test "parseMode accepts detached create alias" {
+    const argv = [_][]const u8{ "cd", "demo" };
+    const mode = try parseMode(std.testing.allocator, &argv);
+    defer mode.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("demo", mode.create_detached_alias);
 }

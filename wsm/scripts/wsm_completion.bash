@@ -2,7 +2,7 @@ _wsm_complete() {
   local cur prev words cword
   _init_completion -n : || return
 
-  local long_commands="help create attach list inspect log cleanup kill"
+  local long_commands="help create c cd attach a list ls inspect log g cleanup kill x"
   local global_flags="--workspace"
 
   __wsm_ids() {
@@ -116,13 +116,13 @@ _wsm_complete() {
   fi
 
   case "$cmd" in
-    create|attach|inspect|log|kill)
+    create|c|cd|attach|a|inspect|log|g|kill|x)
       if [[ $cword -eq $((cmd_index + 1)) ]]; then
         mapfile -t COMPREPLY < <(__wsm_pathish_candidates "$cur")
         return
       fi
       ;;
-    help|list|cleanup)
+    help|list|ls|cleanup)
       COMPREPLY=()
       return
       ;;
