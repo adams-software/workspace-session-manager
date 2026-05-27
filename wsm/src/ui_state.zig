@@ -252,7 +252,7 @@ pub const State = struct {
                 if (self.selected_candidate) |idx| {
                     if (idx < ctx.attach_candidates.len) {
                         self.mode = .passive;
-                        break :blk .{ .rerender = true, .action = .{ .attach = ctx.attach_candidates[idx].value } };
+                        break :blk .{ .rerender = true, .action = .{ .attach = self.allocator.dupe(u8, ctx.attach_candidates[idx].value) catch return .{} } };
                     }
                 }
                 if (self.input_buf.items.len == 0) {
@@ -440,6 +440,8 @@ test "prompt attach enter prefers selected candidate" {
 
     try std.testing.expect(result.action != null);
     try std.testing.expectEqualStrings("session/two", result.action.?.attach);
+    try std.testing.expect(result.action.?.attach.ptr != candidates[1].value.ptr);
+    std.testing.allocator.free(result.action.?.attach);
 }
 
 test "updateExternalContext clears invalid candidate selection" {
