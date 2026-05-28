@@ -209,12 +209,20 @@ const App = struct {
             return try self.executor.forwardInput(bytes);
         }
 
-        if (keyFromInput(bytes, self.hotkey)) |key| {
-            try self.handleUiKey(key);
-            return true;
-        }
-
+        try self.handleUiInput(bytes);
         return true;
+    }
+
+    fn handleUiInput(self: *App, bytes: []const u8) !void {
+        var idx: usize = 0;
+        while (idx < bytes.len) {
+            const next = nextUiInput(bytes[idx..]);
+            idx += next.consumed;
+            if (keyFromInput(next.slice, self.hotkey)) |key| {
+                try self.handleUiKey(key);
+                if (self.bar_state.mode == .passive) break;
+            }
+        }
     }
 
     fn handleUiKey(self: *App, key: ui_state.Key) !void {
@@ -419,6 +427,13 @@ fn keyFromInput(bytes: []const u8, hotkey: KeyBinding) ?ui_state.Key {
     const b = bytes[0];
     if (hotkey.ctrl and b >= 0x01 and b <= 0x1a and ('a' + (b - 1)) == hotkey.ch) return .ctrl_g;
     return ui_state.Key.fromByte(b);
+}
+
+fn nextUiInput(bytes: []const u8) struct { slice: []const u8, consumed: usize } {
+    if (bytes.len >= 3 and bytes[0] == 0x1b and bytes[1] == '[') {
+        return .{ .slice = bytes[0..3], .consumed = 3 };
+    }
+    return .{ .slice = bytes[0..1], .consumed = 1 };
 }
 
 pub fn main() !void {

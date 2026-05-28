@@ -12,6 +12,8 @@ LOG_VIEWER_SHIM="$TMP/log_viewer.sh"
 
 cleanup() {
   WSM_ROOT="$TMP" "$WSM_BIN" kill demo >/dev/null 2>&1 || true
+  WSM_ROOT="$TMP" "$WSM_BIN" kill ui >/dev/null 2>&1 || true
+  WSM_ROOT="$TMP" "$WSM_BIN" kill ui-base >/dev/null 2>&1 || true
   rm -rf "$TMP"
 }
 trap cleanup EXIT
@@ -99,6 +101,33 @@ printf '%s\n' "$INSPECT2_OUT"
 printf '%s\n' "$INSPECT2_OUT" | grep -Eq 'ctrldemo[[:space:]]+live'
 tmux kill-session -t wsmsmokectrl 2>/dev/null || true
 WSM_ROOT="$TMP" "$WSM_BIN" kill -f ctrldemo >/dev/null 2>&1 || true
+
+printf '=== attached menu create attaches to the new session ===\n'
+CREATE4_OUT="$(WSM_ROOT="$TMP" "$WSM_BIN" create -d ui-base)"
+printf '%s\n' "$CREATE4_OUT"
+printf '%s\n' "$CREATE4_OUT" | grep -q '^created ui-base$'
+tmux kill-session -t wsmsmokecreate 2>/dev/null || true
+tmux new-session -d -s wsmsmokecreate "cd '$REPO_ROOT' && WSM_ROOT='$TMP' '$WSM_BIN' attach ui-base"
+sleep 1
+tmux send-keys -t wsmsmokecreate:0.0 C-g
+sleep 0.2
+tmux send-keys -t wsmsmokecreate:0.0 c
+sleep 0.2
+tmux send-keys -t wsmsmokecreate:0.0 u
+sleep 0.1
+tmux send-keys -t wsmsmokecreate:0.0 i
+sleep 0.2
+tmux send-keys -t wsmsmokecreate:0.0 Enter
+sleep 1
+LIST2_OUT="$(WSM_ROOT="$TMP" "$WSM_BIN" list)"
+printf '%s\n' "$LIST2_OUT"
+printf '%s\n' "$LIST2_OUT" | grep -q '^ui$'
+CAPTURE2="$(tmux capture-pane -pt wsmsmokecreate:0.0 || true)"
+printf '%s\n' "$CAPTURE2"
+printf '%s\n' "$CAPTURE2" | grep -q "$TMP/ui"
+tmux kill-session -t wsmsmokecreate 2>/dev/null || true
+WSM_ROOT="$TMP" "$WSM_BIN" kill -f ui >/dev/null 2>&1 || true
+WSM_ROOT="$TMP" "$WSM_BIN" kill -f ui-base >/dev/null 2>&1 || true
 
 printf '=== wsm cleanup report ===\n'
 CLEANUP_OUT="$(WSM_ROOT="$TMP" "$WSM_BIN" cleanup)"
