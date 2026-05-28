@@ -2,7 +2,7 @@
 
 Workspace Session Manager is a Linux-first tool suite for creating, naming, navigating, and rendering interactive session-backed processes.
 
-If you just want to start using it, start with `wsm`.
+If you just want to start using it, start with `wsm help`.
 
 ## Install
 
@@ -34,6 +34,7 @@ dist/workspace-session-manager-linux-x86_64.tar.gz
 Install from the unpacked bundle:
 
 ```bash
+cd dist/linux-x86_64
 sh install.sh
 ```
 
@@ -42,6 +43,8 @@ By default this installs:
 - private runtime helpers into `~/.local/libexec/wsm`
 
 So `wsm` is the only public command added to `PATH` by the standard install.
+
+Release bundles for `linux-x86_64` are now built with an explicit portable target instead of inheriting CPU features from the release machine. That avoids `Illegal instruction` failures on older x86_64 hosts.
 
 ## Troubleshooting
 
@@ -72,7 +75,7 @@ correctly while `~/.local/bin/wsm` shows stale behavior.
 
 ## Quick usage
 
-Set up a workspace root and optional menu hotkey in your shell environment:
+Set up a workspace root in your shell environment:
 
 ### bash
 
@@ -80,7 +83,6 @@ Set up a workspace root and optional menu hotkey in your shell environment:
 mkdir -p ~/sessions
 echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
 echo 'export WSM_ROOT="$HOME/sessions"' >> ~/.bashrc
-echo 'export WSM_MENU_KEY="ctrl-g"' >> ~/.bashrc
 source ~/.bashrc
 ```
 
@@ -90,14 +92,13 @@ source ~/.bashrc
 mkdir -p ~/sessions
 echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
 echo 'export WSM_ROOT="$HOME/sessions"' >> ~/.zshrc
-echo 'export WSM_MENU_KEY="ctrl-g"' >> ~/.zshrc
 source ~/.zshrc
 ```
 
-Then run `wsm` by itself to see the command surface:
+Then run `wsm help` to see the command surface:
 
 ```bash
-wsm
+wsm help
 ```
 
 Create and attach to a workspace session:
@@ -106,31 +107,48 @@ Create and attach to a workspace session:
 wsm create test
 ```
 
-If you want a specific command instead of your default shell:
+Detached create:
 
 ```bash
-wsm create api/dev -- npm run dev
+wsm create -d api/dev
 ```
 
-Open the in-session action menu after attaching (hotkey ctrl-g):
+Alias forms mirror the in-session status bar where that makes sense:
+
+```bash
+wsm c test
+wsm a test
+wsm g test
+wsm x test
+wsm ls
+wsm cd api/dev
+```
+
+Open the in-session action menu after attaching:
 
 ```bash
 wsm attach test
 # then press ctrl-g inside the session
 ```
 
-To leave an attached session, use the in-session detach flow (for example the action menu or your detach hotkey), then reattach later:
+Inside the UI:
+
+- `a` opens attach prompt
+- `c` opens create prompt
+- `g` opens logs
+- `x` sends TERM to the current session child
+- `d` detaches from the current interactive session
+- `h/j/k/l` navigate sibling/child/parent/next session targets
+
+To leave an attached session, use the in-session detach flow, then reattach later:
 
 ```bash
 wsm attach test
 ```
 
-The in-session action menu hotkey is `ctrl-g`.
-Override it via `WSM_MENU_KEY`.
+The in-session action menu hotkey is currently fixed to `ctrl-g`.
 
-```bash
-WSM_MENU_KEY=ctrl-g wsm create test
-```
+Interactive attach/create is intentionally blocked from inside an already-interactive nested `wsm` session. If you are already inside one attached session and want another, use detached create from the UI and then attach/switch.
 
 If you want the lower-level tools directly, they still exist in the repo and build output, but the normal install keeps the runtime helpers private so `wsm` is the only public command on `PATH`.
 
@@ -195,6 +213,7 @@ A practical current read is:
 - `host` is the runtime foundation behind `wsm`
 - `vpty` is an implementation-heavy terminal subsystem under active refinement
 - `alt` is part of the intended tool suite and still evolving
+- release/install flow is usable, but still worth sanity-checking with a real installed-binary session before tagging
 
 Expect some churn while the public surface settles.
 
@@ -215,10 +234,12 @@ zig-out/bin/
 
 Current binaries include:
 
+- `zig-out/bin/wsm`
 - `zig-out/bin/host`
 - `zig-out/bin/vpty`
 - `zig-out/bin/alt`
 - `zig-out/bin/scroll`
+- `zig-out/bin/ptylog`
 
 ## Development shell
 
