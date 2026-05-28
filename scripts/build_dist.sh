@@ -9,13 +9,24 @@ BIN_DIR="$DIST_ROOT/bin"
 LIBEXEC_DIR="$DIST_ROOT/libexec/wsm"
 COMPLETIONS_DIR="$DIST_ROOT/completions"
 TARBALL="$REPO_ROOT/dist/workspace-session-manager-$TARGET_NAME.tar.gz"
+
+case "$TARGET_NAME" in
+  linux-x86_64)
+    ZIG_TARGET="x86_64-linux-gnu"
+    ;;
+  *)
+    echo "unsupported dist target: $TARGET_NAME" >&2
+    exit 1
+    ;;
+esac
+
 rm -rf "$DIST_ROOT"
 rm -f "$TARBALL"
 mkdir -p "$BIN_DIR" "$LIBEXEC_DIR" "$COMPLETIONS_DIR"
 
 (
   cd "$REPO_ROOT"
-  zig build
+  zig build -Dtarget="$ZIG_TARGET"
 )
 
 install -m 0755 "$REPO_ROOT/zig-out/bin/wsm" "$BIN_DIR/wsm"
