@@ -6,6 +6,20 @@ const c = @cImport({
     @cInclude("poll.h");
 });
 
+const SpinMutex = struct {
+    inner: std.atomic.Mutex = .unlocked,
+
+    fn lock(self: *SpinMutex) void {
+        while (!self.inner.tryLock()) {
+            std.Thread.yield() catch {};
+        }
+    }
+
+    fn unlock(self: *SpinMutex) void {
+        self.inner.unlock();
+    }
+};
+
 const OwnedControlChunk = struct {
     bytes: []u8,
 };
@@ -26,7 +40,7 @@ pub const StdoutThread = struct {
     allocator: std.mem.Allocator,
     buffer: StdoutBuffer,
     control_queue: actor_mailboxes.MutexQueue(OwnedControlChunk),
-    render_mutex: std.Thread.Mutex = .{},
+    render_mutex: SpinMutex = .{},
     pending_render_publish: ?OwnedRenderPublish = null,
     shared: SharedState = .{},
     thread: ?std.Thread = null,

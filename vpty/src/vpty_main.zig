@@ -2,6 +2,7 @@ const std = @import("std");
 const c = @cImport({
     @cInclude("sys/wait.h");
     @cInclude("poll.h");
+    @cInclude("time.h");
     @cInclude("unistd.h");
     @cInclude("signal.h");
     @cInclude("string.h");
@@ -178,11 +179,17 @@ fn usage() void {
 }
 
 fn graphemeModeFromEnv() GraphemeMode {
-    const raw = std.process.getEnvVarOwned(std.heap.page_allocator, "VPTY_GRAPHEME_MODE") catch return .legacy;
-    defer std.heap.page_allocator.free(raw);
+    const raw = std.c.getenv("VPTY_GRAPHEME_MODE") orelse return .legacy;
+    const value = std.mem.span(raw);
 
-    if (std.ascii.eqlIgnoreCase(raw, "unicode")) return .unicode;
+    if (std.ascii.eqlIgnoreCase(value, "unicode")) return .unicode;
     return .legacy;
+}
+
+fn monotonicTimeNs() u64 {
+    var ts: c.timespec = undefined;
+    if (c.clock_gettime(c.CLOCK_MONOTONIC, &ts) != 0) return 0;
+    return @as(u64, @intCast(ts.tv_sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.tv_nsec));
 }
 
 fn signalNumber(name: []const u8) u8 {
@@ -250,7 +257,7 @@ fn notePendingResize(terminal: *vpty_terminal.TerminalMode) void {
     }
     pending_resize = .{
         .size = size,
-        .observed_at_ns = @as(u64, @intCast(std.time.nanoTimestamp())),
+        .observed_at_ns = monotonicTimeNs(),
     };
 }
 
@@ -290,7 +297,7 @@ fn handleResizeIfNeeded(
     }
 
     const pending = pending_resize orelse return;
-    const now_ns: u64 = @intCast(std.time.nanoTimestamp());
+    const now_ns = monotonicTimeNs();
     if (now_ns - pending.observed_at_ns < RESIZE_SETTLE_NS) return;
     pending_resize = null;
 
@@ -658,7 +665,7 @@ fn parseArgs(allocator: std.mem.Allocator, argv: []const []const u8) !ParsedArgs
         return error.InvalidArgs;
     }
 
-    var result = std.ArrayList([]const u8){};
+    var result: std.ArrayList([]const u8) = .empty;
     errdefer result.deinit(allocator);
     try result.appendSlice(allocator, argv[(cmd_start + 1)..]);
 
@@ -675,10 +682,16 @@ fn parseArgs(allocator: std.mem.Allocator, argv: []const []const u8) !ParsedArgs
     };
 }
 
-pub fn main() !u8 {
-    const allocator = std.heap.smp_allocator;
-    const argv = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, argv);
+fn allocArgs(arena: std.mem.Allocator, args: std.process.Args) ![]const []const u8 {
+    const raw = try args.toSlice(arena);
+    const argv = try arena.alloc([]const u8, raw.len);
+    for (raw, 0..) |arg, i| argv[i] = arg;
+    return argv;
+}
+
+pub fn main(init: std.process.Init) !u8 {
+    const allocator = init.gpa;
+    const argv = try allocArgs(init.arena.allocator(), init.minimal.args);
 
     var parsed = parseArgs(allocator, argv) catch |parse_err| switch (parse_err) {
         error.InvalidArgs => return 1,

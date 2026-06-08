@@ -133,13 +133,16 @@ fn runAttach(allocator: std.mem.Allocator, path: []const u8) !u8 {
     }
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+fn allocArgs(arena: std.mem.Allocator, args: std.process.Args) ![]const []const u8 {
+    const raw = try args.toSlice(arena);
+    const argv = try arena.alloc([]const u8, raw.len);
+    for (raw, 0..) |arg, i| argv[i] = arg;
+    return argv;
+}
 
-    const argv = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, argv);
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const argv = try allocArgs(init.arena.allocator(), init.minimal.args);
 
     if (argv.len != 2 or std.mem.eql(u8, argv[1], "-h") or std.mem.eql(u8, argv[1], "--help")) {
         usage();

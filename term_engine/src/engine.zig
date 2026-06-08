@@ -42,7 +42,7 @@ pub const Engine = struct {
         return .{
             .handle = handle,
             .allocator = allocator,
-            .event_queue = .{},
+            .event_queue = .empty,
             .last_alt_screen = false,
         };
     }
@@ -146,7 +146,7 @@ pub fn snapshotFromHandle(handle: *c.msr_vterm_handle, allocator: std.mem.Alloca
     var lines = try allocator.alloc(screen_types.HostScreenLine, @intCast(rows));
     var hyperlink_map = std.AutoHashMap(u32, u32).init(allocator);
     defer hyperlink_map.deinit();
-    var hyperlinks = std.ArrayList(screen_types.HostHyperlink){};
+    var hyperlinks: std.ArrayList(screen_types.HostHyperlink) = .empty;
     var initialized_rows: usize = 0;
     errdefer {
         for (lines[0..initialized_rows]) |line| allocator.free(line.cells);

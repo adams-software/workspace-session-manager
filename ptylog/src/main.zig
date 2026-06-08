@@ -67,17 +67,14 @@ fn parseArgs(allocator: std.mem.Allocator, argv: []const []const u8) !Config {
     };
 }
 
-fn ensureParent(path: []const u8) !void {
+fn ensureParent(io: std.Io, path: []const u8) !void {
     const dir = std.fs.path.dirname(path) orelse return;
-    std.fs.makeDirAbsolute(dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
+    try std.Io.Dir.createDirPath(.cwd(), io, dir);
 }
 
-fn createOutput(path: []const u8) !std.fs.File {
-    try ensureParent(path);
-    return try std.fs.createFileAbsolute(path, .{ .truncate = true, .read = false });
+fn createOutput(io: std.Io, path: []const u8) !std.Io.File {
+    try ensureParent(io, path);
+    return try std.Io.Dir.createFile(.cwd(), io, path, .{ .truncate = true, .read = false });
 }
 
 fn currentSize() struct { rows: u16, cols: u16 } {
@@ -111,17 +108,17 @@ fn readIntoQueuePty(allocator: std.mem.Allocator, fd: c_int, queue: *ByteQueue, 
     }
 }
 
-fn run(allocator: std.mem.Allocator, config: Config) !u8 {
+fn run(io: std.Io, allocator: std.mem.Allocator, config: Config) !u8 {
     defer allocator.free(config.child_argv);
 
     const stdin_is_tty = c.isatty(std.posix.STDIN_FILENO) == 1;
     var raw_mode = if (stdin_is_tty) try enterRawMode(std.posix.STDIN_FILENO) else null;
     defer if (raw_mode) |*guard| guard.restore();
 
-    var log_file = try createOutput(config.log_path);
-    defer log_file.close();
+    var log_file = try createOutput(io, config.log_path);
+    defer log_file.close(io);
     var log_buf: [4096]u8 = undefined;
-    var log_writer = log_file.writer(&log_buf);
+    var log_writer = log_file.writer(io, &log_buf);
 
     const size = currentSize();
     var child = try PtyChildHost.init(allocator, .{
@@ -219,13 +216,16 @@ fn run(allocator: std.mem.Allocator, config: Config) !u8 {
     return 1;
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+fn allocArgs(arena: std.mem.Allocator, args: std.process.Args) ![]const []const u8 {
+    const raw = try args.toSlice(arena);
+    const argv = try arena.alloc([]const u8, raw.len);
+    for (raw, 0..) |arg, i| argv[i] = arg;
+    return argv;
+}
 
-    const argv = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, argv);
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const argv = try allocArgs(init.arena.allocator(), init.minimal.args);
 
     const old_winch = c.signal(c.SIGWINCH, handleSigwinch);
     defer _ = c.signal(c.SIGWINCH, old_winch);
@@ -245,7 +245,7 @@ pub fn main() !void {
         },
     };
 
-    const code = run(allocator, config) catch |err| {
+    const code = run(init.io, allocator, config) catch |err| {
         std.debug.print("ptylog: {s}\n", .{@errorName(err)});
         std.process.exit(1);
     };

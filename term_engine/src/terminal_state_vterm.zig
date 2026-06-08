@@ -95,7 +95,7 @@ pub const VTermAdapter = struct {
         var lines = try allocator.alloc(screen_types.HostScreenLine, @intCast(rows));
         var hyperlink_map = std.AutoHashMap(u32, u32).init(allocator);
         defer hyperlink_map.deinit();
-        var hyperlinks = std.ArrayList(screen_types.HostHyperlink){};
+        var hyperlinks: std.ArrayList(screen_types.HostHyperlink) = .empty;
         var initialized_rows: usize = 0;
         errdefer {
             for (lines[0..initialized_rows]) |line| {

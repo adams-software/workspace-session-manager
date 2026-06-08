@@ -1,9 +1,11 @@
 const std = @import("std");
+const global_io = std.Io.Threaded.global_single_threaded.io();
 const policy = @import("policy.zig");
 
 const c = @cImport({
     @cInclude("sys/socket.h");
     @cInclude("sys/un.h");
+    @cInclude("time.h");
     @cInclude("unistd.h");
 });
 
@@ -52,12 +54,12 @@ pub fn createSession(allocator: std.mem.Allocator, host_bin: []const u8, provide
 
     if (pathExists(paths.data_path) or pathExists(paths.control_path)) return error.SessionAlreadyExists;
 
-    if (std.fs.path.dirname(paths.data_path)) |dir| std.fs.makeDirAbsolute(dir) catch |err| switch (err) {
+    if (std.fs.path.dirname(paths.data_path)) |dir| std.Io.Dir.createDirAbsolute(global_io, dir, .default_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
     };
 
-    var argv = std.ArrayList([]const u8){};
+    var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(allocator);
     const size_arg = if (spec.cols != null and spec.rows != null)
         try std.fmt.allocPrint(allocator, "{d}x{d}", .{ spec.cols.?, spec.rows.? })
@@ -91,15 +93,21 @@ pub fn createSession(allocator: std.mem.Allocator, host_bin: []const u8, provide
         inner_cmd,
     });
 
-    var child = std.process.Child.init(argv.items, allocator);
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Ignore;
-    // Detached sessions must not keep the launching terminal as a live stderr
-    // dependency; otherwise SSH hangups can still tear down the runtime.
-    child.stderr_behavior = .Ignore;
-    // Keep a separate process group even when setsid is unavailable.
-    child.pgid = 0;
-    try child.spawn();
+    var spawn_runtime = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer spawn_runtime.deinit();
+    const spawn_io = spawn_runtime.io();
+
+    var child = try std.process.spawn(spawn_io, .{
+        .argv = argv.items,
+        .stdin = .ignore,
+        .stdout = .ignore,
+        // Detached sessions must not keep the launching terminal as a live stderr
+        // dependency; otherwise SSH hangups can still tear down the runtime.
+        .stderr = .ignore,
+        // Keep a separate process group even when setsid is unavailable.
+        .pgid = 0,
+    });
+    _ = &child;
     try waitSocketPathExists(paths.data_path, 2000);
     try waitSocketPathExists(paths.control_path, 2000);
 
@@ -108,12 +116,18 @@ pub fn createSession(allocator: std.mem.Allocator, host_bin: []const u8, provide
 
 
 fn waitSocketPathExists(path: []const u8, timeout_ms: u64) !void {
-    const deadline = std.time.milliTimestamp() + @as(i64, @intCast(timeout_ms));
-    while (std.time.milliTimestamp() < deadline) {
+    const deadline = monotonicMs() + timeout_ms;
+    while (monotonicMs() < deadline) {
         if (pathExists(path)) return;
-        std.Thread.sleep(20 * std.time.ns_per_ms);
+        _ = c.usleep(20_000);
     }
     return error.SessionNotReady;
+}
+
+fn monotonicMs() u64 {
+    var ts: c.timespec = undefined;
+    if (c.clock_gettime(c.CLOCK_MONOTONIC, &ts) != 0) return 0;
+    return @as(u64, @intCast(ts.tv_sec)) * std.time.ms_per_s + @as(u64, @intCast(@divTrunc(ts.tv_nsec, std.time.ns_per_ms)));
 }
 
 fn appendDetachedHostPrefix(allocator: std.mem.Allocator, argv: *std.ArrayList([]const u8), host_bin: []const u8) !void {
@@ -123,7 +137,7 @@ fn appendDetachedHostPrefix(allocator: std.mem.Allocator, argv: *std.ArrayList([
     };
 
     for (setsid_candidates) |candidate| {
-        std.fs.accessAbsolute(candidate, .{}) catch continue;
+        std.Io.Dir.accessAbsolute(global_io, candidate, .{}) catch continue;
         try argv.appendSlice(allocator, &.{ candidate, host_bin });
         return;
     }
@@ -132,6 +146,6 @@ fn appendDetachedHostPrefix(allocator: std.mem.Allocator, argv: *std.ArrayList([
 }
 
 fn pathExists(path: []const u8) bool {
-    std.fs.accessAbsolute(path, .{}) catch return false;
+    std.Io.Dir.accessAbsolute(global_io, path, .{}) catch return false;
     return true;
 }

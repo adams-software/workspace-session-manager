@@ -18,18 +18,37 @@ fn defaultTerminalSize() struct { rows: u16, cols: u16 } {
     return .{ .rows = size.rows, .cols = size.cols };
 }
 
-pub fn main() !u8 {
-    return run() catch |err| {
+fn allocArgs(arena: std.mem.Allocator, args: std.process.Args) ![]const []const u8 {
+    const raw = try args.toSlice(arena);
+    const argv = try arena.alloc([]const u8, raw.len);
+    for (raw, 0..) |arg, i| argv[i] = arg;
+    return argv;
+}
+
+fn replayToList(
+    allocator: std.mem.Allocator,
+    format: OutputFormat,
+    rows: u16,
+    cols: u16,
+    reader: anytype,
+    out: *std.ArrayList(u8),
+) !void {
+    var out_writer = std.Io.Writer.Allocating.fromArrayList(allocator, out);
+    defer out.* = out_writer.toArrayList();
+    try log_core.replayReader(allocator, format, rows, cols, reader, &out_writer.writer);
+}
+
+pub fn main(init: std.process.Init) !u8 {
+    return run(init) catch |err| {
         const name = @errorName(err);
         if (std.mem.eql(u8, name, "BrokenPipe") or std.mem.eql(u8, name, "WriteFailed")) return 0;
         return err;
     };
 }
 
-fn run() !u8 {
-    const allocator = std.heap.smp_allocator;
-    const argv = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, argv);
+fn run(init: std.process.Init) !u8 {
+    const allocator = init.gpa;
+    const argv = try allocArgs(init.arena.allocator(), init.minimal.args);
 
     var format: OutputFormat = .plain;
     var path_arg: ?[]const u8 = null;
@@ -48,28 +67,28 @@ fn run() !u8 {
     }
 
     var stdout_buf: [4096]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buf);
+    var stdout_writer = std.Io.File.stdout().writer(init.io, &stdout_buf);
     const size = defaultTerminalSize();
 
     if (path_arg) |path| {
         if (std.mem.eql(u8, path, "-")) {
             var stdin_buf: [4096]u8 = undefined;
-            var stdin_reader = std.fs.File.stdin().reader(&stdin_buf);
+            var stdin_reader = std.Io.File.stdin().reader(init.io, &stdin_buf);
             try log_core.replayReader(allocator, format, size.rows, size.cols, &stdin_reader.interface, &stdout_writer.interface);
         } else {
-            const file = try std.fs.cwd().openFile(path, .{});
-            defer file.close();
+            const file = try std.Io.Dir.openFile(.cwd(), init.io, path, .{});
+            defer file.close(init.io);
 
             var file_buf: [4096]u8 = undefined;
-            var file_reader = file.reader(&file_buf);
+            var file_reader = file.reader(init.io, &file_buf);
             try log_core.replayReader(allocator, format, size.rows, size.cols, &file_reader.interface, &stdout_writer.interface);
         }
-    } else if (std.posix.isatty(std.posix.STDIN_FILENO)) {
+    } else if (try std.Io.File.stdin().isTty(init.io)) {
         usage();
         return 0;
     } else {
         var stdin_buf: [4096]u8 = undefined;
-        var stdin_reader = std.fs.File.stdin().reader(&stdin_buf);
+        var stdin_reader = std.Io.File.stdin().reader(init.io, &stdin_buf);
         try log_core.replayReader(allocator, format, size.rows, size.cols, &stdin_reader.interface, &stdout_writer.interface);
     }
 
@@ -81,11 +100,10 @@ test "scroll suppresses alternate screen and keeps surrounding shell lines" {
     const allocator = std.testing.allocator;
     const transcript = "$ echo hi\r\nhi\r\n$ nvim foo.txt\r\n\x1b[?1049h[editor noise]\x1b[?1049l$ echo done\r\ndone\r\n";
 
-    var stream = std.io.fixedBufferStream(transcript);
-    var out = std.ArrayList(u8){};
+    var stream = std.Io.fixedBufferStream(transcript);
+    var out: std.ArrayList(u8) = .empty;
     defer out.deinit(allocator);
-
-    try log_core.replayReader(allocator, .plain, 24, 80, stream.reader(), out.writer(allocator));
+    try replayToList(allocator, .plain, 24, 80, stream.reader(), &out);
 
     try std.testing.expectEqualStrings(
         "$ echo hi\nhi\n$ nvim foo.txt\n$ echo done\ndone\n",
@@ -97,11 +115,10 @@ test "scroll preserves blank lines" {
     const allocator = std.testing.allocator;
     const transcript = "$ printf 'a\\n\\n b\\n'\r\na\r\n\r\n b\r\n";
 
-    var stream = std.io.fixedBufferStream(transcript);
-    var out = std.ArrayList(u8){};
+    var stream = std.Io.fixedBufferStream(transcript);
+    var out: std.ArrayList(u8) = .empty;
     defer out.deinit(allocator);
-
-    try log_core.replayReader(allocator, .plain, 24, 80, stream.reader(), out.writer(allocator));
+    try replayToList(allocator, .plain, 24, 80, stream.reader(), &out);
 
     try std.testing.expectEqualStrings(
         "$ printf 'a\\n\\n b\\n'\na\n\n b\n",
@@ -113,11 +130,10 @@ test "scroll keeps emoji variation selector cluster without trailing placeholder
     const allocator = std.testing.allocator;
     const transcript = "\xe2\xad\x95\xef\xb8\x8f!\r\n";
 
-    var stream = std.io.fixedBufferStream(transcript);
-    var out = std.ArrayList(u8){};
+    var stream = std.Io.fixedBufferStream(transcript);
+    var out: std.ArrayList(u8) = .empty;
     defer out.deinit(allocator);
-
-    try log_core.replayReader(allocator, .plain, 24, 80, stream.reader(), out.writer(allocator));
+    try replayToList(allocator, .plain, 24, 80, stream.reader(), &out);
 
     try std.testing.expectEqualStrings("⭕️!\n", out.items);
 }

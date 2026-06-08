@@ -35,7 +35,7 @@ pub const StdoutBuffer = struct {
     pub fn init(allocator: std.mem.Allocator) StdoutBuffer {
         return .{
             .allocator = allocator,
-            .control_queue = .{},
+            .control_queue = .empty,
         };
     }
 
@@ -60,7 +60,7 @@ pub const StdoutBuffer = struct {
     }
 
     pub fn publishRenderCandidate(self: *StdoutBuffer, publish: actor_mailboxes.RenderPublish) !void {
-        var buf = std.ArrayList(u8){};
+        var buf: std.ArrayList(u8) = .empty;
         errdefer buf.deinit(self.allocator);
         try buf.appendSlice(self.allocator, publish.bytes);
         self.installRenderCandidate(.{
@@ -233,4 +233,3 @@ test "started render candidate defers newer render until current batch completes
     try std.testing.expectEqual(@as(u64, 2), buffer.deferred_render.?.publish.version);
     try std.testing.expectEqualStrings("second", buffer.deferred_render.?.storage.items);
 }
-

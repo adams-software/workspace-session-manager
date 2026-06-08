@@ -1,10 +1,11 @@
 const std = @import("std");
+const global_io = std.Io.Threaded.global_single_threaded.io();
 const cli_main = @import("cli_main.zig");
 const policy = @import("policy.zig");
 const service_mod = @import("service.zig");
 
 fn debugEnabled() bool {
-    return std.posix.getenv("WSM_DEBUG") != null;
+    return std.c.getenv("WSM_DEBUG") != null;
 }
 
 fn debugLog(comptime fmt: []const u8, args: anytype) void {
@@ -136,7 +137,7 @@ pub const Executor = struct {
             },
             .create => |name| blk: {
                 defer self.allocator.free(name);
-                const shell = std.posix.getenv("SHELL") orelse "/bin/sh";
+                const shell = if (std.c.getenv("SHELL")) |value| std.mem.span(value) else "/bin/sh";
                 var service = service_mod.WorkspaceService.init(self.allocator, self.host_bin, self.vpty_bin, self.ptylog_bin);
                 const result = service.createAndAttach(provider, name, shell, null, null) catch |err| switch (err) {
                     error.SessionAlreadyExists => break :blk .{ .err = try self.allocator.dupe(u8, "session already exists") },
@@ -160,19 +161,25 @@ pub const Executor = struct {
                 var service = service_mod.WorkspaceService.init(self.allocator, self.host_bin, self.vpty_bin, self.ptylog_bin);
         const log_path = try service.logPath(provider, base_id);
         defer self.allocator.free(log_path);
-        std.fs.accessAbsolute(log_path, .{}) catch {
+        std.Io.Dir.accessAbsolute(global_io, log_path, .{}) catch {
             return .{ .err = try std.fmt.allocPrint(self.allocator, "logs failed for {s}: log not found", .{base_id}) };
         };
 
         const argv = [_][]const u8{ self.logs_viewer_bin, log_path };
-        var child = std.process.Child.init(&argv, self.allocator);
-        child.stdin_behavior = .Inherit;
-        child.stdout_behavior = .Inherit;
-        child.stderr_behavior = .Inherit;
-        const term = try child.spawnAndWait();
+        var spawn_runtime = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+        defer spawn_runtime.deinit();
+        const spawn_io = spawn_runtime.io();
+        var child = try std.process.spawn(spawn_io, .{
+            .argv = &argv,
+            .stdin = .inherit,
+            .stdout = .inherit,
+            .stderr = .inherit,
+        });
+        defer child.kill(spawn_io);
+        const term = try child.wait(spawn_io);
         return switch (term) {
-            .Exited => |code| if (code == 0) .idle else .{ .err = try std.fmt.allocPrint(self.allocator, "logs viewer exited with code {d}", .{code}) },
-            .Signal => |sig| .{ .err = try std.fmt.allocPrint(self.allocator, "logs viewer exited on signal {d}", .{sig}) },
+            .exited => |code| if (code == 0) .idle else .{ .err = try std.fmt.allocPrint(self.allocator, "logs viewer exited with code {d}", .{code}) },
+            .signal => |sig| .{ .err = try std.fmt.allocPrint(self.allocator, "logs viewer exited on signal {d}", .{sig}) },
             else => .{ .err = try self.allocator.dupe(u8, "logs viewer exited unexpectedly") },
         };
     }

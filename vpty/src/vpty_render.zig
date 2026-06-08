@@ -48,7 +48,7 @@ pub const Renderer = struct {
     force_full_render: bool = true,
     allow_next_render_despite_backlog: bool = false,
     last_generated_version: u64 = 0,
-    render_buf: std.ArrayList(u8) = .{},
+    render_buf: std.ArrayList(u8) = .empty,
 
     pub fn init(stdout_thread: *StdoutThread, viewport: Viewport) Renderer {
         var self = Renderer{ .stdout_thread = stdout_thread, .viewport = viewport };

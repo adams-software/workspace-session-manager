@@ -114,9 +114,16 @@ fn mapExitSignal(text: ?[]const u8) host_runtime.Signal {
 }
 
 const StdoutEventSink = struct {
-    fn onEvent(_: ?*anyopaque, event: host_runtime.HostEvent) void {
-        var stdout = std.fs.File.stdout().writer(&.{});
+    const Ctx = struct {
+        io: std.Io,
+    };
+
+    fn onEvent(ctx: ?*anyopaque, event: host_runtime.HostEvent) void {
+        const sink: *Ctx = @ptrCast(@alignCast(ctx.?));
+        var buf: [256]u8 = undefined;
+        var stdout = std.Io.File.stdout().writer(sink.io, &buf);
         host_runtime.writeEventLine(&stdout.interface, event) catch {};
+        stdout.interface.flush() catch {};
     }
 };
 
@@ -124,7 +131,7 @@ fn applyChildResize(child: *host.PtyChildHost, size: host_runtime.Size) !void {
     try child.applySize(.{ .cols = size.cols, .rows = size.rows });
 }
 
-fn runHost(allocator: std.mem.Allocator, parsed: Parsed) !u8 {
+fn runHost(allocator: std.mem.Allocator, io: std.Io, parsed: Parsed) !u8 {
     const initial_size = parsed.size orelse blk: {
         if (getTtySize(std.posix.STDIN_FILENO)) |tty_size| {
             if (tty_size.cols != 0 and tty_size.rows != 0) {
@@ -145,10 +152,11 @@ fn runHost(allocator: std.mem.Allocator, parsed: Parsed) !u8 {
 
     var server = session_server.SessionServer.init(allocator, &child);
     defer server.deinit();
+    var sink_ctx = StdoutEventSink.Ctx{ .io = io };
     const event_sink: ?host_runtime.EventSink = if (parsed.headless)
         null
     else
-        .{ .ctx = null, .onEventFn = StdoutEventSink.onEvent };
+        .{ .ctx = &sink_ctx, .onEventFn = StdoutEventSink.onEvent };
     try server.listenWithEventSink(parsed.socket_path, event_sink);
     if (child.pid == null or child.masterFd() == null) return error.InvalidState;
     try server.markReady();
@@ -160,7 +168,7 @@ fn runHost(allocator: std.mem.Allocator, parsed: Parsed) !u8 {
     var repl: ?host_repl.Repl = null;
     defer if (repl) |*r| r.deinit();
     if (!parsed.headless) {
-        repl = host_repl.Repl.init(allocator);
+        repl = host_repl.Repl.init(allocator, io);
         try repl.?.setup();
     }
 
@@ -212,13 +220,16 @@ fn runHost(allocator: std.mem.Allocator, parsed: Parsed) !u8 {
     }
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+fn allocArgs(arena: std.mem.Allocator, args: std.process.Args) ![]const []const u8 {
+    const raw = try args.toSlice(arena);
+    const argv = try arena.alloc([]const u8, raw.len);
+    for (raw, 0..) |arg, i| argv[i] = arg;
+    return argv;
+}
 
-    const argv = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, argv);
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const argv = try allocArgs(init.arena.allocator(), init.minimal.args);
     const name = if (argv.len > 0) progName(argv[0]) else "msr";
 
     const parsed = parseArgs(allocator, argv) catch |e| {
@@ -234,7 +245,7 @@ pub fn main() !void {
         }
     };
 
-    const code = runHost(allocator, parsed) catch |e| {
+    const code = runHost(allocator, init.io, parsed) catch |e| {
         err("{s}: {s}\n", .{ name, @errorName(e) });
         return std.process.exit(1);
     };

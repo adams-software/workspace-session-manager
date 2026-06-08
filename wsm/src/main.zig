@@ -9,6 +9,7 @@ const enterRawMode = @import("ptyio_raw_mode").enterRawMode;
 const getTtySize = @import("ptyio_tty_size").getTtySize;
 
 const c = @cImport({
+    @cInclude("fcntl.h");
     @cInclude("poll.h");
     @cInclude("signal.h");
     @cInclude("unistd.h");
@@ -45,8 +46,9 @@ const TerminalState = struct {
     raw_mode: @import("ptyio_raw_mode").RawModeGuard,
 
     fn init() !TerminalState {
-        const tty_fd = std.posix.open("/dev/tty", .{ .ACCMODE = .RDWR }, 0) catch return Error.TerminalUnavailable;
-        errdefer std.posix.close(tty_fd);
+        const tty_fd = c.open("/dev/tty", c.O_RDWR);
+        if (tty_fd < 0) return Error.TerminalUnavailable;
+        errdefer _ = c.close(tty_fd);
 
         var raw_mode = enterRawMode(tty_fd) catch return Error.RawModeFailed;
         errdefer raw_mode.restore();
@@ -56,7 +58,7 @@ const TerminalState = struct {
 
     fn deinit(self: *TerminalState) void {
         self.raw_mode.restore();
-        std.posix.close(self.tty_fd);
+        _ = c.close(self.tty_fd);
     }
 };
 
@@ -70,7 +72,7 @@ const OuterSize = struct {
 };
 
 fn debugEnabled() bool {
-    return std.posix.getenv("WSM_DEBUG") != null;
+    return std.c.getenv("WSM_DEBUG") != null;
 }
 
 fn debugLog(comptime fmt: []const u8, args: anytype) void {
@@ -94,8 +96,10 @@ const App = struct {
         var bar_state = ui_state.State.init(allocator);
         errdefer bar_state.deinit();
 
-        const root_env = std.posix.getenv("WSM_ROOT") orelse ".";
-        const root = try std.fs.realpathAlloc(allocator, root_env);
+        const root_env = if (std.c.getenv("WSM_ROOT")) |value| std.mem.span(value) else ".";
+        var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const root_len = try std.Io.Dir.realPathFile(.cwd(), std.Io.Threaded.global_single_threaded.io(), root_env, &root_buf);
+        const root = try allocator.dupe(u8, root_buf[0..root_len]);
         defer allocator.free(root);
 
         var provider = try policy.Provider.init(allocator, root, null);
@@ -162,10 +166,12 @@ const App = struct {
         const line = try bar_render.buildLine(self.allocator, &self.bar_state, self.provider.barModel(), self.layout.outer_cols);
         defer self.allocator.free(line);
 
-        var out = std.ArrayList(u8){};
+        var out: std.ArrayList(u8) = .empty;
         defer out.deinit(self.allocator);
         const row = self.layout.bar_row.? + 1;
-        try out.writer(self.allocator).print("\x1b7\x1b[{d};1H\x1b[0m", .{row});
+        const prefix = try std.fmt.allocPrint(self.allocator, "\x1b7\x1b[{d};1H\x1b[0m", .{row});
+        defer self.allocator.free(prefix);
+        try out.appendSlice(self.allocator, prefix);
         try out.appendSlice(self.allocator, line);
         try out.appendSlice(self.allocator, "\x1b8");
         try writeAll(self.term.tty_fd, out.items);
@@ -173,10 +179,12 @@ const App = struct {
 
     fn clearBar(self: *App) !void {
         if (!self.layout.bar_visible or self.layout.bar_row == null) return;
-        var out = std.ArrayList(u8){};
+        var out: std.ArrayList(u8) = .empty;
         defer out.deinit(self.allocator);
         const row = self.layout.bar_row.? + 1;
-        try out.writer(self.allocator).print("\x1b7\x1b[{d};1H\x1b[0m\x1b[2K\x1b8", .{row});
+        const line = try std.fmt.allocPrint(self.allocator, "\x1b7\x1b[{d};1H\x1b[0m\x1b[2K\x1b8", .{row});
+        defer self.allocator.free(line);
+        try out.appendSlice(self.allocator, line);
         try writeAll(self.term.tty_fd, out.items);
     }
 
@@ -261,7 +269,7 @@ const App = struct {
         }
 
         if (action == .create) {
-            const shell = std.posix.getenv("SHELL") orelse "/bin/sh";
+            const shell = if (std.c.getenv("SHELL")) |value| std.mem.span(value) else "/bin/sh";
             const exec_result = try self.executor.createAndAttachSized(&self.provider, action.create, shell, .{ .cols = self.layout.outer_cols, .rows = self.layout.main_rows });
             self.allocator.free(action.create);
             try self.applyExecResult(exec_result);
@@ -436,23 +444,26 @@ fn nextUiInput(bytes: []const u8) struct { slice: []const u8, consumed: usize } 
     return .{ .slice = bytes[0..1], .consumed = 1 };
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+fn allocArgs(arena: std.mem.Allocator, args: std.process.Args) ![]const []const u8 {
+    const raw = try args.toSlice(arena);
+    const argv = try arena.alloc([]const u8, raw.len);
+    for (raw, 0..) |arg, i| argv[i] = arg;
+    return argv;
+}
 
-    const argv = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, argv);
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const argv = try allocArgs(init.arena.allocator(), init.minimal.args);
     const args = if (argv.len > 1) argv[1..] else &.{};
 
     const mode = try cli_main.parseMode(allocator, args);
     defer mode.deinit(allocator);
-    const nested_session = std.posix.getenv("WSM_SESSION_ID");
+    const nested_session = std.c.getenv("WSM_SESSION_ID");
     if (nested_session != null) {
         switch (mode) {
             .interactive_attach, .interactive_create_attach => {
                 const msg = "wsm: nested interactive sessions are not supported, use detached create or run from outside the session\n";
-                try std.fs.File.stdout().writeAll(msg);
+                std.debug.print("{s}", .{msg});
                 return;
             },
             else => {},
@@ -461,15 +472,22 @@ pub fn main() !void {
 
     switch (mode) {
         .help, .list, .inspect, .log, .cleanup, .create_detached, .create_detached_alias, .kill => {
-            const root = cli_main.resolveWorkspace(allocator, args) catch |err| {
+            const root = cli_main.resolveWorkspace(init.io, allocator, args) catch |err| {
                 if (err == error.MissingWorkspace) {
-                    try cli_main.printHelp(allocator, std.fs.File.stdout(), null, std.posix.getenv("WSM_SESSION_ID"));
+                    var stdout_buf: [4096]u8 = undefined;
+                    var stdout_writer = std.Io.File.stdout().writer(init.io, &stdout_buf);
+                    const current_session = if (std.c.getenv("WSM_SESSION_ID")) |value| std.mem.span(value) else null;
+                    try cli_main.printHelp(allocator, &stdout_writer.interface, null, current_session);
+                    try stdout_writer.interface.flush();
                     return;
                 }
                 return err;
             };
             defer allocator.free(root);
-            _ = try cli_main.runCommand(allocator, root, mode, std.fs.File.stdout());
+            var stdout_buf: [4096]u8 = undefined;
+            var stdout_writer = std.Io.File.stdout().writer(init.io, &stdout_buf);
+            _ = try cli_main.runCommand(allocator, root, mode, &stdout_writer.interface);
+            try stdout_writer.interface.flush();
             return;
         },
         .interactive_attach, .interactive_create_attach => try runInteractive(allocator, mode),
@@ -569,7 +587,6 @@ fn runInteractive(allocator: std.mem.Allocator, mode: cli_main.Mode) !void {
     term.deinit();
 
     if (exit_message) |msg| {
-        try std.fs.File.stdout().writeAll(msg);
-        try std.fs.File.stdout().writeAll("\n");
+        std.debug.print("{s}\n", .{msg});
     }
 }

@@ -19,6 +19,13 @@ pub fn build(b: *std.Build) void {
     });
     fd_stream_mod.addImport("byte_queue", byte_queue_mod);
 
+    const ptyio_tty_size_mod = b.addModule("ptyio_tty_size", .{
+        .root_source_file = b.path("../ptyio/src/tty/tty_size.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+
     const host_mod = b.addModule("host", .{
         .root_source_file = b.path("../ptyio/src/pty/child_host.zig"),
         .target = target,
@@ -26,6 +33,13 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     host_mod.linkSystemLibrary("util", .{});
+
+    const ctlwire_mod = b.addModule("ctlwire", .{
+        .root_source_file = b.path("../ctlwire/src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
 
     const host_runtime_mod = b.addModule("host_runtime", .{
         .root_source_file = b.path("src/host_runtime.zig"),
@@ -60,6 +74,7 @@ pub fn build(b: *std.Build) void {
     host_repl_mod.addImport("host_control", host_control_mod);
     host_repl_mod.addImport("host_runtime", host_runtime_mod);
     host_repl_mod.addImport("fd_stream", fd_stream_mod);
+    host_repl_mod.addImport("ctlwire", ctlwire_mod);
 
     const server_mod = b.addModule("server", .{
         .root_source_file = b.path("src/server.zig"),
@@ -84,6 +99,7 @@ pub fn build(b: *std.Build) void {
     exe_root.addImport("host_control", host_control_mod);
     exe_root.addImport("host_repl", host_repl_mod);
     exe_root.addImport("server", server_mod);
+    exe_root.addImport("ptyio_tty_size", ptyio_tty_size_mod);
 
     const exe = b.addExecutable(.{
         .name = "msr",
@@ -103,6 +119,7 @@ pub fn build(b: *std.Build) void {
     host_exe_root.addImport("host_control", host_control_mod);
     host_exe_root.addImport("host_repl", host_repl_mod);
     host_exe_root.addImport("server", server_mod);
+    host_exe_root.addImport("ptyio_tty_size", ptyio_tty_size_mod);
 
     const host_exe = b.addExecutable(.{
         .name = "host",

@@ -1,7 +1,7 @@
 const std = @import("std");
 
 fn trimFraming(line_text: []const u8) []const u8 {
-    return std.mem.trimRight(u8, line_text, "\r\n");
+    return std.mem.trimEnd(u8, line_text, "\r\n");
 }
 
 pub const Error = error{

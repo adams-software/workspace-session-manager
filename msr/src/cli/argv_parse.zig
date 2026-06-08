@@ -44,9 +44,9 @@ pub fn countOption(parsed: ParsedArgv, aliases: []const []const u8) usize {
 }
 
 pub fn parseArgv(allocator: std.mem.Allocator, argv: []const []const u8) Error!ParsedArgv {
-    var options = std.ArrayList(Option){};
+    var options: std.ArrayList(Option) = .empty;
     defer options.deinit(allocator);
-    var positionals = std.ArrayList([]const u8){};
+    var positionals: std.ArrayList([]const u8) = .empty;
     defer positionals.deinit(allocator);
 
     if (argv.len == 0) {

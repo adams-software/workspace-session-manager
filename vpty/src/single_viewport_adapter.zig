@@ -45,7 +45,7 @@ pub const RowPatch = struct {
     pub fn init(row: u16) RowPatch {
         return .{
             .row = row,
-            .runs = .{},
+            .runs = .empty,
             .clear_remaining = true,
         };
     }
@@ -64,7 +64,7 @@ pub const ViewportPatch = struct {
         _ = allocator;
         return .{
             .full_redraw = full_redraw,
-            .rows = .{},
+            .rows = .empty,
             .cursor = .{},
         };
     }

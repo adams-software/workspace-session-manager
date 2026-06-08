@@ -1,4 +1,5 @@
 const std = @import("std");
+const global_io = std.Io.Threaded.global_single_threaded.io();
 const ui_state = @import("ui_state.zig");
 const canonical = @import("canonical.zig");
 
@@ -40,8 +41,8 @@ pub const Provider = struct {
             .allocator = allocator,
             .root = try allocator.dupe(u8, root),
             .current_session = try allocator.dupe(u8, current_session orelse ""),
-            .passive_label_buf = .{},
-            .active_summary = .{},
+            .passive_label_buf = .empty,
+            .active_summary = .empty,
             .attach_candidates = &.{},
         };
     }
@@ -79,7 +80,7 @@ pub const Provider = struct {
 
     pub fn refresh(self: *Provider) !void {
         self.passive_label_buf.clearRetainingCapacity();
-        var next_active_summary = std.ArrayList(u8){};
+        var next_active_summary: std.ArrayList(u8) = .empty;
         defer next_active_summary.deinit(self.allocator);
 
         if (self.current_session.len == 0) {
@@ -88,7 +89,9 @@ pub const Provider = struct {
             return;
         }
 
-        try self.passive_label_buf.writer(self.allocator).print("{s}/{s}", .{ self.root, self.current_session });
+        var passive_label_writer = std.Io.Writer.Allocating.fromArrayList(self.allocator, &self.passive_label_buf);
+        defer self.passive_label_buf = passive_label_writer.toArrayList();
+        try passive_label_writer.writer.print("{s}/{s}", .{ self.root, self.current_session });
 
         if (self.current_session.len == 0) {
             self.active_summary.clearRetainingCapacity();
@@ -130,7 +133,7 @@ pub const Provider = struct {
 
         self.active_summary.deinit(self.allocator);
         self.active_summary = next_active_summary;
-        next_active_summary = .{};
+        next_active_summary = .empty;
     }
 
     fn passiveLabel(self: *const Provider) []const u8 {
@@ -214,7 +217,7 @@ pub const Provider = struct {
             if (std.mem.eql(u8, id, query)) return try self.allocator.dupe(u8, id);
         }
 
-        var matches = std.ArrayList([]u8){};
+        var matches: std.ArrayList([]u8) = .empty;
         defer matches.deinit(self.allocator);
         for (ids) |id| {
             if (std.mem.eql(u8, basename(id), query)) {
@@ -227,9 +230,9 @@ pub const Provider = struct {
     }
 
     fn listIds(self: *Provider) ![][]u8 {
-        var out = std.ArrayList([]u8){};
+        var out: std.ArrayList([]u8) = .empty;
         errdefer self.freeOwnedStrings(out.items);
-        var stack = std.ArrayList([]u8){};
+        var stack: std.ArrayList([]u8) = .empty;
         defer {
             for (stack.items) |item| self.allocator.free(item);
             stack.deinit(self.allocator);
@@ -239,10 +242,10 @@ pub const Provider = struct {
         while (stack.items.len > 0) {
             const dir_path = stack.pop().?;
             defer self.allocator.free(dir_path);
-            var dir = try std.fs.openDirAbsolute(dir_path, .{ .iterate = true });
-            defer dir.close();
+            var dir = try std.Io.Dir.openDirAbsolute(global_io, dir_path, .{ .iterate = true });
+            defer dir.close(global_io);
             var iter = dir.iterate();
-            while (try iter.next()) |entry| {
+            while (try iter.next(global_io)) |entry| {
                 const joined = try std.fs.path.join(self.allocator, &.{ dir_path, entry.name });
                 switch (entry.kind) {
                     .directory => try stack.append(self.allocator, joined),
@@ -264,7 +267,7 @@ pub const Provider = struct {
     fn queryCandidates(self: *Provider, query: []const u8) ![]ui_state.Candidate {
         const ids = try self.listIds();
         defer self.freeStringSlice(ids);
-        var out = std.ArrayList(ui_state.Candidate){};
+        var out: std.ArrayList(ui_state.Candidate) = .empty;
         errdefer freeCandidates(self.allocator, out.items);
         for (ids) |id| {
             if (query.len != 0 and std.mem.indexOf(u8, id, query) == null and std.mem.indexOf(u8, basename(id), query) == null) continue;
@@ -280,7 +283,7 @@ pub const Provider = struct {
     fn existsCanonical(self: *Provider, id: []const u8) !bool {
         const sock = try self.sockForCanonical(id);
         defer self.allocator.free(sock);
-        std.fs.accessAbsolute(sock, .{}) catch return false;
+        std.Io.Dir.accessAbsolute(global_io, sock, .{}) catch return false;
         return true;
     }
 
@@ -289,7 +292,7 @@ pub const Provider = struct {
         errdefer self.freeStringSlice(ids);
         const prefix = try std.fmt.allocPrint(self.allocator, "{s}/", .{self.current_session});
         defer self.allocator.free(prefix);
-        var out = std.ArrayList([]u8){};
+        var out: std.ArrayList([]u8) = .empty;
         errdefer self.freeOwnedStrings(out.items);
         for (ids) |id| {
             if (!std.mem.startsWith(u8, id, prefix)) continue;
@@ -310,12 +313,12 @@ pub const Provider = struct {
             try std.fs.path.join(self.allocator, &.{ self.root, dir_id });
         defer self.allocator.free(base_dir);
 
-        var dir = try std.fs.openDirAbsolute(base_dir, .{ .iterate = true });
-        defer dir.close();
+        var dir = try std.Io.Dir.openDirAbsolute(global_io, base_dir, .{ .iterate = true });
+        defer dir.close(global_io);
         var iter = dir.iterate();
-        var out = std.ArrayList([]u8){};
+        var out: std.ArrayList([]u8) = .empty;
         errdefer self.freeOwnedStrings(out.items);
-        while (try iter.next()) |entry| {
+        while (try iter.next(global_io)) |entry| {
             if (entry.kind != .file and entry.kind != .unix_domain_socket) continue;
             if (!std.mem.endsWith(u8, entry.name, ".wsm")) continue;
             try out.append(self.allocator, try self.allocator.dupe(u8, entry.name[0 .. entry.name.len - 4]));

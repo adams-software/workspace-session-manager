@@ -141,10 +141,14 @@ pub fn roundTrip(
     command: host_control.Command,
     buf: []u8,
 ) !Response {
-    var cmd_buf: [128]u8 = undefined;
-    var cmd_stream = std.io.fixedBufferStream(&cmd_buf);
-    try formatCommand(cmd_stream.writer(), command);
-    const command_text = cmd_stream.getWritten();
+    const cmd_buf: [128]u8 = undefined;
+    _ = cmd_buf;
+    var cmd_stream: std.ArrayList(u8) = .empty;
+    defer cmd_stream.deinit(std.testing.allocator);
+    var cmd_writer = std.Io.Writer.Allocating.fromArrayList(std.testing.allocator, &cmd_stream);
+    defer cmd_stream = cmd_writer.toArrayList();
+    try formatCommand(&cmd_writer.writer, command);
+    const command_text = cmd_writer.written();
 
     const ForwardCtx = struct {
         sink: EventSink,
@@ -372,10 +376,10 @@ test "host_client roundTrip tolerates interleaved events" {
     };
 
     var reader = FakeReader{ .lines = &.{ "event ready", "event client_connected", "ok host=running" } };
-    var writer = FakeWriter{ .bytes = .{} };
+    var writer = FakeWriter{ .bytes = .empty };
     defer writer.bytes.deinit(std.testing.allocator);
 
-    var capture = Capture{ .kinds = .{} };
+    var capture = Capture{ .kinds = .empty };
     defer {
         for (capture.kinds.items) |item| std.testing.allocator.free(item);
         capture.kinds.deinit(std.testing.allocator);
@@ -432,7 +436,7 @@ test "host_client state helper parses typed state through interleaved events" {
         "event resized cols=120 rows=40",
         "ok host=running child=running client_attached=true pid=42 size=120x40 exit=none",
     } };
-    var writer = FakeWriter{ .bytes = .{} };
+    var writer = FakeWriter{ .bytes = .empty };
     defer writer.bytes.deinit(std.testing.allocator);
 
     var buf: [256]u8 = undefined;
@@ -478,7 +482,7 @@ test "host_client roundTrip rejects malformed line" {
     };
 
     var reader = FakeReader{ .lines = &.{ "wat nonsense", "ok" } };
-    var writer = FakeWriter{ .bytes = .{} };
+    var writer = FakeWriter{ .bytes = .empty };
     defer writer.bytes.deinit(std.testing.allocator);
 
     var buf: [256]u8 = undefined;

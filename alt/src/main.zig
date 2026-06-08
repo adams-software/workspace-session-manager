@@ -209,7 +209,7 @@ const Config = struct {
         const resolved_control = findRawOptionValue(args, &.{ "control" }) orelse return Error.MissingControlPath;
         const resolved_alternate = findRawOptionValue(args, &.{ "run" }) orelse return Error.MissingAlternateCommand;
 
-        var alternate_args = std.ArrayList([]const u8){};
+        var alternate_args: std.ArrayList([]const u8) = .empty;
         defer {
             for (alternate_args.items) |arg| allocator.free(arg);
             alternate_args.deinit(allocator);
@@ -320,10 +320,11 @@ fn writeAll(fd: c_int, bytes: []const u8) !void {
 }
 
 fn usage() void {
-    std.fs.File.stderr().writeAll(
+    std.debug.print(
         "Usage: alt --control <path> --run <path> [--run-arg <arg> ...] [--signal-1 <sig>] [--signal-2 <sig>] -- <primary-command...>\n\n" ++
         "Control commands: help, state, switch <index>, cycle, exit\n",
-    ) catch {};
+        .{},
+    );
 }
 
 fn parseSignalSpec(spec: []const u8) ?c_int {
@@ -430,21 +431,20 @@ fn writeCtlLine(fd: c_int, line: []const u8) !void {
 }
 
 fn writeCtlOk(fd: c_int) !void {
-    var file = std.fs.File{ .handle = fd };
-    var writer = file.writer(&.{});
-    try ctlwire.message.writeOk(&writer.interface);
+    try writeAll(fd, "ok\n");
 }
 
 fn writeCtlOkPayload(fd: c_int, payload: []const u8) !void {
-    var file = std.fs.File{ .handle = fd };
-    var writer = file.writer(&.{});
-    try ctlwire.message.writeOkPayload(&writer.interface, payload);
+    if (payload.len == 0) return writeCtlOk(fd);
+    var buf: [512]u8 = undefined;
+    const line = try std.fmt.bufPrint(&buf, "ok {s}\n", .{payload});
+    try writeAll(fd, line);
 }
 
 fn writeCtlErr(fd: c_int, kind: []const u8) !void {
-    var file = std.fs.File{ .handle = fd };
-    var writer = file.writer(&.{});
-    try ctlwire.message.writeErr(&writer.interface, .{ .kind = kind });
+    var buf: [256]u8 = undefined;
+    const line = try std.fmt.bufPrint(&buf, "err {s}\n", .{kind});
+    try writeAll(fd, line);
 }
 
 fn handleControlServer(server: *ControlServer, active: *ActiveSide, should_exit: *bool, term: *TerminalState, cfg: Config, primary: *SideRuntime, alternate: *SideRuntime) !void {
@@ -574,10 +574,16 @@ fn passthroughLoop(allocator: Allocator, term: *TerminalState, cfg: Config, prim
     }
 }
 
-pub fn main() !void {
-    const allocator = std.heap.smp_allocator;
-    const argv = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, argv);
+fn allocArgs(arena: Allocator, args: std.process.Args) ![]const []const u8 {
+    const raw = try args.toSlice(arena);
+    const argv = try arena.alloc([]const u8, raw.len);
+    for (raw, 0..) |arg, i| argv[i] = arg;
+    return argv;
+}
+
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const argv = try allocArgs(init.arena.allocator(), init.minimal.args);
     if (argv.len <= 1) { usage(); return; }
 
     var cfg = Config.parse(allocator, argv) catch |err| switch (err) {

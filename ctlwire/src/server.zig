@@ -7,7 +7,7 @@ pub const Connection = struct {
     line_buf: std.ArrayList(u8),
 
     pub fn init(fd: std.posix.fd_t) Connection {
-        return .{ .file = .{ .handle = fd }, .line_buf = .{} };
+        return .{ .file = .{ .handle = fd }, .line_buf = .empty };
     }
 
     pub fn deinit(self: *Connection, allocator: std.mem.Allocator) void {
@@ -30,7 +30,7 @@ pub const Connection = struct {
                 continue;
             }
 
-            const trimmed = std.mem.trimRight(u8, self.line_buf.items, "\r\n");
+            const trimmed = std.mem.trimEnd(u8, self.line_buf.items, "\r\n");
             defer self.line_buf.clearRetainingCapacity();
             if (trimmed.len == 0) continue;
             return trimmed;

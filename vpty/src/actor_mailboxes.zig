@@ -1,11 +1,25 @@
 const std = @import("std");
 
+const SpinMutex = struct {
+    inner: std.atomic.Mutex = .unlocked,
+
+    fn lock(self: *SpinMutex) void {
+        while (!self.inner.tryLock()) {
+            std.Thread.yield() catch {};
+        }
+    }
+
+    fn unlock(self: *SpinMutex) void {
+        self.inner.unlock();
+    }
+};
+
 pub fn MutexQueue(comptime T: type) type {
     return struct {
         const Self = @This();
 
         allocator: std.mem.Allocator,
-        mutex: std.Thread.Mutex = .{},
+        mutex: SpinMutex = .{},
         items: std.ArrayList(T),
         head: usize = 0,
         closed: bool = false,
@@ -14,7 +28,7 @@ pub fn MutexQueue(comptime T: type) type {
             _ = io;
             return .{
                 .allocator = allocator,
-                .items = .{},
+                .items = .empty,
             };
         }
 

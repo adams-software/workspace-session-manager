@@ -84,8 +84,8 @@ pub const State = struct {
     pub fn init(allocator: std.mem.Allocator) State {
         return .{
             .allocator = allocator,
-            .input_buf = .{},
-            .notice_text = .{},
+            .input_buf = .empty,
+            .notice_text = .empty,
         };
     }
 

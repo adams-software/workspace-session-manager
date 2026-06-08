@@ -135,7 +135,7 @@ pub const HostRuntime = struct {
         switch (self.state_snapshot.child_phase) {
             .starting, .running => {
                 const pid = self.state_snapshot.child_pid orelse return Error.InvalidState;
-                const os_sig: u8 = @intCast(switch (sig) {
+                const os_sig: std.posix.SIG = @enumFromInt(switch (sig) {
                     .term => c.SIGTERM,
                     .int => c.SIGINT,
                     .kill => c.SIGKILL,
@@ -221,7 +221,7 @@ test "host_runtime updates state and emits key events" {
         }
     };
 
-    var capture = Capture{ .events = .{} };
+    var capture = Capture{ .events = .empty };
     defer capture.events.deinit(std.testing.allocator);
 
     var runtime = try HostRuntime.init(

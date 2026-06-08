@@ -10,8 +10,22 @@ const c = @cImport({
     @cInclude("poll.h");
 });
 
+const SpinMutex = struct {
+    inner: std.atomic.Mutex = .unlocked,
+
+    fn lock(self: *SpinMutex) void {
+        while (!self.inner.tryLock()) {
+            std.Thread.yield() catch {};
+        }
+    }
+
+    fn unlock(self: *SpinMutex) void {
+        self.inner.unlock();
+    }
+};
+
 pub const SharedTerminalModel = struct {
-    mutex: std.Thread.Mutex = .{},
+    mutex: SpinMutex = .{},
     model: TerminalModel,
 
     pub fn init(io: anytype, model: TerminalModel) SharedTerminalModel {
@@ -37,7 +51,7 @@ pub const RenderThread = struct {
     };
 
     const PendingRequests = struct {
-        mutex: std.Thread.Mutex = .{},
+        mutex: SpinMutex = .{},
         batch: PendingBatch = .{},
     };
 

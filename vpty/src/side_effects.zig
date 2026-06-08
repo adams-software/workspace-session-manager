@@ -34,7 +34,7 @@ pub const FeedResult = struct {
 
 const TestStdoutActor = struct {
     allocator: std.mem.Allocator,
-    controls: std.ArrayList([]u8) = .{},
+    controls: std.ArrayList([]u8) = .empty,
 
     fn init(allocator: std.mem.Allocator) TestStdoutActor {
         return .{ .allocator = allocator };
@@ -62,9 +62,9 @@ pub const SideEffectForwarder = struct {
         return .{
             .allocator = allocator,
             .state = .idle,
-            .osc_buf = .{},
-            .csi_buf = .{},
-            .screen_buf = .{},
+            .osc_buf = .empty,
+            .csi_buf = .empty,
+            .screen_buf = .empty,
         };
     }
 

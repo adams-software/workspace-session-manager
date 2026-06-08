@@ -5,6 +5,10 @@ pub const max_input_bytes = 64 * 1024 * 1024;
 pub const replay_chunk_size = 16 * 1024;
 const normalize_lf_for_replay = true;
 
+fn writerFromList(allocator: std.mem.Allocator, list: *std.ArrayList(u8)) std.Io.Writer.Allocating {
+    return std.Io.Writer.Allocating.fromArrayList(allocator, list);
+}
+
 pub const OutputFormat = enum {
     plain,
     ansi,
@@ -14,10 +18,10 @@ pub const Builder = struct {
     allocator: std.mem.Allocator,
     format: OutputFormat,
     in_alt: bool = false,
-    pending_plain: std.ArrayList(u8) = .{},
-    pending_styled_cells: std.ArrayList(term_engine.HostScreenCell) = .{},
+    pending_plain: std.ArrayList(u8) = .empty,
+    pending_styled_cells: std.ArrayList(term_engine.HostScreenCell) = .empty,
     pending_styled_hyperlinks: []term_engine.HostHyperlink = &.{},
-    out: std.ArrayList(u8) = .{},
+    out: std.ArrayList(u8) = .empty,
 
     pub fn init(allocator: std.mem.Allocator, format: OutputFormat) Builder {
         return .{
@@ -51,9 +55,11 @@ pub const Builder = struct {
             .ansi => {
                 if (self.pending_styled_cells.items.len == 0) return;
                 var style_state = StyleState{};
-                var buf = std.ArrayList(u8){};
+                var buf: std.ArrayList(u8) = .empty;
                 defer buf.deinit(self.allocator);
-                try style_state.renderLine(buf.writer(self.allocator), self.pending_styled_cells.items, self.pending_styled_hyperlinks);
+                var buf_writer = writerFromList(self.allocator, &buf);
+                try style_state.renderLine(&buf_writer.writer, self.pending_styled_cells.items, self.pending_styled_hyperlinks);
+                buf = buf_writer.toArrayList();
                 try buf.appendSlice(self.allocator, "\x1b[0m\n");
                 try self.out.appendSlice(self.allocator, buf.items);
                 self.pending_styled_cells.clearRetainingCapacity();
@@ -127,7 +133,7 @@ pub const Builder = struct {
 
         switch (self.format) {
             .plain => {
-                var tail_lines = std.ArrayList([]u8){};
+                var tail_lines: std.ArrayList([]u8) = .empty;
                 defer {
                     for (tail_lines.items) |line| self.allocator.free(line);
                     tail_lines.deinit(self.allocator);
@@ -267,8 +273,8 @@ pub const StreamLogger = struct {
     allocator: std.mem.Allocator,
     engine: term_engine.Engine,
     builder: Builder,
-    live_tail: std.ArrayList(u8) = .{},
-    live_emitted_prefix: std.ArrayList(u8) = .{},
+    live_tail: std.ArrayList(u8) = .empty,
+    live_emitted_prefix: std.ArrayList(u8) = .empty,
     emitted_tail_lines: usize = 0,
     prev_byte: ?u8 = null,
 
@@ -320,9 +326,11 @@ pub const StreamLogger = struct {
     }
 
     fn takeCommittedBytes(self: *StreamLogger) ![]u8 {
-        var out = std.ArrayList(u8){};
+        var out: std.ArrayList(u8) = .empty;
         defer out.deinit(self.allocator);
-        try self.builder.drainTo(out.writer(self.allocator));
+        var out_writer = writerFromList(self.allocator, &out);
+        defer out = out_writer.toArrayList();
+        try self.builder.drainTo(&out_writer.writer);
         return try out.toOwnedSlice(self.allocator);
     }
 
@@ -469,19 +477,33 @@ fn renderVisibleTail(allocator: std.mem.Allocator, format: OutputFormat, engine:
     defer builder.deinit();
     try builder.appendVisibleTail(engine);
 
-    var out = std.ArrayList(u8){};
+    var out: std.ArrayList(u8) = .empty;
     defer out.deinit(allocator);
-    try builder.drainTo(out.writer(allocator));
+    var out_writer = writerFromList(allocator, &out);
+    try builder.drainTo(&out_writer.writer);
+    out = out_writer.toArrayList();
     if (out.items.len > 0 and out.items[out.items.len - 1] == '\n') {
         out.items.len -= 1;
     }
     return try out.toOwnedSlice(allocator);
 }
 
+fn flushLiveToList(allocator: std.mem.Allocator, logger: *StreamLogger, out: *std.ArrayList(u8)) !void {
+    var out_writer = writerFromList(allocator, out);
+    defer out.* = out_writer.toArrayList();
+    try logger.flushLive(&out_writer.writer);
+}
+
+fn finishToList(allocator: std.mem.Allocator, logger: *StreamLogger, out: *std.ArrayList(u8)) !void {
+    var out_writer = writerFromList(allocator, out);
+    defer out.* = out_writer.toArrayList();
+    try logger.finish(&out_writer.writer);
+}
+
 fn feedReplayBytes(engine: *term_engine.Engine, bytes: []const u8, prev_byte: *?u8) !void {
     if (!normalize_lf_for_replay) return engine.feed(bytes);
 
-    var normalized = std.ArrayList(u8){};
+    var normalized: std.ArrayList(u8) = .empty;
     defer normalized.deinit(std.heap.smp_allocator);
 
     for (bytes) |b| {
@@ -528,7 +550,7 @@ fn trimTrailingBlankCells(cells: []const term_engine.HostScreenCell) []const ter
 }
 
 fn cellSliceToUtf8(allocator: std.mem.Allocator, cells: []const term_engine.HostScreenCell) ![]u8 {
-    var out = std.ArrayList(u8){};
+    var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
 
     var col: usize = 0;
@@ -576,9 +598,9 @@ test "stream logger flushLive emits visible tail without committed newline" {
 
     try logger.feed("prompt> ");
 
-    var out = std.ArrayList(u8){};
+    var out: std.ArrayList(u8) = .empty;
     defer out.deinit(allocator);
-    try logger.flushLive(out.writer(allocator));
+    try flushLiveToList(allocator, &logger, &out);
 
     try std.testing.expectEqualStrings("", out.items);
 }
@@ -590,10 +612,10 @@ test "stream logger flushLive dedupes unchanged visible tail" {
 
     try logger.feed("prompt> ");
 
-    var out = std.ArrayList(u8){};
+    var out: std.ArrayList(u8) = .empty;
     defer out.deinit(allocator);
-    try logger.flushLive(out.writer(allocator));
-    try logger.flushLive(out.writer(allocator));
+    try flushLiveToList(allocator, &logger, &out);
+    try flushLiveToList(allocator, &logger, &out);
 
     try std.testing.expectEqualStrings("", out.items);
 }
@@ -603,13 +625,12 @@ test "stream logger flushLive suppresses prompt-growth snapshots until commit" {
     var logger = try StreamLogger.init(allocator, .plain, 24, 80);
     defer logger.deinit();
 
-    var out = std.ArrayList(u8){};
+    var out: std.ArrayList(u8) = .empty;
     defer out.deinit(allocator);
-
     try logger.feed("prompt> ");
-    try logger.flushLive(out.writer(allocator));
+    try flushLiveToList(allocator, &logger, &out);
     try logger.feed("x");
-    try logger.flushLive(out.writer(allocator));
+    try flushLiveToList(allocator, &logger, &out);
 
     try std.testing.expectEqualStrings("", out.items);
 }
@@ -619,12 +640,11 @@ test "stream logger finish does not duplicate previously flushed live tail" {
     var logger = try StreamLogger.init(allocator, .plain, 24, 80);
     defer logger.deinit();
 
-    var out = std.ArrayList(u8){};
+    var out: std.ArrayList(u8) = .empty;
     defer out.deinit(allocator);
-
     try logger.feed("hello\r\nprompt> ");
-    try logger.flushLive(out.writer(allocator));
-    try logger.finish(out.writer(allocator));
+    try flushLiveToList(allocator, &logger, &out);
+    try finishToList(allocator, &logger, &out);
 
     try std.testing.expectEqualStrings("hello\nprompt>", out.items);
 }
@@ -634,11 +654,10 @@ test "stream logger flushLive includes committed line plus prompt tail" {
     var logger = try StreamLogger.init(allocator, .plain, 24, 80);
     defer logger.deinit();
 
-    var out = std.ArrayList(u8){};
+    var out: std.ArrayList(u8) = .empty;
     defer out.deinit(allocator);
-
     try logger.feed("hello\r\nprompt> ");
-    try logger.flushLive(out.writer(allocator));
+    try flushLiveToList(allocator, &logger, &out);
 
     try std.testing.expectEqualStrings("hello\n", out.items);
 }
@@ -648,13 +667,12 @@ test "stream logger flushLive does not duplicate committed prompt line after liv
     var logger = try StreamLogger.init(allocator, .plain, 24, 80);
     defer logger.deinit();
 
-    var out = std.ArrayList(u8){};
+    var out: std.ArrayList(u8) = .empty;
     defer out.deinit(allocator);
-
     try logger.feed("prompt> ls");
-    try logger.flushLive(out.writer(allocator));
+    try flushLiveToList(allocator, &logger, &out);
     try logger.feed("\r\nfile.txt\r\nprompt> ");
-    try logger.flushLive(out.writer(allocator));
+    try flushLiveToList(allocator, &logger, &out);
 
     try std.testing.expectEqualStrings("prompt> ls\nfile.txt\n", out.items);
 }
@@ -664,13 +682,12 @@ test "stream logger flushLive suppresses alt-screen body and resumes shell tail"
     var logger = try StreamLogger.init(allocator, .plain, 24, 80);
     defer logger.deinit();
 
-    var out = std.ArrayList(u8){};
+    var out: std.ArrayList(u8) = .empty;
     defer out.deinit(allocator);
-
     try logger.feed("$ nvim foo.txt\r\n");
     try logger.feed("\x1b[?1049h[editor noise]");
     try logger.feed("\x1b[?1049l$ echo done\r\ndone\r\n$ ");
-    try logger.flushLive(out.writer(allocator));
+    try flushLiveToList(allocator, &logger, &out);
 
     try std.testing.expectEqualStrings("$ nvim foo.txt\n$ echo done\ndone\n", out.items);
 }
@@ -680,12 +697,11 @@ test "stream logger finish flushes pending prompt tail after live stable lines" 
     var logger = try StreamLogger.init(allocator, .plain, 24, 80);
     defer logger.deinit();
 
-    var out = std.ArrayList(u8){};
+    var out: std.ArrayList(u8) = .empty;
     defer out.deinit(allocator);
-
     try logger.feed("$ echo done\r\ndone\r\n$ ");
-    try logger.flushLive(out.writer(allocator));
-    try logger.finish(out.writer(allocator));
+    try flushLiveToList(allocator, &logger, &out);
+    try finishToList(allocator, &logger, &out);
 
     try std.testing.expectEqualStrings("$ echo done\ndone\n$", out.items);
 }
@@ -695,12 +711,11 @@ test "stream logger finish preserves no-newline output tail" {
     var logger = try StreamLogger.init(allocator, .plain, 24, 80);
     defer logger.deinit();
 
-    var out = std.ArrayList(u8){};
+    var out: std.ArrayList(u8) = .empty;
     defer out.deinit(allocator);
-
     try logger.feed("partial output");
-    try logger.flushLive(out.writer(allocator));
-    try logger.finish(out.writer(allocator));
+    try flushLiveToList(allocator, &logger, &out);
+    try finishToList(allocator, &logger, &out);
 
     try std.testing.expectEqualStrings("partial output", out.items);
 }
@@ -710,14 +725,13 @@ test "stream logger suppresses line editing noise before command commit" {
     var logger = try StreamLogger.init(allocator, .plain, 24, 80);
     defer logger.deinit();
 
-    var out = std.ArrayList(u8){};
+    var out: std.ArrayList(u8) = .empty;
     defer out.deinit(allocator);
-
     try logger.feed("prompt> lsx\x08 \x08");
-    try logger.flushLive(out.writer(allocator));
+    try flushLiveToList(allocator, &logger, &out);
     try logger.feed("\r\nfile.txt\r\nprompt> ");
-    try logger.flushLive(out.writer(allocator));
-    try logger.finish(out.writer(allocator));
+    try flushLiveToList(allocator, &logger, &out);
+    try finishToList(allocator, &logger, &out);
 
     try std.testing.expectEqualStrings("prompt> ls\nfile.txt\nprompt>", out.items);
 }
@@ -727,13 +741,12 @@ test "stream logger finish preserves prompt tail across resize" {
     var logger = try StreamLogger.init(allocator, .plain, 24, 20);
     defer logger.deinit();
 
-    var out = std.ArrayList(u8){};
+    var out: std.ArrayList(u8) = .empty;
     defer out.deinit(allocator);
-
     try logger.feed("prompt> echo hi");
-    try logger.flushLive(out.writer(allocator));
+    try flushLiveToList(allocator, &logger, &out);
     try logger.resize(24, 40);
-    try logger.finish(out.writer(allocator));
+    try finishToList(allocator, &logger, &out);
 
     try std.testing.expectEqualStrings("prompt> echo hi", out.items);
 }
@@ -743,13 +756,12 @@ test "stream logger live flush keeps multiple committed lines but defers final p
     var logger = try StreamLogger.init(allocator, .plain, 24, 80);
     defer logger.deinit();
 
-    var out = std.ArrayList(u8){};
+    var out: std.ArrayList(u8) = .empty;
     defer out.deinit(allocator);
-
     try logger.feed("$ printf one\r\none\r\n$ printf two\r\ntwo\r\n$ ");
-    try logger.flushLive(out.writer(allocator));
+    try flushLiveToList(allocator, &logger, &out);
     try std.testing.expectEqualStrings("$ printf one\none\n$ printf two\ntwo\n", out.items);
 
-    try logger.finish(out.writer(allocator));
+    try finishToList(allocator, &logger, &out);
     try std.testing.expectEqualStrings("$ printf one\none\n$ printf two\ntwo\n$", out.items);
 }

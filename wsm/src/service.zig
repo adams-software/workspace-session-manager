@@ -1,10 +1,12 @@
 const std = @import("std");
+const global_io = std.Io.Threaded.global_single_threaded.io();
 const policy = @import("policy.zig");
 const session_primitives = @import("session_primitives.zig");
 const session_link_mod = @import("session_link.zig");
 const c = @cImport({
     @cInclude("sys/socket.h");
     @cInclude("sys/un.h");
+    @cInclude("time.h");
     @cInclude("unistd.h");
 });
 
@@ -217,9 +219,9 @@ pub const WorkspaceService = struct {
     }
 
     pub fn listSessionIds(self: *WorkspaceService, provider: *policy.Provider) ![][]u8 {
-        var out = std.ArrayList([]u8){};
+        var out: std.ArrayList([]u8) = .empty;
         errdefer freeOwnedStrings(self.allocator, out.items);
-        var stack = std.ArrayList([]u8){};
+        var stack: std.ArrayList([]u8) = .empty;
         defer {
             for (stack.items) |item| self.allocator.free(item);
             stack.deinit(self.allocator);
@@ -229,10 +231,10 @@ pub const WorkspaceService = struct {
         while (stack.items.len > 0) {
             const dir_path = stack.pop().?;
             defer self.allocator.free(dir_path);
-            var dir = try std.fs.openDirAbsolute(dir_path, .{ .iterate = true });
-            defer dir.close();
+            var dir = try std.Io.Dir.openDirAbsolute(global_io, dir_path, .{ .iterate = true });
+            defer dir.close(global_io);
             var iter = dir.iterate();
-            while (try iter.next()) |entry| {
+            while (try iter.next(global_io)) |entry| {
                 const joined = try std.fs.path.join(self.allocator, &.{ dir_path, entry.name });
                 switch (entry.kind) {
                     .directory => try stack.append(self.allocator, joined),
@@ -258,7 +260,7 @@ pub const WorkspaceService = struct {
             self.allocator.free(ids);
         }
 
-        var out = std.ArrayList(SessionInfo){};
+        var out: std.ArrayList(SessionInfo) = .empty;
         errdefer {
             for (out.items) |item| item.deinit(self.allocator);
             out.deinit(self.allocator);
@@ -301,7 +303,7 @@ pub const WorkspaceService = struct {
             self.allocator.free(ids);
         }
 
-        var out = std.ArrayList(CleanupEntry){};
+        var out: std.ArrayList(CleanupEntry) = .empty;
         errdefer {
             for (out.items) |item| item.deinit(self.allocator);
             out.deinit(self.allocator);
@@ -316,7 +318,7 @@ pub const WorkspaceService = struct {
         const summary = try self.cleanupReport(provider);
         defer summary.deinit(self.allocator);
 
-        var out = std.ArrayList(CleanupApplyResult){};
+        var out: std.ArrayList(CleanupApplyResult) = .empty;
         defer out.deinit(self.allocator);
         for (summary.entries) |entry| {
             if (entry.cleanup != .remove) continue;
@@ -375,13 +377,13 @@ pub const WorkspaceService = struct {
     }
 
     pub fn attachWithRetry(self: *WorkspaceService, provider: *policy.Provider, id: []const u8, timeout_ms: u64) !AttachedSession {
-        const deadline = std.time.milliTimestamp() + @as(i64, @intCast(timeout_ms));
+        const deadline = monotonicMs() + timeout_ms;
         while (true) {
             return self.attachOnce(provider, id) catch |err| {
-                if (std.time.milliTimestamp() >= deadline) return err;
+                if (monotonicMs() >= deadline) return err;
                 switch (err) {
                     error.ConnectFailed => {
-                        std.Thread.sleep(20 * std.time.ns_per_ms);
+                        _ = c.usleep(20_000);
                         continue;
                     },
                     else => return err,
@@ -405,7 +407,7 @@ pub const WorkspaceService = struct {
 };
 
 fn pathExists(path: []const u8) bool {
-    std.fs.accessAbsolute(path, .{}) catch return false;
+    std.Io.Dir.accessAbsolute(global_io, path, .{}) catch return false;
     return true;
 }
 
@@ -470,4 +472,10 @@ fn freeOwnedStrings(allocator: std.mem.Allocator, items: [][]u8) void {
 
 fn lessThanString(_: void, a: []u8, b: []u8) bool {
     return std.mem.lessThan(u8, a, b);
+}
+
+fn monotonicMs() u64 {
+    var ts: c.timespec = undefined;
+    if (c.clock_gettime(c.CLOCK_MONOTONIC, &ts) != 0) return 0;
+    return @as(u64, @intCast(ts.tv_sec)) * std.time.ms_per_s + @as(u64, @intCast(@divTrunc(ts.tv_nsec, std.time.ns_per_ms)));
 }

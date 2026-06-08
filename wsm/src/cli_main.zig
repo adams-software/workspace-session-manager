@@ -1,4 +1,8 @@
 const std = @import("std");
+const c = @cImport({
+    @cInclude("unistd.h");
+});
+const global_io = std.Io.Threaded.global_single_threaded.io();
 const policy = @import("policy.zig");
 const service_mod = @import("service.zig");
 const argv_parse = @import("argv_parse");
@@ -18,9 +22,14 @@ pub const ToolPaths = struct {
 };
 
 pub fn resolveToolPaths(allocator: std.mem.Allocator) !ToolPaths {
-    const exe_path = try std.fs.selfExePathAlloc(allocator);
+    const exe_path = try allocator.alloc(u8, std.fs.max_path_bytes);
     defer allocator.free(exe_path);
-    const exe_dir = std.fs.path.dirname(exe_path) orelse ".";
+    const exe_len = c.readlink("/proc/self/exe", exe_path.ptr, exe_path.len);
+    if (exe_len < 0) return error.FileNotFound;
+    const exe_path_slice = exe_path[0..@intCast(exe_len)];
+    const exe_dir_owned = try allocator.dupe(u8, std.fs.path.dirname(exe_path_slice) orelse ".");
+    defer allocator.free(exe_dir_owned);
+    const exe_dir = exe_dir_owned;
     const exe_parent = std.fs.path.dirname(exe_dir) orelse exe_dir;
 
     const private_host = try std.fs.path.join(allocator, &.{ exe_parent, "libexec", "wsm", "host" });
@@ -49,15 +58,15 @@ pub fn resolveToolPaths(allocator: std.mem.Allocator) !ToolPaths {
 }
 
 fn resolveToolPath(allocator: std.mem.Allocator, env_name: []const u8, candidates: []const []const u8) ![]u8 {
-    if (std.posix.getenv(env_name)) |override| return try allocator.dupe(u8, override);
+    const env_name_z = try allocator.dupeZ(u8, env_name);
+    defer allocator.free(env_name_z);
+    if (std.c.getenv(env_name_z.ptr)) |override| return try allocator.dupe(u8, std.mem.span(override));
 
     for (candidates) |candidate| {
         if (candidate.len == 0) continue;
-        if (std.fs.path.isAbsolute(candidate)) {
-            std.fs.accessAbsolute(candidate, .{}) catch continue;
-        } else {
-            std.fs.cwd().access(candidate, .{}) catch continue;
-        }
+        const candidate_z = try allocator.dupeZ(u8, candidate);
+        defer allocator.free(candidate_z);
+        if (c.access(candidate_z.ptr, c.X_OK) != 0) continue;
         return try allocator.dupe(u8, candidate);
     }
     return try allocator.dupe(u8, candidates[candidates.len - 1]);
@@ -129,8 +138,8 @@ pub fn parseMode(allocator: std.mem.Allocator, argv: []const []const u8) !Mode {
     return .help;
 }
 
-pub fn printHelp(allocator: std.mem.Allocator, file: std.fs.File, workspace_root: ?[]const u8, current_session: ?[]const u8) !void {
-    try file.writeAll(
+pub fn printHelp(allocator: std.mem.Allocator, writer: anytype, workspace_root: ?[]const u8, current_session: ?[]const u8) !void {
+    try writer.writeAll(
         "wsm - workspace session manager\n\n" ++
             "USAGE\n" ++
             "  wsm <command> [args]\n\n" ++
@@ -157,41 +166,44 @@ pub fn printHelp(allocator: std.mem.Allocator, file: std.fs.File, workspace_root
     if (workspace_root) |root| {
         const line = try std.fmt.allocPrint(allocator, "WORKSPACE: {s}\n", .{root});
         defer allocator.free(line);
-        try file.writeAll(line);
+        try writer.writeAll(line);
     }
     if (current_session) |session| {
         const line = try std.fmt.allocPrint(allocator, "SESSION:   {s}\n", .{session});
         defer allocator.free(line);
-        try file.writeAll(line);
+        try writer.writeAll(line);
     }
 }
 
-pub fn resolveWorkspace(allocator: std.mem.Allocator, argv: []const []const u8) ![]u8 {
+pub fn resolveWorkspace(io: std.Io, allocator: std.mem.Allocator, argv: []const []const u8) ![]u8 {
     const parsed = try argv_parse.parseArgv(allocator, argv);
     defer allocator.free(parsed.options);
     defer allocator.free(parsed.positionals);
     defer if (parsed.literal_tail) |tail| allocator.free(tail);
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
 
     if (argv_parse.findOptionValue(parsed, &.{"workspace"})) |v| {
-        return try std.fs.realpathAlloc(allocator, v);
+        const n = try std.Io.Dir.realPathFile(.cwd(), io, v, &buf);
+        return try allocator.dupe(u8, buf[0..n]);
     }
-    const env_root = std.posix.getenv("WSM_ROOT") orelse return error.MissingWorkspace;
-    return try std.fs.realpathAlloc(allocator, env_root);
+    const env_root = std.c.getenv("WSM_ROOT") orelse return error.MissingWorkspace;
+    const n = try std.Io.Dir.realPathFile(.cwd(), io, std.mem.span(env_root), &buf);
+    return try allocator.dupe(u8, buf[0..n]);
 }
 
 fn presentSummary(allocator: std.mem.Allocator, info: service_mod.SessionInfo) ![]u8 {
-    var parts = std.ArrayList([]const u8){};
+    var parts: std.ArrayList([]const u8) = .empty;
     defer parts.deinit(allocator);
     if (info.data_path_exists) try parts.append(allocator, "data");
     if (info.control_path_exists) try parts.append(allocator, "ctl");
-    std.fs.accessAbsolute(info.log_path, .{}) catch {
+    std.Io.Dir.accessAbsolute(global_io, info.log_path, .{}) catch {
         return try std.mem.join(allocator, ",", parts.items);
     };
     try parts.append(allocator, "log");
     return try std.mem.join(allocator, ",", parts.items);
 }
 
-pub fn runCommand(allocator: std.mem.Allocator, root: []const u8, mode: Mode, stdout_file: std.fs.File) !u8 {
+pub fn runCommand(allocator: std.mem.Allocator, root: []const u8, mode: Mode, writer: anytype) !u8 {
     var provider = try policy.Provider.init(allocator, root, null);
     defer provider.deinit();
     const tool_paths = try resolveToolPaths(allocator);
@@ -200,7 +212,7 @@ pub fn runCommand(allocator: std.mem.Allocator, root: []const u8, mode: Mode, st
 
     switch (mode) {
         .help => {
-            try printHelp(allocator, stdout_file, root, std.posix.getenv("WSM_SESSION_ID"));
+            try printHelp(allocator, writer, root, if (std.c.getenv("WSM_SESSION_ID")) |value| std.mem.span(value) else null);
             return 0;
         },
         .list => {
@@ -212,7 +224,7 @@ pub fn runCommand(allocator: std.mem.Allocator, root: []const u8, mode: Mode, st
             for (ids) |id| {
                 const line = try std.fmt.allocPrint(allocator, "{s}\n", .{id});
                 defer allocator.free(line);
-                try stdout_file.writeAll(line);
+                try writer.writeAll(line);
             }
             return 0;
         },
@@ -228,42 +240,48 @@ pub fn runCommand(allocator: std.mem.Allocator, root: []const u8, mode: Mode, st
             };
             const header = try std.fmt.allocPrint(allocator, "{s:<20} {s:<20} {s}\n", .{ "SESSION", "HEALTH", "PRESENT" });
             defer allocator.free(header);
-            try stdout_file.writeAll(header);
+            try writer.writeAll(header);
             const line = try std.fmt.allocPrint(allocator, "{s:<20} {s:<20} {s}\n", .{ info.session.id, health_label, if (present.len == 0) "-" else present });
             defer allocator.free(line);
-            try stdout_file.writeAll(line);
+            try writer.writeAll(line);
             return 0;
         },
         .log => |maybe_id| {
-            const session_id = maybe_id orelse std.posix.getenv("WSM_SESSION_ID") orelse {
-                try stdout_file.writeAll("log failed: session id required (pass an id or run from inside a session)\n");
+            const session_id = maybe_id orelse if (std.c.getenv("WSM_SESSION_ID")) |value| std.mem.span(value) else null orelse {
+                try writer.writeAll("log failed: session id required (pass an id or run from inside a session)\n");
                 return 1;
             };
             const log_path = try service.logPath(&provider, session_id);
             defer allocator.free(log_path);
-            std.fs.accessAbsolute(log_path, .{}) catch {
+            std.Io.Dir.accessAbsolute(global_io, log_path, .{}) catch {
                 const msg = try std.fmt.allocPrint(allocator, "log failed for {s}: log not found\n", .{session_id});
                 defer allocator.free(msg);
-                try stdout_file.writeAll(msg);
+                try writer.writeAll(msg);
                 return 1;
             };
 
             const argv = [_][]const u8{ tool_paths.logs_viewer_bin, log_path };
-            var child = std.process.Child.init(&argv, allocator);
-            child.stdin_behavior = .Inherit;
-            child.stdout_behavior = .Inherit;
-            child.stderr_behavior = .Inherit;
-            const term = try child.spawnAndWait();
+            var spawn_runtime = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+            defer spawn_runtime.deinit();
+            const spawn_io = spawn_runtime.io();
+            var child = try std.process.spawn(spawn_io, .{
+                .argv = &argv,
+                .stdin = .inherit,
+                .stdout = .inherit,
+                .stderr = .inherit,
+            });
+            defer child.kill(spawn_io);
+            const term = try child.wait(spawn_io);
             return switch (term) {
-                .Exited => |code| code,
-                .Signal => 128,
+                .exited => |code| code,
+                .signal => 128,
                 else => 1,
             };
         },
         .cleanup => |apply| {
             const header = try std.fmt.allocPrint(allocator, "{s:<20} {s:<20} {s:<14} {s}\n", .{ "SESSION", "HEALTH", "PRESENT", "ACTION" });
             defer allocator.free(header);
-            try stdout_file.writeAll(header);
+            try writer.writeAll(header);
 
             if (apply) {
                 const summary = try service.cleanupReport(&provider);
@@ -276,7 +294,7 @@ pub fn runCommand(allocator: std.mem.Allocator, root: []const u8, mode: Mode, st
                     const action = if (entry.cleanup == .remove) "removed" else "kept";
                     const line = try std.fmt.allocPrint(allocator, "{s:<20} {s:<20} {s:<14} {s}\n", .{ entry.info.session.id, @tagName(entry.health), present, action });
                     defer allocator.free(line);
-                    try stdout_file.writeAll(line);
+                    try writer.writeAll(line);
                 }
             } else {
                 const summary = try service.cleanupReport(&provider);
@@ -286,18 +304,18 @@ pub fn runCommand(allocator: std.mem.Allocator, root: []const u8, mode: Mode, st
                     defer allocator.free(present);
                     const line = try std.fmt.allocPrint(allocator, "{s:<20} {s:<20} {s:<14} {s}\n", .{ entry.info.session.id, @tagName(entry.health), present, @tagName(entry.cleanup) });
                     defer allocator.free(line);
-                    try stdout_file.writeAll(line);
+                    try writer.writeAll(line);
                 }
             }
             return 0;
         },
         .create_detached, .create_detached_alias => |id| {
-            const shell = std.posix.getenv("SHELL") orelse "/bin/sh";
+            const shell = if (std.c.getenv("SHELL")) |value| std.mem.span(value) else "/bin/sh";
             const session = try service.create(&provider, id, shell, null, null);
             defer session.deinit(allocator);
             const line = try std.fmt.allocPrint(allocator, "created {s}\n", .{session.id});
             defer allocator.free(line);
-            try stdout_file.writeAll(line);
+            try writer.writeAll(line);
             return 0;
         },
         .kill => |args| {
@@ -307,12 +325,12 @@ pub fn runCommand(allocator: std.mem.Allocator, root: []const u8, mode: Mode, st
                     else => try std.fmt.allocPrint(allocator, "kill failed for {s}: {s}\n", .{ args.id, @errorName(err) }),
                 };
                 defer allocator.free(msg);
-                try stdout_file.writeAll(msg);
+                try writer.writeAll(msg);
                 return 1;
             };
             const line = try std.fmt.allocPrint(allocator, "signaled {s} ({s})\n", .{ args.id, if (args.force) "KILL" else "TERM" });
             defer allocator.free(line);
-            try stdout_file.writeAll(line);
+            try writer.writeAll(line);
             return 0;
         },
         .interactive_attach, .interactive_create_attach => return 2,
