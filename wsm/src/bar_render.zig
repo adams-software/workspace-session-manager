@@ -35,7 +35,7 @@ pub fn buildLine(
             } else if (model.workspace.len > 0) {
                 try buf.appendSlice(allocator, "   ");
             }
-            try buf.appendSlice(allocator, "[a]ttach [c]reate [g]logs [d]etach [x]kill [esc]");
+            try buf.appendSlice(allocator, "[a]ttach [c]reate [g]logs [d]etach [x]force kill [esc]");
         },
         .prompt_attach => {
             try appendHeader(&buf, allocator, model);
@@ -61,7 +61,7 @@ pub fn buildLine(
         .prompt_kill => {
             try appendHeader(&buf, allocator, model);
             if (model.workspace.len > 0) try buf.appendSlice(allocator, "   ");
-            try buf.appendSlice(allocator, "kill current session? [enter]TERM [esc]cancel");
+            try buf.appendSlice(allocator, "force kill current session? [enter]KILL [esc]cancel");
         },
     }
 

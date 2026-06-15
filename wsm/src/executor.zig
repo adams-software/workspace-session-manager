@@ -91,11 +91,11 @@ pub const Executor = struct {
             .kill => blk: {
                 const current_id = self.current_session_id orelse break :blk .{ .err = try self.allocator.dupe(u8, "no current session") };
                 var service = service_mod.WorkspaceService.init(self.allocator, self.host_bin, self.vpty_bin, self.ptylog_bin);
-                service.killSession(provider, current_id, .term) catch |err| {
+                service.killSession(provider, current_id, .kill) catch |err| {
                     break :blk .{ .err = try std.fmt.allocPrint(self.allocator, "kill failed: {s}", .{@errorName(err)}) };
                 };
                 provider.rebuildWorkspaceIndex() catch {};
-                break :blk .{ .info = try self.allocator.dupe(u8, "sent TERM") };
+                break :blk .{ .info = try self.allocator.dupe(u8, "sent KILL") };
             },
             .logs => blk: {
                 break :blk self.viewLogsLocal(provider) catch |err| .{
