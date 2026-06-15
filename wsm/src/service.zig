@@ -351,19 +351,10 @@ pub const WorkspaceService = struct {
     }
 
     pub fn attachState(self: *WorkspaceService, provider: *policy.Provider, id: []const u8) !AttachState {
-        const entry = try self.cleanupEntry(provider, id);
-        defer entry.deinit(self.allocator);
+        const session = try self.sessionRef(provider, id);
+        defer session.deinit(self.allocator);
 
-        switch (entry.health) {
-            .missing_data => return .missing_data,
-            .stale_data_socket => return .stale_data_socket,
-            .stale_control_socket => return .stale_control_socket,
-            .stale_both => return .stale_both,
-            .live => {},
-        }
-
-        if (!try isConnectableSocket(entry.info.session.paths.data_path)) return .data_not_connectable;
-        if (entry.info.control_path_exists and !try isConnectableSocket(entry.info.session.paths.control_path)) return .control_not_connectable;
+        if (!pathExists(session.paths.data_path)) return .missing_data;
         return .ready;
     }
 

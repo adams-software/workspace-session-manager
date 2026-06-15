@@ -68,8 +68,10 @@ pub fn createSession(allocator: std.mem.Allocator, host_bin: []const u8, provide
     defer if (size_arg) |arg| allocator.free(arg);
     const log_path = try std.fmt.allocPrint(allocator, "{s}.log", .{paths.data_path[0 .. paths.data_path.len - 4]});
     defer allocator.free(log_path);
-    const inner_cmd = try std.fmt.allocPrint(allocator, "WSM_SESSION_ID={s} exec {s} -i", .{ spec.id, spec.shell });
-    defer allocator.free(inner_cmd);
+    const session_id_env = try std.fmt.allocPrint(allocator, "WSM_SESSION_ID={s}", .{spec.id});
+    defer allocator.free(session_id_env);
+    const term_env = try std.fmt.allocPrint(allocator, "TERM={s}", .{sessionTerm()});
+    defer allocator.free(term_env);
 
     try appendDetachedHostPrefix(allocator, &argv, host_bin);
     try argv.appendSlice(allocator, &.{
@@ -88,17 +90,22 @@ pub fn createSession(allocator: std.mem.Allocator, host_bin: []const u8, provide
         "--log",
         log_path,
         "--",
-        "/bin/bash",
-        "-lc",
-        inner_cmd,
+        "env",
+        session_id_env,
+        term_env,
+        spec.shell,
+        "-i",
     });
 
     var spawn_runtime = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer spawn_runtime.deinit();
     const spawn_io = spawn_runtime.io();
+    var env_map = try childEnvMap(allocator);
+    defer env_map.deinit();
 
     var child = try std.process.spawn(spawn_io, .{
         .argv = argv.items,
+        .environ_map = &env_map,
         .stdin = .ignore,
         .stdout = .ignore,
         // Detached sessions must not keep the launching terminal as a live stderr
@@ -128,6 +135,27 @@ fn monotonicMs() u64 {
     var ts: c.timespec = undefined;
     if (c.clock_gettime(c.CLOCK_MONOTONIC, &ts) != 0) return 0;
     return @as(u64, @intCast(ts.tv_sec)) * std.time.ms_per_s + @as(u64, @intCast(@divTrunc(ts.tv_nsec, std.time.ns_per_ms)));
+}
+
+fn sessionTerm() []const u8 {
+    const raw = std.c.getenv("TERM") orelse return "xterm-256color";
+    const term = std.mem.span(raw);
+    if (term.len == 0 or std.mem.eql(u8, term, "dumb")) return "xterm-256color";
+    return term;
+}
+
+fn childEnvMap(allocator: std.mem.Allocator) !std.process.Environ.Map {
+    var env_map = std.process.Environ.Map.init(allocator);
+    errdefer env_map.deinit();
+
+    var i: usize = 0;
+    while (std.c.environ[i]) |entry| : (i += 1) {
+        const raw = std.mem.span(entry);
+        const eq = std.mem.indexOfScalar(u8, raw, '=') orelse continue;
+        try env_map.put(raw[0..eq], raw[(eq + 1)..]);
+    }
+
+    return env_map;
 }
 
 fn appendDetachedHostPrefix(allocator: std.mem.Allocator, argv: *std.ArrayList([]const u8), host_bin: []const u8) !void {

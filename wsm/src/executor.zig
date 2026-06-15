@@ -272,10 +272,6 @@ pub const Executor = struct {
         errdefer result.attached.deinit();
         defer result.session.deinit(self.allocator);
 
-        try result.attached.resize(size.?.cols, size.?.rows);
-        const sync = try result.attached.pumpOutput(writer_fd.?);
-        if (sync.stream_lost) return error.AttachLostImmediately;
-
         try self.enterAttached(result.attached, result.session.id);
         result.attached = undefined;
         return try self.allocator.dupe(u8, result.session.id);
