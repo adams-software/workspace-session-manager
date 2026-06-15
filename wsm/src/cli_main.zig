@@ -286,16 +286,19 @@ pub fn runCommand(allocator: std.mem.Allocator, root: []const u8, mode: Mode, wr
             if (apply) {
                 const summary = try service.cleanupReport(&provider);
                 defer summary.deinit(allocator);
+                var applied_any = false;
                 for (summary.entries) |entry| {
                     const present = try presentSummary(allocator, entry.info);
                     defer allocator.free(present);
                     const apply_result = service.applyCleanupEntry(entry);
                     defer apply_result.deinit(allocator);
                     const action = if (entry.cleanup == .remove) "removed" else "kept";
+                    if (entry.cleanup == .remove) applied_any = true;
                     const line = try std.fmt.allocPrint(allocator, "{s:<20} {s:<20} {s:<14} {s}\n", .{ entry.info.session.id, @tagName(entry.health), present, action });
                     defer allocator.free(line);
                     try writer.writeAll(line);
                 }
+                if (applied_any) provider.rebuildWorkspaceIndex() catch {};
             } else {
                 const summary = try service.cleanupReport(&provider);
                 defer summary.deinit(allocator);
@@ -313,6 +316,7 @@ pub fn runCommand(allocator: std.mem.Allocator, root: []const u8, mode: Mode, wr
             const shell = if (std.c.getenv("SHELL")) |value| std.mem.span(value) else "/bin/sh";
             const session = try service.create(&provider, id, shell, null, null);
             defer session.deinit(allocator);
+            provider.rebuildWorkspaceIndex() catch {};
             const line = try std.fmt.allocPrint(allocator, "created {s}\n", .{session.id});
             defer allocator.free(line);
             try writer.writeAll(line);
@@ -328,6 +332,7 @@ pub fn runCommand(allocator: std.mem.Allocator, root: []const u8, mode: Mode, wr
                 try writer.writeAll(msg);
                 return 1;
             };
+            provider.rebuildWorkspaceIndex() catch {};
             const line = try std.fmt.allocPrint(allocator, "signaled {s} ({s})\n", .{ args.id, if (args.force) "KILL" else "TERM" });
             defer allocator.free(line);
             try writer.writeAll(line);

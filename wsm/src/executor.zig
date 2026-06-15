@@ -94,6 +94,7 @@ pub const Executor = struct {
                 service.killSession(provider, current_id, .term) catch |err| {
                     break :blk .{ .err = try std.fmt.allocPrint(self.allocator, "kill failed: {s}", .{@errorName(err)}) };
                 };
+                provider.rebuildWorkspaceIndex() catch {};
                 break :blk .{ .info = try self.allocator.dupe(u8, "sent TERM") };
             },
             .logs => blk: {
@@ -144,6 +145,7 @@ pub const Executor = struct {
                     error.Empty, error.StartsWithSlash, error.EndsWithSlash, error.EmptySegment, error.DotSegment, error.InvalidChar => break :blk .{ .err = try std.fmt.allocPrint(self.allocator, "invalid id: {s}", .{@errorName(err)}) },
                     else => break :blk .{ .err = try std.fmt.allocPrint(self.allocator, "created but attach failed: {s}", .{@errorName(err)}) },
                 };
+                provider.rebuildWorkspaceIndex() catch {};
                 try self.enterAttached(result.attached, result.session.id);
                 defer result.session.deinit(self.allocator);
                 break :blk .{ .attached = try self.allocator.dupe(u8, result.session.id) };

@@ -7,6 +7,62 @@ pub const Error = error{
     AmbiguousTarget,
 };
 
+fn freeOwnedStrings(allocator: std.mem.Allocator, items: [][]u8) void {
+    for (items) |item| allocator.free(item);
+}
+
+const WorkspaceIndex = struct {
+    allocator: std.mem.Allocator,
+    ids: [][]u8,
+    id_set: std.StringHashMap(void),
+    children_by_parent: std.StringHashMap(std.ArrayList([]u8)),
+
+    fn build(allocator: std.mem.Allocator, root: []const u8) !WorkspaceIndex {
+        const ids = try scanSessionIds(allocator, root);
+        errdefer {
+            freeOwnedStrings(allocator, ids);
+            allocator.free(ids);
+        }
+
+        var id_set = std.StringHashMap(void).init(allocator);
+        errdefer id_set.deinit();
+
+        var children_by_parent = std.StringHashMap(std.ArrayList([]u8)).init(allocator);
+        errdefer deinitChildrenByParent(allocator, &children_by_parent);
+
+        for (ids) |id| {
+            try id_set.put(id, {});
+            const parent = parentId(id) orelse "";
+            const gop = try children_by_parent.getOrPut(parent);
+            if (!gop.found_existing) gop.value_ptr.* = .empty;
+            try gop.value_ptr.append(allocator, id);
+        }
+
+        return .{
+            .allocator = allocator,
+            .ids = ids,
+            .id_set = id_set,
+            .children_by_parent = children_by_parent,
+        };
+    }
+
+    pub fn deinit(self: *WorkspaceIndex) void {
+        freeOwnedStrings(self.allocator, self.ids);
+        self.allocator.free(self.ids);
+        self.id_set.deinit();
+        deinitChildrenByParent(self.allocator, &self.children_by_parent);
+    }
+
+    fn hasId(self: *const WorkspaceIndex, id: []const u8) bool {
+        return self.id_set.contains(id);
+    }
+
+    fn children(self: *const WorkspaceIndex, parent: []const u8) ?[]const []u8 {
+        if (self.children_by_parent.getPtr(parent)) |list| return list.items;
+        return null;
+    }
+};
+
 pub const ResolvedAction = union(enum) {
     quit,
     detach,
@@ -21,6 +77,7 @@ pub const Provider = struct {
     allocator: std.mem.Allocator,
     root: []u8,
     current_session: []u8,
+    workspace_index: ?WorkspaceIndex,
     passive_label_buf: std.ArrayList(u8),
     active_summary: std.ArrayList(u8),
     attach_candidates: []ui_state.Candidate,
@@ -41,6 +98,7 @@ pub const Provider = struct {
             .allocator = allocator,
             .root = try allocator.dupe(u8, root),
             .current_session = try allocator.dupe(u8, current_session orelse ""),
+            .workspace_index = null,
             .passive_label_buf = .empty,
             .active_summary = .empty,
             .attach_candidates = &.{},
@@ -50,6 +108,7 @@ pub const Provider = struct {
     pub fn deinit(self: *Provider) void {
         self.allocator.free(self.root);
         self.allocator.free(self.current_session);
+        if (self.workspace_index) |*index| index.deinit();
         self.passive_label_buf.deinit(self.allocator);
         self.active_summary.deinit(self.allocator);
         freeCandidates(self.allocator, self.attach_candidates);
@@ -58,6 +117,18 @@ pub const Provider = struct {
     pub fn setCurrentSession(self: *Provider, current_session: ?[]const u8) !void {
         self.allocator.free(self.current_session);
         self.current_session = try self.allocator.dupe(u8, current_session orelse "");
+    }
+
+    pub fn rebuildWorkspaceIndex(self: *Provider) !void {
+        var new_index = try WorkspaceIndex.build(self.allocator, self.root);
+        errdefer new_index.deinit();
+
+        if (self.workspace_index) |*index| index.deinit();
+        self.workspace_index = new_index;
+    }
+
+    fn ensureWorkspaceIndex(self: *Provider) !void {
+        if (self.workspace_index == null) try self.rebuildWorkspaceIndex();
     }
 
     pub fn externalContext(self: *const Provider) ui_state.ExternalContext {
@@ -79,6 +150,8 @@ pub const Provider = struct {
     }
 
     pub fn refresh(self: *Provider) !void {
+        try self.ensureWorkspaceIndex();
+
         self.passive_label_buf.clearRetainingCapacity();
         var next_active_summary: std.ArrayList(u8) = .empty;
         defer next_active_summary.deinit(self.allocator);
@@ -141,6 +214,7 @@ pub const Provider = struct {
     }
 
     pub fn refreshAttachCandidates(self: *Provider, query: []const u8) !void {
+        try self.ensureWorkspaceIndex();
         freeCandidates(self.allocator, self.attach_candidates);
         self.attach_candidates = &.{};
         self.attach_candidates = try self.queryCandidates(query);
@@ -173,44 +247,43 @@ pub const Provider = struct {
     }
 
     pub fn resolveNavTarget(self: *Provider, op: NavOp) !?[]u8 {
+        try self.ensureWorkspaceIndex();
         if (self.current_session.len == 0) return null;
-        const current_dir = currentNodeDir(self.current_session);
+        const index = self.workspace_index.?;
         switch (op) {
             .prev, .next => {
-                const names = try self.dirSessionNames(current_dir);
-                defer self.freeStringSlice(names);
+                const current_dir = currentNodeDir(self.current_session);
+                const names = index.children(current_dir) orelse return null;
                 if (names.len <= 1) return null;
-                const current_name = basename(self.current_session);
                 for (names, 0..) |name, i| {
-                    if (std.mem.eql(u8, name, current_name)) {
+                    if (std.mem.eql(u8, name, self.current_session)) {
                         const idx = switch (op) {
                             .prev => if (i > 0) i - 1 else names.len - 1,
                             .next => if (i + 1 < names.len) i + 1 else 0,
                             else => unreachable,
                         };
-                        if (std.mem.eql(u8, names[idx], current_name)) return null;
-                        return try self.joinCanonical(current_dir, names[idx]);
+                        if (std.mem.eql(u8, names[idx], self.current_session)) return null;
+                        return try self.allocator.dupe(u8, names[idx]);
                     }
                 }
                 return null;
             },
             .in => {
-                const children = try self.directChildIds();
-                defer self.freeStringSlice(children);
+                const children = index.children(self.current_session) orelse return null;
                 if (children.len == 0) return null;
                 return try self.allocator.dupe(u8, children[0]);
             },
             .out => {
                 const parent = parentId(self.current_session) orelse return null;
-                if (!try self.existsCanonical(parent)) return null;
+                if (!index.hasId(parent)) return null;
                 return try self.allocator.dupe(u8, parent);
             },
         }
     }
 
     pub fn resolveQuery(self: *Provider, query: []const u8) !?[]u8 {
-        const ids = try self.listIds();
-        defer self.freeStringSlice(ids);
+        try self.ensureWorkspaceIndex();
+        const ids = self.workspace_index.?.ids;
         if (ids.len == 0) return null;
 
         for (ids) |id| {
@@ -229,44 +302,9 @@ pub const Provider = struct {
         return null;
     }
 
-    fn listIds(self: *Provider) ![][]u8 {
-        var out: std.ArrayList([]u8) = .empty;
-        errdefer self.freeOwnedStrings(out.items);
-        var stack: std.ArrayList([]u8) = .empty;
-        defer {
-            for (stack.items) |item| self.allocator.free(item);
-            stack.deinit(self.allocator);
-        }
-        try stack.append(self.allocator, try self.allocator.dupe(u8, self.root));
-
-        while (stack.items.len > 0) {
-            const dir_path = stack.pop().?;
-            defer self.allocator.free(dir_path);
-            var dir = try std.Io.Dir.openDirAbsolute(global_io, dir_path, .{ .iterate = true });
-            defer dir.close(global_io);
-            var iter = dir.iterate();
-            while (try iter.next(global_io)) |entry| {
-                const joined = try std.fs.path.join(self.allocator, &.{ dir_path, entry.name });
-                switch (entry.kind) {
-                    .directory => try stack.append(self.allocator, joined),
-                    .file, .unix_domain_socket => {
-                        if (std.mem.endsWith(u8, entry.name, ".wsm")) {
-                            if (try self.canonicalIdForSock(joined)) |id| try out.append(self.allocator, id);
-                            self.allocator.free(joined);
-                        } else self.allocator.free(joined);
-                    },
-                    else => self.allocator.free(joined),
-                }
-            }
-        }
-
-        std.mem.sort([]u8, out.items, {}, lessThanString);
-        return try out.toOwnedSlice(self.allocator);
-    }
-
     fn queryCandidates(self: *Provider, query: []const u8) ![]ui_state.Candidate {
-        const ids = try self.listIds();
-        defer self.freeStringSlice(ids);
+        try self.ensureWorkspaceIndex();
+        const ids = self.workspace_index.?.ids;
         var out: std.ArrayList(ui_state.Candidate) = .empty;
         errdefer freeCandidates(self.allocator, out.items);
         for (ids) |id| {
@@ -279,80 +317,61 @@ pub const Provider = struct {
         }
         return try out.toOwnedSlice(self.allocator);
     }
+};
 
-    fn existsCanonical(self: *Provider, id: []const u8) !bool {
-        const sock = try self.sockForCanonical(id);
-        defer self.allocator.free(sock);
-        std.Io.Dir.accessAbsolute(global_io, sock, .{}) catch return false;
-        return true;
+fn scanSessionIds(allocator: std.mem.Allocator, root: []const u8) ![][]u8 {
+    var out: std.ArrayList([]u8) = .empty;
+    errdefer {
+        freeOwnedStrings(allocator, out.items);
+        out.deinit(allocator);
     }
-
-    fn directChildIds(self: *Provider) ![][]u8 {
-        const ids = try self.listIds();
-        errdefer self.freeStringSlice(ids);
-        const prefix = try std.fmt.allocPrint(self.allocator, "{s}/", .{self.current_session});
-        defer self.allocator.free(prefix);
-        var out: std.ArrayList([]u8) = .empty;
-        errdefer self.freeOwnedStrings(out.items);
-        for (ids) |id| {
-            if (!std.mem.startsWith(u8, id, prefix)) continue;
-            const rest = id[prefix.len..];
-            if (rest.len == 0) continue;
-            if (std.mem.indexOfScalar(u8, rest, '/')) |_| continue;
-            try out.append(self.allocator, try self.allocator.dupe(u8, id));
-        }
-        self.freeStringSlice(ids);
-        std.mem.sort([]u8, out.items, {}, lessThanString);
-        return try out.toOwnedSlice(self.allocator);
+    var stack: std.ArrayList([]u8) = .empty;
+    defer {
+        for (stack.items) |item| allocator.free(item);
+        stack.deinit(allocator);
     }
+    try stack.append(allocator, try allocator.dupe(u8, root));
 
-    fn dirSessionNames(self: *Provider, dir_id: []const u8) ![][]u8 {
-        const base_dir = if (dir_id.len == 0)
-            try self.allocator.dupe(u8, self.root)
-        else
-            try std.fs.path.join(self.allocator, &.{ self.root, dir_id });
-        defer self.allocator.free(base_dir);
-
-        var dir = try std.Io.Dir.openDirAbsolute(global_io, base_dir, .{ .iterate = true });
+    while (stack.items.len > 0) {
+        const dir_path = stack.pop().?;
+        defer allocator.free(dir_path);
+        var dir = try std.Io.Dir.openDirAbsolute(global_io, dir_path, .{ .iterate = true });
         defer dir.close(global_io);
         var iter = dir.iterate();
-        var out: std.ArrayList([]u8) = .empty;
-        errdefer self.freeOwnedStrings(out.items);
         while (try iter.next(global_io)) |entry| {
-            if (entry.kind != .file and entry.kind != .unix_domain_socket) continue;
-            if (!std.mem.endsWith(u8, entry.name, ".wsm")) continue;
-            try out.append(self.allocator, try self.allocator.dupe(u8, entry.name[0 .. entry.name.len - 4]));
+            const joined = try std.fs.path.join(allocator, &.{ dir_path, entry.name });
+            switch (entry.kind) {
+                .directory => try stack.append(allocator, joined),
+                .file, .unix_domain_socket => {
+                    if (std.mem.endsWith(u8, entry.name, ".wsm")) {
+                        if (try canonicalIdForSock(allocator, root, joined)) |id| try out.append(allocator, id);
+                        allocator.free(joined);
+                    } else allocator.free(joined);
+                },
+                else => allocator.free(joined),
+            }
         }
-        std.mem.sort([]u8, out.items, {}, lessThanString);
-        return try out.toOwnedSlice(self.allocator);
     }
 
-    fn canonicalIdForSock(self: *Provider, sock: []const u8) !?[]u8 {
-        if (!std.mem.startsWith(u8, sock, self.root)) return null;
-        var rel = sock[self.root.len..];
-        if (rel.len > 0 and rel[0] == std.fs.path.sep) rel = rel[1..];
-        if (!std.mem.endsWith(u8, rel, ".wsm")) return null;
-        return try self.allocator.dupe(u8, rel[0 .. rel.len - 4]);
-    }
+    std.mem.sort([]u8, out.items, {}, lessThanString);
+    return try out.toOwnedSlice(allocator);
+}
 
-    fn sockForCanonical(self: *Provider, id: []const u8) ![]u8 {
-        return canonical.socketPath(self.allocator, self.root, id);
+fn deinitChildrenByParent(allocator: std.mem.Allocator, map: *std.StringHashMap(std.ArrayList([]u8))) void {
+    var it = map.iterator();
+    while (it.next()) |entry| {
+        entry.value_ptr.deinit(allocator);
     }
+    map.deinit();
+}
 
-    fn joinCanonical(self: *Provider, dir_id: []const u8, leaf: []const u8) ![]u8 {
-        if (dir_id.len == 0) return try self.allocator.dupe(u8, leaf);
-        return try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ dir_id, leaf });
-    }
-
-    fn freeStringSlice(self: *Provider, items: [][]u8) void {
-        self.freeOwnedStrings(items);
-        self.allocator.free(items);
-    }
-
-    fn freeOwnedStrings(self: *Provider, items: [][]u8) void {
-        for (items) |item| self.allocator.free(item);
-    }
-};
+fn canonicalIdForSock(allocator: std.mem.Allocator, root: []const u8, sock: []const u8) !?[]u8 {
+    if (!std.mem.startsWith(u8, sock, root)) return null;
+    var rel = sock[root.len..];
+    if (rel.len > 0 and rel[0] == std.fs.path.sep) rel = rel[1..];
+    if (!std.mem.endsWith(u8, rel, ".wsm")) return null;
+    return try allocator.dupe(u8, rel[0 .. rel.len - 4]);
+}
 
 fn appendTag(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, prefix: []const u8, value: []const u8) !void {
     if (buf.items.len > 0) try buf.appendSlice(allocator, " ");
