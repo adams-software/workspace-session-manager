@@ -166,7 +166,7 @@ pub const State = struct {
     fn handleActiveMenu(self: *State, ctx: ExternalContext, key: Key) StepResult {
         _ = ctx;
         return switch (key) {
-            .esc, .ctrl_g => blk: {
+            .esc, .ctrl_g, .enter => blk: {
                 self.mode = .passive;
                 self.notice_kind = .none;
                 self.notice_text.clearRetainingCapacity();
@@ -195,7 +195,6 @@ pub const State = struct {
                 'h' => .{ .rerender = true, .action = .prev },
                 'j' => .{ .rerender = true, .action = .in },
                 'k' => .{ .rerender = true, .action = .out },
-                'n' => .{ .rerender = true, .action = .next },
                 'l' => .{ .rerender = true, .action = .next },
                 'g' => .{ .rerender = true, .action = .logs },
                 else => .{},
@@ -482,4 +481,14 @@ test "active menu b triggers back action" {
     const result = state.handleKey(.{}, .{ .printable = 'b' });
     try std.testing.expect(result.action != null);
     try std.testing.expectEqual(Action.back, result.action.?);
+}
+
+test "enter exits active menu" {
+    var state = State.init(std.testing.allocator);
+    defer state.deinit();
+    state.mode = .active_menu;
+
+    const result = state.handleKey(.{}, .enter);
+    try std.testing.expect(result.rerender);
+    try std.testing.expectEqual(Mode.passive, state.mode);
 }

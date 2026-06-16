@@ -35,7 +35,7 @@ pub fn buildLine(
             } else if (model.workspace.len > 0) {
                 try buf.appendSlice(allocator, "   ");
             }
-            try buf.appendSlice(allocator, "[a]ttach [c]reate [g]logs [b]ack [d]etach [x]force kill [esc]");
+            try buf.appendSlice(allocator, "[a]ttach [c]reate [g]logs [b]ack [d]etach [x]force kill [enter/esc]");
         },
         .prompt_attach => {
             try appendHeader(&buf, allocator, model);
