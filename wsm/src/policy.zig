@@ -295,7 +295,7 @@ pub const Provider = struct {
         var matches: std.ArrayList([]u8) = .empty;
         defer matches.deinit(self.allocator);
         for (ids) |id| {
-            if (std.mem.eql(u8, basename(id), query)) {
+            if (matchesQuery(id, query)) {
                 try matches.append(self.allocator, id);
             }
         }
@@ -310,7 +310,7 @@ pub const Provider = struct {
         var out: std.ArrayList(ui_state.Candidate) = .empty;
         errdefer freeCandidates(self.allocator, out.items);
         for (ids) |id| {
-            if (query.len != 0 and std.mem.indexOf(u8, id, query) == null and std.mem.indexOf(u8, basename(id), query) == null) continue;
+            if (query.len != 0 and !matchesQuery(id, query)) continue;
             const owned = try self.allocator.dupe(u8, id);
             try out.append(self.allocator, .{
                 .label = owned,
@@ -411,6 +411,10 @@ fn lessThanString(_: void, a: []u8, b: []u8) bool {
     return std.mem.lessThan(u8, a, b);
 }
 
+fn matchesQuery(id: []const u8, query: []const u8) bool {
+    return std.mem.startsWith(u8, id, query) or std.mem.startsWith(u8, basename(id), query);
+}
+
 pub fn freeCandidates(allocator: std.mem.Allocator, items: []ui_state.Candidate) void {
     if (items.len == 0) return;
     for (items) |item| {
@@ -418,4 +422,66 @@ pub fn freeCandidates(allocator: std.mem.Allocator, items: []ui_state.Candidate)
         if (item.value.ptr != item.label.ptr) allocator.free(item.value);
     }
     allocator.free(items);
+}
+
+test "prefix query matches candidates from the front only" {
+    const allocator = std.testing.allocator;
+    var provider = try Provider.init(allocator, "/tmp/workspace", null);
+    defer provider.deinit();
+    provider.workspace_index = WorkspaceIndex{
+        .allocator = allocator,
+        .ids = try allocator.dupe([]u8, &.{
+            try allocator.dupe(u8, "cats"),
+            try allocator.dupe(u8, "stocks"),
+            try allocator.dupe(u8, "science"),
+        }),
+        .id_set = std.StringHashMap(void).init(allocator),
+        .children_by_parent = std.StringHashMap(std.ArrayList([]u8)).init(allocator),
+    };
+    defer {
+        const idx = provider.workspace_index.?;
+        for (idx.ids) |id| allocator.free(id);
+        allocator.free(idx.ids);
+        provider.workspace_index.?.id_set.deinit();
+        deinitChildrenByParent(allocator, &provider.workspace_index.?.children_by_parent);
+        provider.workspace_index = null;
+    }
+    for (provider.workspace_index.?.ids) |id| try provider.workspace_index.?.id_set.put(id, {});
+
+    const candidates = try provider.queryCandidates("s");
+    defer freeCandidates(allocator, candidates);
+
+    try std.testing.expectEqual(@as(usize, 2), candidates.len);
+    for (candidates) |candidate| {
+        try std.testing.expect(std.mem.startsWith(u8, candidate.value, "s"));
+    }
+}
+
+test "prefix resolve uses unique front match" {
+    const allocator = std.testing.allocator;
+    var provider = try Provider.init(allocator, "/tmp/workspace", null);
+    defer provider.deinit();
+    provider.workspace_index = WorkspaceIndex{
+        .allocator = allocator,
+        .ids = try allocator.dupe([]u8, &.{
+            try allocator.dupe(u8, "cats"),
+            try allocator.dupe(u8, "stocks"),
+        }),
+        .id_set = std.StringHashMap(void).init(allocator),
+        .children_by_parent = std.StringHashMap(std.ArrayList([]u8)).init(allocator),
+    };
+    defer {
+        const idx = provider.workspace_index.?;
+        for (idx.ids) |id| allocator.free(id);
+        allocator.free(idx.ids);
+        provider.workspace_index.?.id_set.deinit();
+        deinitChildrenByParent(allocator, &provider.workspace_index.?.children_by_parent);
+        provider.workspace_index = null;
+    }
+    for (provider.workspace_index.?.ids) |id| try provider.workspace_index.?.id_set.put(id, {});
+
+    const resolved = try provider.resolveQuery("st");
+    defer if (resolved) |id| allocator.free(id);
+    try std.testing.expect(resolved != null);
+    try std.testing.expectEqualStrings("stocks", resolved.?);
 }
