@@ -375,6 +375,7 @@ const App = struct {
             .info => |msg| {
                 defer self.allocator.free(msg);
                 debugLog("wsm pump info len={d} attached={}\n", .{ msg.len, self.executor.isInteractiveAttached() });
+                try self.render();
             },
             else => {},
         }
