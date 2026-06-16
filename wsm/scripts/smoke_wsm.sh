@@ -67,6 +67,23 @@ LOG_OUT="$(WSM_ROOT="$TMP" WSM_LOGS_VIEWER_BIN="$LOG_VIEWER_SHIM" "$WSM_BIN" log
 printf '%s\n' "$LOG_OUT"
 printf '%s\n' "$LOG_OUT" | grep -q 'hello from log'
 
+printf '=== wsm log viewer forces utf-8 for less ===\n'
+LESS_SHIM_DIR="$TMP/less-shim"
+mkdir -p "$LESS_SHIM_DIR"
+cat > "$LESS_SHIM_DIR/less" <<'EOS'
+#!/bin/sh
+printf 'TERM=%s\n' "${TERM:-}"
+printf 'LESSCHARSET=%s\n' "${LESSCHARSET:-}"
+printf 'ARGS:%s\n' "$*"
+exit 0
+EOS
+chmod +x "$LESS_SHIM_DIR/less"
+VIEWER_OUT="$(TERM=dumb PATH="$LESS_SHIM_DIR:$PATH" "$REPO_ROOT/wsm/scripts/wsm_logs_viewer" "$TMP/demo.log" 2>&1 || true)"
+printf '%s\n' "$VIEWER_OUT"
+printf '%s\n' "$VIEWER_OUT" | grep -q 'TERM=xterm-256color'
+printf '%s\n' "$VIEWER_OUT" | grep -q 'LESSCHARSET=utf-8'
+printf '%s\n' "$VIEWER_OUT" | grep -q "ARGS:+G -R -X $TMP/demo.log"
+
 printf '=== wsm kill ===\n'
 KILL_OUT="$(WSM_ROOT="$TMP" "$WSM_BIN" kill demo)"
 printf '%s\n' "$KILL_OUT"
