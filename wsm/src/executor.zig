@@ -53,6 +53,7 @@ pub const Executor = struct {
     link: ?service_mod.AttachedSession,
     interactive_attached: bool,
     current_session_id: ?[]u8,
+    previous_session_id: ?[]u8,
 
     pub fn init(allocator: std.mem.Allocator, root: []const u8) !Executor {
         const tool_paths = try cli_main.resolveToolPaths(allocator);
@@ -67,6 +68,7 @@ pub const Executor = struct {
             .link = null,
             .interactive_attached = false,
             .current_session_id = null,
+            .previous_session_id = null,
         };
     }
 
@@ -78,6 +80,7 @@ pub const Executor = struct {
         self.allocator.free(self.ptylog_bin);
         self.allocator.free(self.logs_viewer_bin);
         if (self.current_session_id) |id| self.allocator.free(id);
+        if (self.previous_session_id) |id| self.allocator.free(id);
     }
 
     pub fn run(self: *Executor, provider: *policy.Provider, action: policy.ResolvedAction) !Result {
@@ -88,6 +91,20 @@ pub const Executor = struct {
         return switch (action) {
             .quit => .detached,
             .detach => self.runDetach() catch |err| .{ .err = try std.fmt.allocPrint(self.allocator, "detach failed: {s}", .{@errorName(err)}) },
+            .back => blk: {
+                const previous_id = self.previous_session_id orelse break :blk .{ .err = try self.allocator.dupe(u8, "no previous session") };
+                if (self.current_session_id) |current_id| {
+                    if (std.mem.eql(u8, current_id, previous_id)) {
+                        break :blk .{ .err = try self.allocator.dupe(u8, "no previous session") };
+                    }
+                }
+                const attached_id = self.attachCanonicalVerified(provider, previous_id, writer_fd, size) catch |err| {
+                    break :blk .{ .err = try std.fmt.allocPrint(self.allocator, "back failed: {s}", .{@errorName(err)}) };
+                };
+                defer self.allocator.free(attached_id);
+                self.interactive_attached = true;
+                break :blk .{ .attached = try self.allocator.dupe(u8, attached_id) };
+            },
             .kill => blk: {
                 const current_id = self.current_session_id orelse break :blk .{ .err = try self.allocator.dupe(u8, "no current session") };
                 var service = service_mod.WorkspaceService.init(self.allocator, self.host_bin, self.vpty_bin, self.ptylog_bin);
@@ -287,7 +304,16 @@ pub const Executor = struct {
     }
 
     fn setCurrentSession(self: *Executor, id: []const u8) !void {
-        if (self.current_session_id) |current| self.allocator.free(current);
+        if (self.current_session_id) |current| {
+            if (std.mem.eql(u8, current, id)) return;
+            const next_current = try self.allocator.dupe(u8, id);
+            const previous_copy = try self.allocator.dupe(u8, current);
+            if (self.previous_session_id) |old_previous| self.allocator.free(old_previous);
+            self.previous_session_id = previous_copy;
+            self.allocator.free(current);
+            self.current_session_id = next_current;
+            return;
+        }
         self.current_session_id = try self.allocator.dupe(u8, id);
     }
 };

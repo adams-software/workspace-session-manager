@@ -66,6 +66,7 @@ const WorkspaceIndex = struct {
 pub const ResolvedAction = union(enum) {
     quit,
     detach,
+    back,
     logs,
     kill,
     nav: []u8,
@@ -224,6 +225,7 @@ pub const Provider = struct {
         return switch (action) {
             .quit => .quit,
             .detach => .detach,
+            .back => .back,
             .logs => .logs,
             .kill => .kill,
             .prev => .{ .nav = (try self.resolveNavTarget(.prev)) orelse try self.allocator.dupe(u8, "") },

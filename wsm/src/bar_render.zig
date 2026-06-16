@@ -35,7 +35,7 @@ pub fn buildLine(
             } else if (model.workspace.len > 0) {
                 try buf.appendSlice(allocator, "   ");
             }
-            try buf.appendSlice(allocator, "[a]ttach [c]reate [g]logs [d]etach [x]force kill [esc]");
+            try buf.appendSlice(allocator, "[a]ttach [c]reate [g]logs [b]ack [d]etach [x]force kill [esc]");
         },
         .prompt_attach => {
             try appendHeader(&buf, allocator, model);
@@ -83,4 +83,15 @@ test "buildLine renders passive text and menu hint" {
     defer std.testing.allocator.free(line);
 
     try std.testing.expectEqualStrings("backend   ^g menu   ", line);
+}
+
+test "buildLine includes back hint in active menu" {
+    var state = ui_state.State.init(std.testing.allocator);
+    defer state.deinit();
+    state.mode = .active_menu;
+
+    const line = try buildLine(std.testing.allocator, &state, .{ .workspace = "", .session = "", .passive_label = "", .active_summary = "", .attach_candidates = &.{}, .detached = false }, 80);
+    defer std.testing.allocator.free(line);
+
+    try std.testing.expect(std.mem.indexOf(u8, line, "[b]ack") != null);
 }

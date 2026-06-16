@@ -56,6 +56,7 @@ pub const Key = union(enum) {
 pub const Action = union(enum) {
     quit,
     detach,
+    back,
     prev,
     next,
     in,
@@ -178,6 +179,7 @@ pub const State = struct {
             .up => .{ .rerender = true, .action = .out },
             .printable => |ch| switch (ch) {
                 'd' => .{ .rerender = true, .action = .detach },
+                'b' => .{ .rerender = true, .action = .back },
                 'a' => blk: {
                     self.enterPrompt(.prompt_attach);
                     break :blk .{ .rerender = true };
@@ -470,4 +472,14 @@ test "escaping attach prompt clears prompt-local notice" {
     try std.testing.expectEqual(Mode.active_menu, state.mode);
     try std.testing.expectEqual(InlineNoticeKind.none, state.notice_kind);
     try std.testing.expectEqualStrings("", state.notice());
+}
+
+test "active menu b triggers back action" {
+    var state = State.init(std.testing.allocator);
+    defer state.deinit();
+    state.mode = .active_menu;
+
+    const result = state.handleKey(.{}, .{ .printable = 'b' });
+    try std.testing.expect(result.action != null);
+    try std.testing.expectEqual(Action.back, result.action.?);
 }
