@@ -151,7 +151,7 @@ pub const Provider = struct {
     }
 
     pub fn refresh(self: *Provider) !void {
-        try self.ensureWorkspaceIndex();
+        try self.rebuildWorkspaceIndex();
 
         self.passive_label_buf.clearRetainingCapacity();
         var next_active_summary: std.ArrayList(u8) = .empty;
@@ -484,4 +484,36 @@ test "prefix resolve uses unique front match" {
     defer if (resolved) |id| allocator.free(id);
     try std.testing.expect(resolved != null);
     try std.testing.expectEqualStrings("stocks", resolved.?);
+}
+
+test "refresh rebuilds the workspace index after new sessions appear" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.createDirPath(global_io, "workspace");
+
+    var rel_buf: [128]u8 = undefined;
+    const rel = try std.fmt.bufPrint(&rel_buf, ".zig-cache/tmp/{s}/workspace", .{tmp.sub_path[0..]});
+
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try std.Io.Dir.realPathFile(.cwd(), global_io, rel, &root_buf);
+    const root = root_buf[0..root_len];
+
+    var provider = try Provider.init(allocator, root, null);
+    defer provider.deinit();
+
+    try provider.refresh();
+    try std.testing.expectEqual(null, try provider.resolveQuery("proj"));
+
+    try tmp.dir.createDirPath(global_io, "workspace/proj");
+    var session_file = try tmp.dir.createFile(global_io, "workspace/proj/session.wsm", .{ .truncate = true });
+    session_file.close(global_io);
+
+    try provider.refresh();
+
+    const resolved = try provider.resolveQuery("proj");
+    defer if (resolved) |id| allocator.free(id);
+    try std.testing.expect(resolved != null);
+    try std.testing.expectEqualStrings("proj/session", resolved.?);
 }

@@ -210,6 +210,7 @@ pub const Executor = struct {
             error.Empty, error.StartsWithSlash, error.EndsWithSlash, error.EmptySegment, error.DotSegment, error.InvalidChar => return .{ .err = try std.fmt.allocPrint(self.allocator, "invalid id: {s}", .{@errorName(err)}) },
             else => return .{ .err = try std.fmt.allocPrint(self.allocator, "created but attach failed: {s}", .{@errorName(err)}) },
         };
+        provider.rebuildWorkspaceIndex() catch {};
         try self.enterAttached(result.attached, result.session.id);
         defer result.session.deinit(self.allocator);
         return .{ .attached = try self.allocator.dupe(u8, result.session.id) };
