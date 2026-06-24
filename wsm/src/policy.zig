@@ -9,11 +9,25 @@ pub const Error = error{
     NoMatchingTarget,
 };
 
+pub const QueryOutcome = union(enum) {
+    exact: []u8,
+    no_sessions,
+    no_match,
+    ambiguous,
+
+    pub fn deinit(self: *QueryOutcome, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .exact => |id| allocator.free(id),
+            else => {},
+        }
+    }
+};
+
 fn freeOwnedStrings(allocator: std.mem.Allocator, items: [][]u8) void {
     for (items) |item| allocator.free(item);
 }
 
-const WorkspaceIndex = struct {
+pub const WorkspaceIndex = struct {
     allocator: std.mem.Allocator,
     ids: [][]u8,
     id_set: std.StringHashMap(void),
@@ -234,10 +248,7 @@ pub const Provider = struct {
             .next => .{ .nav = (try self.resolveNavTarget(.next)) orelse try self.allocator.dupe(u8, "") },
             .in => .{ .nav = (try self.resolveNavTarget(.in)) orelse try self.allocator.dupe(u8, "") },
             .out => .{ .nav = (try self.resolveNavTarget(.out)) orelse try self.allocator.dupe(u8, "") },
-            .attach => |query| blk: {
-                const resolved = try self.resolveQuery(query);
-                break :blk .{ .attach = resolved.? };
-            },
+            .attach => |query| .{ .attach = try self.allocator.dupe(u8, query) },
             .create => |name| .{ .create = try self.allocator.dupe(u8, name) },
         };
     }
@@ -285,13 +296,13 @@ pub const Provider = struct {
         }
     }
 
-    pub fn resolveQuery(self: *Provider, query: []const u8) !?[]u8 {
+    pub fn resolveQueryOutcome(self: *Provider, query: []const u8) !QueryOutcome {
         try self.ensureWorkspaceIndex();
         const ids = self.workspace_index.?.ids;
-        if (ids.len == 0) return Error.NoSessions;
+        if (ids.len == 0) return .no_sessions;
 
         for (ids) |id| {
-            if (std.mem.eql(u8, id, query)) return try self.allocator.dupe(u8, id);
+            if (std.mem.eql(u8, id, query)) return .{ .exact = try self.allocator.dupe(u8, id) };
         }
 
         var matches: std.ArrayList([]u8) = .empty;
@@ -301,9 +312,18 @@ pub const Provider = struct {
                 try matches.append(self.allocator, id);
             }
         }
-        if (matches.items.len == 1) return try self.allocator.dupe(u8, matches.items[0]);
-        if (matches.items.len > 1) return Error.AmbiguousTarget;
-        return Error.NoMatchingTarget;
+        if (matches.items.len == 1) return .{ .exact = try self.allocator.dupe(u8, matches.items[0]) };
+        if (matches.items.len > 1) return .ambiguous;
+        return .no_match;
+    }
+
+    pub fn resolveQuery(self: *Provider, query: []const u8) !?[]u8 {
+        switch (try self.resolveQueryOutcome(query)) {
+            .exact => |id| return id,
+            .no_sessions => return Error.NoSessions,
+            .no_match => return Error.NoMatchingTarget,
+            .ambiguous => return Error.AmbiguousTarget,
+        }
     }
 
     fn queryCandidates(self: *Provider, query: []const u8) ![]ui_state.Candidate {

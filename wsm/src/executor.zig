@@ -1,6 +1,7 @@
 const std = @import("std");
 const global_io = std.Io.Threaded.global_single_threaded.io();
 const cli_main = @import("cli_main.zig");
+const commands = @import("commands.zig");
 const policy = @import("policy.zig");
 const service_mod = @import("service.zig");
 
@@ -25,12 +26,13 @@ fn attachStateMessage(state: service_mod.AttachState) []const u8 {
     };
 }
 
-fn attachQueryMessage(allocator: std.mem.Allocator, err: anyerror, query: []const u8) ![]u8 {
-    return switch (err) {
-        policy.Error.NoSessions => try allocator.dupe(u8, "no sessions found; press c to create one"),
-        policy.Error.NoMatchingTarget => try std.fmt.allocPrint(allocator, "no session matching '{s}'", .{query}),
-        policy.Error.AmbiguousTarget => try std.fmt.allocPrint(allocator, "ambiguous session '{s}'", .{query}),
-        else => try std.fmt.allocPrint(allocator, "attach resolution failed: {s}", .{@errorName(err)}),
+fn attachOutcomeMessage(allocator: std.mem.Allocator, outcome: commands.AttachOutcome, query: []const u8) ![]u8 {
+    return switch (outcome) {
+        .ready => unreachable,
+        .no_sessions => try allocator.dupe(u8, "no sessions found; press c to create one"),
+        .no_match => try std.fmt.allocPrint(allocator, "no session matching '{s}'", .{query}),
+        .ambiguous => try std.fmt.allocPrint(allocator, "ambiguous session '{s}'", .{query}),
+        .not_attachable => |payload| try std.fmt.allocPrint(allocator, "session '{s}' is not attachable: {s}", .{ payload.id, attachStateMessage(payload.state) }),
     };
 }
 
@@ -148,23 +150,22 @@ pub const Executor = struct {
             .attach => |target| blk: {
                 defer self.allocator.free(target);
                 if (target.len == 0) break :blk .{ .err = try self.allocator.dupe(u8, "attach target required") };
-                const resolved_target = (provider.resolveQuery(target) catch |err| {
-                    break :blk .{ .err = try attachQueryMessage(self.allocator, err, target) };
-                }).?;
-                defer self.allocator.free(resolved_target);
                 var service = service_mod.WorkspaceService.init(self.allocator, self.host_bin, self.vpty_bin, self.ptylog_bin);
-                const state = service.attachState(provider, resolved_target) catch |err| {
-                    break :blk .{ .err = try std.fmt.allocPrint(self.allocator, "attach preflight failed: {s}", .{@errorName(err)}) };
+                var attach_outcome = commands.planAttach(self.allocator, provider, &service, target) catch |err| {
+                    break :blk .{ .err = try std.fmt.allocPrint(self.allocator, "attach planning failed: {s}", .{@errorName(err)}) };
                 };
-                if (state != .ready) {
-                    break :blk .{ .err = try std.fmt.allocPrint(self.allocator, "session '{s}' is not attachable: {s}", .{ resolved_target, attachStateMessage(state) }) };
+                defer attach_outcome.deinit(self.allocator);
+                switch (attach_outcome) {
+                    .ready => |resolved_target| {
+                        const attached_id = self.attachCanonicalVerified(provider, resolved_target, writer_fd, size) catch |err| {
+                            break :blk .{ .err = try std.fmt.allocPrint(self.allocator, "attach failed: {s}", .{@errorName(err)}) };
+                        };
+                        defer self.allocator.free(attached_id);
+                        self.interactive_attached = true;
+                        break :blk .{ .attached = try self.allocator.dupe(u8, attached_id) };
+                    },
+                    else => break :blk .{ .err = try attachOutcomeMessage(self.allocator, attach_outcome, target) },
                 }
-                const attached_id = self.attachCanonicalVerified(provider, resolved_target, writer_fd, size) catch |err| {
-                    break :blk .{ .err = try std.fmt.allocPrint(self.allocator, "attach failed: {s}", .{@errorName(err)}) };
-                };
-                defer self.allocator.free(attached_id);
-                self.interactive_attached = true;
-                break :blk .{ .attached = try self.allocator.dupe(u8, attached_id) };
             },
             .create => |name| blk: {
                 defer self.allocator.free(name);
