@@ -5,6 +5,8 @@ const canonical = @import("canonical.zig");
 
 pub const Error = error{
     AmbiguousTarget,
+    NoSessions,
+    NoMatchingTarget,
 };
 
 fn freeOwnedStrings(allocator: std.mem.Allocator, items: [][]u8) void {
@@ -234,7 +236,7 @@ pub const Provider = struct {
             .out => .{ .nav = (try self.resolveNavTarget(.out)) orelse try self.allocator.dupe(u8, "") },
             .attach => |query| blk: {
                 const resolved = try self.resolveQuery(query);
-                break :blk .{ .attach = resolved orelse try self.allocator.dupe(u8, query) };
+                break :blk .{ .attach = resolved.? };
             },
             .create => |name| .{ .create = try self.allocator.dupe(u8, name) },
         };
@@ -286,7 +288,7 @@ pub const Provider = struct {
     pub fn resolveQuery(self: *Provider, query: []const u8) !?[]u8 {
         try self.ensureWorkspaceIndex();
         const ids = self.workspace_index.?.ids;
-        if (ids.len == 0) return null;
+        if (ids.len == 0) return Error.NoSessions;
 
         for (ids) |id| {
             if (std.mem.eql(u8, id, query)) return try self.allocator.dupe(u8, id);
@@ -301,7 +303,7 @@ pub const Provider = struct {
         }
         if (matches.items.len == 1) return try self.allocator.dupe(u8, matches.items[0]);
         if (matches.items.len > 1) return Error.AmbiguousTarget;
-        return null;
+        return Error.NoMatchingTarget;
     }
 
     fn queryCandidates(self: *Provider, query: []const u8) ![]ui_state.Candidate {
@@ -504,7 +506,7 @@ test "refresh rebuilds the workspace index after new sessions appear" {
     defer provider.deinit();
 
     try provider.refresh();
-    try std.testing.expectEqual(null, try provider.resolveQuery("proj"));
+    try std.testing.expectError(Error.NoSessions, provider.resolveQuery("proj"));
 
     try tmp.dir.createDirPath(global_io, "workspace/proj");
     var session_file = try tmp.dir.createFile(global_io, "workspace/proj/session.wsm", .{ .truncate = true });
@@ -516,4 +518,30 @@ test "refresh rebuilds the workspace index after new sessions appear" {
     defer if (resolved) |id| allocator.free(id);
     try std.testing.expect(resolved != null);
     try std.testing.expectEqualStrings("proj/session", resolved.?);
+}
+
+test "resolveQuery reports missing target when sessions exist" {
+    const allocator = std.testing.allocator;
+    var provider = try Provider.init(allocator, "/tmp/workspace", null);
+    defer provider.deinit();
+    provider.workspace_index = WorkspaceIndex{
+        .allocator = allocator,
+        .ids = try allocator.dupe([]u8, &.{
+            try allocator.dupe(u8, "cats"),
+            try allocator.dupe(u8, "stocks"),
+        }),
+        .id_set = std.StringHashMap(void).init(allocator),
+        .children_by_parent = std.StringHashMap(std.ArrayList([]u8)).init(allocator),
+    };
+    defer {
+        const idx = provider.workspace_index.?;
+        for (idx.ids) |id| allocator.free(id);
+        allocator.free(idx.ids);
+        provider.workspace_index.?.id_set.deinit();
+        deinitChildrenByParent(allocator, &provider.workspace_index.?.children_by_parent);
+        provider.workspace_index = null;
+    }
+    for (provider.workspace_index.?.ids) |id| try provider.workspace_index.?.id_set.put(id, {});
+
+    try std.testing.expectError(Error.NoMatchingTarget, provider.resolveQuery("dogs"));
 }

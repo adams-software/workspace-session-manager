@@ -280,11 +280,17 @@ const App = struct {
     }
 
     fn executeResolvedAction(self: *App, action: ui_state.Action) !executor_mod.Result {
-        const resolved = try self.provider.resolveAction(action);
-        switch (action) {
+        defer switch (action) {
             .attach => |target| self.allocator.free(target),
             else => {},
-        }
+        };
+        const resolved = self.provider.resolveAction(action) catch |err| {
+            const msg = switch (action) {
+                .attach => try attachResolutionMessage(self.allocator, err, action.attach),
+                else => try std.fmt.allocPrint(self.allocator, "action failed: {s}", .{@errorName(err)}),
+            };
+            return .{ .err = msg };
+        };
         return self.executor.runSized(&self.provider, resolved, self.term.tty_fd, .{ .cols = self.layout.outer_cols, .rows = self.layout.main_rows }) catch |err| .{ .err = try std.fmt.allocPrint(self.allocator, "action failed: {s}", .{@errorName(err)}) };
     }
 
@@ -418,6 +424,15 @@ fn setRuntimeExitMessage(app: *App, allocator: std.mem.Allocator, comptime conte
     app.exit_message = try allocator.dupe(u8, msg);
     _ = app.bar_state.setExternalError(msg);
     app.should_exit = true;
+}
+
+fn attachResolutionMessage(allocator: std.mem.Allocator, err: anyerror, query: []const u8) ![]u8 {
+    return switch (err) {
+        policy.Error.NoSessions => try allocator.dupe(u8, "no sessions found; press c to create one"),
+        policy.Error.NoMatchingTarget => try std.fmt.allocPrint(allocator, "no session matching '{s}'", .{query}),
+        policy.Error.AmbiguousTarget => try std.fmt.allocPrint(allocator, "ambiguous session '{s}'", .{query}),
+        else => try std.fmt.allocPrint(allocator, "attach resolution failed: {s}", .{@errorName(err)}),
+    };
 }
 
 fn keyFromInput(bytes: []const u8, hotkey: KeyBinding) ?ui_state.Key {

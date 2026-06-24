@@ -25,6 +25,15 @@ fn attachStateMessage(state: service_mod.AttachState) []const u8 {
     };
 }
 
+fn attachQueryMessage(allocator: std.mem.Allocator, err: anyerror, query: []const u8) ![]u8 {
+    return switch (err) {
+        policy.Error.NoSessions => try allocator.dupe(u8, "no sessions found; press c to create one"),
+        policy.Error.NoMatchingTarget => try std.fmt.allocPrint(allocator, "no session matching '{s}'", .{query}),
+        policy.Error.AmbiguousTarget => try std.fmt.allocPrint(allocator, "ambiguous session '{s}'", .{query}),
+        else => try std.fmt.allocPrint(allocator, "attach resolution failed: {s}", .{@errorName(err)}),
+    };
+}
+
 pub const Result = union(enum) {
     info: []const u8,
     err: []const u8,
@@ -139,14 +148,18 @@ pub const Executor = struct {
             .attach => |target| blk: {
                 defer self.allocator.free(target);
                 if (target.len == 0) break :blk .{ .err = try self.allocator.dupe(u8, "attach target required") };
+                const resolved_target = (provider.resolveQuery(target) catch |err| {
+                    break :blk .{ .err = try attachQueryMessage(self.allocator, err, target) };
+                }).?;
+                defer self.allocator.free(resolved_target);
                 var service = service_mod.WorkspaceService.init(self.allocator, self.host_bin, self.vpty_bin, self.ptylog_bin);
-                const state = service.attachState(provider, target) catch |err| {
+                const state = service.attachState(provider, resolved_target) catch |err| {
                     break :blk .{ .err = try std.fmt.allocPrint(self.allocator, "attach preflight failed: {s}", .{@errorName(err)}) };
                 };
                 if (state != .ready) {
-                    break :blk .{ .err = try std.fmt.allocPrint(self.allocator, "attach blocked: {s}", .{attachStateMessage(state)}) };
+                    break :blk .{ .err = try std.fmt.allocPrint(self.allocator, "session '{s}' is not attachable: {s}", .{ resolved_target, attachStateMessage(state) }) };
                 }
-                const attached_id = self.attachCanonicalVerified(provider, target, writer_fd, size) catch |err| {
+                const attached_id = self.attachCanonicalVerified(provider, resolved_target, writer_fd, size) catch |err| {
                     break :blk .{ .err = try std.fmt.allocPrint(self.allocator, "attach failed: {s}", .{@errorName(err)}) };
                 };
                 defer self.allocator.free(attached_id);
