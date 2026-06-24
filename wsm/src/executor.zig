@@ -47,6 +47,14 @@ fn createInvalidIdMessage(allocator: std.mem.Allocator, reason: commands.CreateI
     }});
 }
 
+fn killOutcomeMessage(allocator: std.mem.Allocator, outcome: commands.KillOutcome) ![]u8 {
+    return switch (outcome) {
+        .signaled => |sig| try std.fmt.allocPrint(allocator, "sent {s}", .{if (sig == .kill) "KILL" else "TERM"}),
+        .no_current_session => try allocator.dupe(u8, "no current session"),
+        .no_control => try allocator.dupe(u8, "kill failed: session has no control socket"),
+    };
+}
+
 pub const Result = union(enum) {
     info: []const u8,
     err: []const u8,
@@ -128,13 +136,14 @@ pub const Executor = struct {
                 break :blk .{ .attached = try self.allocator.dupe(u8, attached_id) };
             },
             .kill => blk: {
-                const current_id = self.current_session_id orelse break :blk .{ .err = try self.allocator.dupe(u8, "no current session") };
                 var service = service_mod.WorkspaceService.init(self.allocator, self.host_bin, self.vpty_bin, self.ptylog_bin);
-                service.killSession(provider, current_id, .kill) catch |err| {
+                const outcome = commands.killCurrentSession(provider, &service, self.current_session_id, .kill) catch |err| {
                     break :blk .{ .err = try std.fmt.allocPrint(self.allocator, "kill failed: {s}", .{@errorName(err)}) };
                 };
-                provider.rebuildWorkspaceIndex() catch {};
-                break :blk .{ .info = try self.allocator.dupe(u8, "sent KILL") };
+                switch (outcome) {
+                    .signaled => break :blk .{ .info = try killOutcomeMessage(self.allocator, outcome) },
+                    else => break :blk .{ .err = try killOutcomeMessage(self.allocator, outcome) },
+                }
             },
             .logs => blk: {
                 break :blk self.viewLogsLocal(provider) catch |err| .{

@@ -215,6 +215,14 @@ fn createInvalidIdMessage(allocator: std.mem.Allocator, reason: commands.CreateI
     }});
 }
 
+fn killOutcomeMessage(allocator: std.mem.Allocator, id: []const u8, outcome: commands.KillOutcome) ![]u8 {
+    return switch (outcome) {
+        .signaled => |sig| try std.fmt.allocPrint(allocator, "signaled {s} ({s})\n", .{ id, if (sig == .kill) "KILL" else "TERM" }),
+        .no_current_session => try allocator.dupe(u8, "kill failed: no current session\n"),
+        .no_control => try std.fmt.allocPrint(allocator, "kill failed for {s}: session has no control socket\n", .{id}),
+    };
+}
+
 pub fn runCommand(allocator: std.mem.Allocator, root: []const u8, mode: Mode, writer: anytype) !u8 {
     var provider = try policy.Provider.init(allocator, root, null);
     defer provider.deinit();
@@ -353,20 +361,16 @@ pub fn runCommand(allocator: std.mem.Allocator, root: []const u8, mode: Mode, wr
             }
         },
         .kill => |args| {
-            service.killSession(&provider, args.id, if (args.force) .kill else .term) catch |err| {
-                const msg = switch (err) {
-                    error.NoControl => try std.fmt.allocPrint(allocator, "kill failed for {s}: session has no control socket\n", .{args.id}),
-                    else => try std.fmt.allocPrint(allocator, "kill failed for {s}: {s}\n", .{ args.id, @errorName(err) }),
-                };
+            const outcome = commands.killSessionById(&provider, &service, args.id, if (args.force) .kill else .term) catch |err| {
+                const msg = try std.fmt.allocPrint(allocator, "kill failed for {s}: {s}\n", .{ args.id, @errorName(err) });
                 defer allocator.free(msg);
                 try writer.writeAll(msg);
                 return 1;
             };
-            provider.rebuildWorkspaceIndex() catch {};
-            const line = try std.fmt.allocPrint(allocator, "signaled {s} ({s})\n", .{ args.id, if (args.force) "KILL" else "TERM" });
-            defer allocator.free(line);
-            try writer.writeAll(line);
-            return 0;
+            const msg = try killOutcomeMessage(allocator, args.id, outcome);
+            defer allocator.free(msg);
+            try writer.writeAll(msg);
+            return if (outcome == .signaled) 0 else 1;
         },
         .interactive_attach, .interactive_create_attach => return 2,
     }

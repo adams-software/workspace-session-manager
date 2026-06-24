@@ -59,6 +59,12 @@ pub const CreateDetachedOutcome = union(enum) {
     }
 };
 
+pub const KillOutcome = union(enum) {
+    signaled: service_mod.KillSignal,
+    no_current_session,
+    no_control,
+};
+
 pub fn planAttach(
     allocator: std.mem.Allocator,
     provider: *policy.Provider,
@@ -124,6 +130,30 @@ pub fn createDetached(
     return .{ .created = session };
 }
 
+pub fn killSessionById(
+    provider: *policy.Provider,
+    service: *service_mod.WorkspaceService,
+    id: []const u8,
+    sig: service_mod.KillSignal,
+) !KillOutcome {
+    service.killSession(provider, id, sig) catch |err| {
+        if (err == error.NoControl) return .no_control;
+        return err;
+    };
+    provider.rebuildWorkspaceIndex() catch {};
+    return .{ .signaled = sig };
+}
+
+pub fn killCurrentSession(
+    provider: *policy.Provider,
+    service: *service_mod.WorkspaceService,
+    current_id: ?[]const u8,
+    sig: service_mod.KillSignal,
+) !KillOutcome {
+    const id = current_id orelse return .no_current_session;
+    return try killSessionById(provider, service, id, sig);
+}
+
 test "planAttach reports no match without touching service state" {
     const allocator = std.testing.allocator;
     var provider = try policy.Provider.init(allocator, "/tmp/workspace", null);
@@ -162,4 +192,14 @@ test "createDetached surfaces invalid id as structured outcome" {
 
     try std.testing.expectEqual(.invalid_id, outcome);
     try std.testing.expectEqual(CreateInvalidIdReason.empty, outcome.invalid_id);
+}
+
+test "killCurrentSession reports missing current session as structured outcome" {
+    const allocator = std.testing.allocator;
+    var provider = try policy.Provider.init(allocator, "/tmp/workspace", null);
+    defer provider.deinit();
+    var service = service_mod.WorkspaceService.init(allocator, "host", "vpty", "ptylog");
+
+    const outcome = try killCurrentSession(&provider, &service, null, .kill);
+    try std.testing.expectEqual(.no_current_session, outcome);
 }
