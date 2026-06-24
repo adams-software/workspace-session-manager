@@ -63,6 +63,14 @@ fn backOutcomeMessage(allocator: std.mem.Allocator, outcome: commands.BackOutcom
     };
 }
 
+fn navOutcomeMessage(allocator: std.mem.Allocator, outcome: commands.NavOutcome) ![]u8 {
+    return switch (outcome) {
+        .ready => unreachable,
+        .no_target => try allocator.dupe(u8, "no target"),
+        .not_attachable => |payload| try std.fmt.allocPrint(allocator, "session '{s}' is not attachable: {s}", .{ payload.id, attachStateMessage(payload.state) }),
+    };
+}
+
 pub const Result = union(enum) {
     info: []const u8,
     err: []const u8,
@@ -136,14 +144,7 @@ pub const Executor = struct {
                 };
                 defer outcome.deinit(self.allocator);
                 switch (outcome) {
-                    .ready => |previous_id| {
-                        const attached_id = self.attachCanonicalVerified(provider, previous_id, writer_fd, size) catch |err| {
-                            break :blk .{ .err = try std.fmt.allocPrint(self.allocator, "back failed: {s}", .{@errorName(err)}) };
-                        };
-                        defer self.allocator.free(attached_id);
-                        self.interactive_attached = true;
-                        break :blk .{ .attached = try self.allocator.dupe(u8, attached_id) };
-                    },
+                    .ready => |previous_id| break :blk self.attachReadyId(provider, previous_id, writer_fd, size, "back"),
                     else => break :blk .{ .err = try backOutcomeMessage(self.allocator, outcome) },
                 }
             },
@@ -164,20 +165,15 @@ pub const Executor = struct {
             },
             .nav => |target| blk: {
                 defer self.allocator.free(target);
-                if (target.len == 0) break :blk .{ .err = try self.allocator.dupe(u8, "no target") };
                 var service = service_mod.WorkspaceService.init(self.allocator, self.host_bin, self.vpty_bin, self.ptylog_bin);
-                const state = service.attachState(provider, target) catch |err| {
-                    break :blk .{ .err = try std.fmt.allocPrint(self.allocator, "attach preflight failed: {s}", .{@errorName(err)}) };
+                var outcome = commands.planResolvedTarget(self.allocator, provider, &service, target) catch |err| {
+                    break :blk .{ .err = try std.fmt.allocPrint(self.allocator, "nav planning failed: {s}", .{@errorName(err)}) };
                 };
-                if (state != .ready) {
-                    break :blk .{ .err = try std.fmt.allocPrint(self.allocator, "attach blocked: {s}", .{attachStateMessage(state)}) };
+                defer outcome.deinit(self.allocator);
+                switch (outcome) {
+                    .ready => |resolved_target| break :blk self.attachReadyId(provider, resolved_target, writer_fd, size, "attach"),
+                    else => break :blk .{ .err = try navOutcomeMessage(self.allocator, outcome) },
                 }
-                const attached_id = self.attachCanonicalVerified(provider, target, writer_fd, size) catch |err| {
-                    break :blk .{ .err = try std.fmt.allocPrint(self.allocator, "attach failed: {s}", .{@errorName(err)}) };
-                };
-                defer self.allocator.free(attached_id);
-                self.interactive_attached = true;
-                break :blk .{ .attached = try self.allocator.dupe(u8, attached_id) };
             },
             .attach => |target| blk: {
                 defer self.allocator.free(target);
@@ -188,14 +184,7 @@ pub const Executor = struct {
                 };
                 defer attach_outcome.deinit(self.allocator);
                 switch (attach_outcome) {
-                    .ready => |resolved_target| {
-                        const attached_id = self.attachCanonicalVerified(provider, resolved_target, writer_fd, size) catch |err| {
-                            break :blk .{ .err = try std.fmt.allocPrint(self.allocator, "attach failed: {s}", .{@errorName(err)}) };
-                        };
-                        defer self.allocator.free(attached_id);
-                        self.interactive_attached = true;
-                        break :blk .{ .attached = try self.allocator.dupe(u8, attached_id) };
-                    },
+                    .ready => |resolved_target| break :blk self.attachReadyId(provider, resolved_target, writer_fd, size, "attach"),
                     else => break :blk .{ .err = try attachOutcomeMessage(self.allocator, attach_outcome, target) },
                 }
             },
@@ -322,6 +311,15 @@ pub const Executor = struct {
         if (self.link) |*link| link.detach();
         self.interactive_attached = false;
         return .detached;
+    }
+
+    fn attachReadyId(self: *Executor, provider: *policy.Provider, id: []const u8, writer_fd: ?std.posix.fd_t, size: ?SessionSize, comptime context: []const u8) Result {
+        const attached_id = self.attachCanonicalVerified(provider, id, writer_fd, size) catch |err| {
+            return .{ .err = std.fmt.allocPrint(self.allocator, "{s} failed: {s}", .{ context, @errorName(err) }) catch unreachable };
+        };
+        defer self.allocator.free(attached_id);
+        self.interactive_attached = true;
+        return .{ .attached = self.allocator.dupe(u8, attached_id) catch unreachable };
     }
 
     fn attachCanonicalWithRetry(self: *Executor, provider: *policy.Provider, id: []const u8, timeout_ms: u64) !void {

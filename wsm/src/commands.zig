@@ -82,6 +82,23 @@ pub const BackOutcome = union(enum) {
     }
 };
 
+pub const NavOutcome = union(enum) {
+    ready: []u8,
+    no_target,
+    not_attachable: struct {
+        id: []u8,
+        state: service_mod.AttachState,
+    },
+
+    pub fn deinit(self: *NavOutcome, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .ready => |id| allocator.free(id),
+            .not_attachable => |payload| allocator.free(payload.id),
+            else => {},
+        }
+    }
+};
+
 pub fn planAttach(
     allocator: std.mem.Allocator,
     provider: *policy.Provider,
@@ -189,6 +206,20 @@ pub fn planBack(
     return .{ .not_attachable = .{ .id = id, .state = state } };
 }
 
+pub fn planResolvedTarget(
+    allocator: std.mem.Allocator,
+    provider: *policy.Provider,
+    service: *service_mod.WorkspaceService,
+    target: []const u8,
+) !NavOutcome {
+    if (target.len == 0) return .no_target;
+    const id = try allocator.dupe(u8, target);
+    errdefer allocator.free(id);
+    const state = try service.attachState(provider, id);
+    if (state == .ready) return .{ .ready = id };
+    return .{ .not_attachable = .{ .id = id, .state = state } };
+}
+
 test "planAttach reports no match without touching service state" {
     const allocator = std.testing.allocator;
     var provider = try policy.Provider.init(allocator, "/tmp/workspace", null);
@@ -247,4 +278,14 @@ test "planBack reports missing previous session as structured outcome" {
 
     const outcome = try planBack(allocator, &provider, &service, null, null);
     try std.testing.expectEqual(.no_previous_session, outcome);
+}
+
+test "planResolvedTarget reports empty target as structured outcome" {
+    const allocator = std.testing.allocator;
+    var provider = try policy.Provider.init(allocator, "/tmp/workspace", null);
+    defer provider.deinit();
+    var service = service_mod.WorkspaceService.init(allocator, "host", "vpty", "ptylog");
+
+    const outcome = try planResolvedTarget(allocator, &provider, &service, "");
+    try std.testing.expectEqual(.no_target, outcome);
 }
