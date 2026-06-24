@@ -317,15 +317,6 @@ pub const Provider = struct {
         return .no_match;
     }
 
-    pub fn resolveQuery(self: *Provider, query: []const u8) !?[]u8 {
-        switch (try self.resolveQueryOutcome(query)) {
-            .exact => |id| return id,
-            .no_sessions => return Error.NoSessions,
-            .no_match => return Error.NoMatchingTarget,
-            .ambiguous => return Error.AmbiguousTarget,
-        }
-    }
-
     fn queryCandidates(self: *Provider, query: []const u8) ![]ui_state.Candidate {
         try self.ensureWorkspaceIndex();
         const ids = self.workspace_index.?.ids;
@@ -502,10 +493,10 @@ test "prefix resolve uses unique front match" {
     }
     for (provider.workspace_index.?.ids) |id| try provider.workspace_index.?.id_set.put(id, {});
 
-    const resolved = try provider.resolveQuery("st");
-    defer if (resolved) |id| allocator.free(id);
-    try std.testing.expect(resolved != null);
-    try std.testing.expectEqualStrings("stocks", resolved.?);
+    var outcome = try provider.resolveQueryOutcome("st");
+    defer outcome.deinit(allocator);
+    try std.testing.expect(outcome == .exact);
+    try std.testing.expectEqualStrings("stocks", outcome.exact);
 }
 
 test "refresh rebuilds the workspace index after new sessions appear" {
@@ -526,7 +517,8 @@ test "refresh rebuilds the workspace index after new sessions appear" {
     defer provider.deinit();
 
     try provider.refresh();
-    try std.testing.expectError(Error.NoSessions, provider.resolveQuery("proj"));
+    const missing = try provider.resolveQueryOutcome("proj");
+    try std.testing.expect(missing == .no_sessions);
 
     try tmp.dir.createDirPath(global_io, "workspace/proj");
     var session_file = try tmp.dir.createFile(global_io, "workspace/proj/session.wsm", .{ .truncate = true });
@@ -534,13 +526,13 @@ test "refresh rebuilds the workspace index after new sessions appear" {
 
     try provider.refresh();
 
-    const resolved = try provider.resolveQuery("proj");
-    defer if (resolved) |id| allocator.free(id);
-    try std.testing.expect(resolved != null);
-    try std.testing.expectEqualStrings("proj/session", resolved.?);
+    var resolved = try provider.resolveQueryOutcome("proj");
+    defer resolved.deinit(allocator);
+    try std.testing.expect(resolved == .exact);
+    try std.testing.expectEqualStrings("proj/session", resolved.exact);
 }
 
-test "resolveQuery reports missing target when sessions exist" {
+test "resolveQueryOutcome reports missing target when sessions exist" {
     const allocator = std.testing.allocator;
     var provider = try Provider.init(allocator, "/tmp/workspace", null);
     defer provider.deinit();
@@ -563,5 +555,6 @@ test "resolveQuery reports missing target when sessions exist" {
     }
     for (provider.workspace_index.?.ids) |id| try provider.workspace_index.?.id_set.put(id, {});
 
-    try std.testing.expectError(Error.NoMatchingTarget, provider.resolveQuery("dogs"));
+    const outcome = try provider.resolveQueryOutcome("dogs");
+    try std.testing.expect(outcome == .no_match);
 }

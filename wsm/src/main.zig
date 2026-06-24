@@ -268,20 +268,13 @@ const App = struct {
             return;
         }
 
-        if (action == .create) {
-            const shell = if (std.c.getenv("SHELL")) |value| std.mem.span(value) else "/bin/sh";
-            const exec_result = try self.executor.createAndAttachSized(&self.provider, action.create, shell, .{ .cols = self.layout.outer_cols, .rows = self.layout.main_rows });
-            self.allocator.free(action.create);
-            try self.applyExecResult(exec_result);
-            return;
-        }
-
         try self.applyExecResult(try self.executeResolvedAction(action));
     }
 
     fn executeResolvedAction(self: *App, action: ui_state.Action) !executor_mod.Result {
         defer switch (action) {
             .attach => |target| self.allocator.free(target),
+            .create => |name| self.allocator.free(name),
             else => {},
         };
         const resolved = self.provider.resolveAction(action) catch |err| return .{ .err = try std.fmt.allocPrint(self.allocator, "action failed: {s}", .{@errorName(err)}) };

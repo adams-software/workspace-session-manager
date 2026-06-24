@@ -143,7 +143,7 @@ pub const Executor = struct {
             },
             .nav => |target| self.handleNav(provider, target, writer_fd, size),
             .attach => |target| self.handleAttach(provider, target, writer_fd, size),
-            .create => |name| self.handleCreate(provider, name, null),
+            .create => |name| self.handleCreate(provider, name, size),
         };
     }
 
@@ -154,7 +154,7 @@ pub const Executor = struct {
 
     pub fn viewLogsLocal(self: *Executor, provider: *policy.Provider) !Result {
         const base_id = self.current_session_id orelse return .{ .err = try self.allocator.dupe(u8, "no current session") };
-                var service = service_mod.WorkspaceService.init(self.allocator, self.host_bin, self.vpty_bin, self.ptylog_bin);
+        var service = service_mod.WorkspaceService.init(self.allocator, self.host_bin, self.vpty_bin, self.ptylog_bin);
         const log_path = try service.logPath(provider, base_id);
         defer self.allocator.free(log_path);
         std.Io.Dir.accessAbsolute(global_io, log_path, .{}) catch {
@@ -178,14 +178,6 @@ pub const Executor = struct {
             .signal => |sig| .{ .err = try std.fmt.allocPrint(self.allocator, "logs viewer exited on signal {d}", .{sig}) },
             else => .{ .err = try self.allocator.dupe(u8, "logs viewer exited unexpectedly") },
         };
-    }
-
-    pub fn createAndAttachSized(self: *Executor, provider: *policy.Provider, name: []const u8, shell: []const u8, size: SessionSize) !Result {
-        var service = service_mod.WorkspaceService.init(self.allocator, self.host_bin, self.vpty_bin, self.ptylog_bin);
-        const outcome = commands.createAttached(provider, &service, name, shell, size.cols, size.rows) catch |err| {
-            return .{ .err = try std.fmt.allocPrint(self.allocator, "created but attach failed: {s}", .{@errorName(err)}) };
-        };
-        return self.finishCreateOutcome(outcome);
     }
 
     pub fn bootstrapInteractive(self: *Executor, provider: *policy.Provider, mode: cli_main.Mode) !Result {
@@ -325,12 +317,6 @@ pub const Executor = struct {
         defer self.allocator.free(attached_id);
         self.interactive_attached = true;
         return .{ .attached = self.allocator.dupe(u8, attached_id) catch unreachable };
-    }
-
-    fn attachCanonicalWithRetry(self: *Executor, provider: *policy.Provider, id: []const u8, timeout_ms: u64) !void {
-        var service = service_mod.WorkspaceService.init(self.allocator, self.host_bin, self.vpty_bin, self.ptylog_bin);
-        const attached = try service.attachWithRetry(provider, id, timeout_ms);
-        try self.enterAttached(attached, id);
     }
 
     fn attachCanonical(self: *Executor, provider: *policy.Provider, id: []const u8) ![]u8 {
