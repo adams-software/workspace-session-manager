@@ -238,14 +238,21 @@ fn colorEq(a: host.HostColor, b: host.HostColor) bool {
         a.red == b.red and
         a.green == b.green and
         a.blue == b.blue and
-        a.ansi_class == b.ansi_class;
+        a.ansi_class == b.ansi_class and
+        a.promoted_by_bold == b.promoted_by_bold;
 }
 
 fn emitColor(sink: anytype, base: u8, color: host.HostColor) void {
     switch (color.kind) {
         .default => sink.out("\x1b[{d}m", .{base + 1}),
         .indexed => switch (color.ansi_class) {
-            .classic_low => sink.out("\x1b[{d}m", .{(if (base == 38) @as(u8, 30) else @as(u8, 40)) + color.palette_index}),
+            .classic_low => {
+                if (color.promoted_by_bold and color.palette_index < 8) {
+                    sink.out("\x1b[{d}m", .{(if (base == 38) @as(u8, 90) else @as(u8, 100)) + color.palette_index});
+                } else {
+                    sink.out("\x1b[{d}m", .{(if (base == 38) @as(u8, 30) else @as(u8, 40)) + color.palette_index});
+                }
+            },
             .classic_bright => sink.out("\x1b[{d}m", .{(if (base == 38) @as(u8, 90) else @as(u8, 100)) + (color.palette_index - 8)}),
             .indexed_extended => sink.out("\x1b[{d};5;{d}m", .{ base, color.palette_index }),
             .none => sink.out("\x1b[{d};5;{d}m", .{ base, color.palette_index }),
@@ -559,4 +566,54 @@ test "emitPatch closes active hyperlink and resets style before final cursor" {
     try std.testing.expect(std.mem.indexOf(u8, render_buf.items, "\x1b]8;;\x1b\\") != null);
     try std.testing.expect(std.mem.count(u8, render_buf.items, "\x1b[0m") >= 2);
     try std.testing.expect(std.mem.endsWith(u8, render_buf.items, "\x1b[?25h\x1b[1;2H"));
+}
+
+test "emitPatch preserves bold-promoted classic color provenance" {
+    var render_buf = std.ArrayList(u8){};
+    defer render_buf.deinit(std.testing.allocator);
+
+    var adapter = SingleViewportAdapter{
+        .viewport = Viewport.init(0, 0, 1, 4),
+        .render_buf = &render_buf,
+    };
+    var patch = ViewportPatch.init(false, std.testing.allocator);
+    defer patch.deinit(std.testing.allocator);
+
+    var row = RowPatch.init(0);
+    defer row.deinit(std.testing.allocator);
+
+    const cell = host.HostScreenCell{
+        .chars = [_]u32{ 'A', 0, 0, 0, 0, 0 },
+        .chars_len = 1,
+        .width = 1,
+        .attrs = .{ .bold = true },
+        .fg = .{
+            .kind = .indexed,
+            .palette_index = 4,
+            .ansi_class = .classic_low,
+            .promoted_by_bold = true,
+        },
+        .bg = .{ .kind = .default },
+        .hyperlink = 0,
+    };
+
+    try row.runs.append(std.testing.allocator, TextRun.init(0, 1, &.{cell}));
+    try patch.rows.append(std.testing.allocator, row);
+    _ = patch.rows.pop();
+
+    const snapshot = host.HostScreenSnapshot{
+        .rows = 1,
+        .cols = 4,
+        .cursor_row = 0,
+        .cursor_col = 0,
+        .cursor_visible = true,
+        .alt_screen = false,
+        .seq = 0,
+        .hyperlinks = &.{},
+        .lines = &.{},
+    };
+
+    adapter.emitPatch(&patch, &snapshot);
+
+    try std.testing.expect(std.mem.indexOf(u8, render_buf.items, "\x1b[94m") != null);
 }
