@@ -91,7 +91,6 @@ pub const SessionSize = struct {
 
 pub const Executor = struct {
     allocator: std.mem.Allocator,
-    root: []const u8,
     host_bin: []const u8,
     vpty_bin: []const u8,
     ptylog_bin: []const u8,
@@ -101,12 +100,11 @@ pub const Executor = struct {
     current_session_id: ?[]u8,
     previous_session_id: ?[]u8,
 
-    pub fn init(allocator: std.mem.Allocator, root: []const u8) !Executor {
+    pub fn init(allocator: std.mem.Allocator, _: []const u8) !Executor {
         const tool_paths = try cli_main.resolveToolPaths(allocator);
         errdefer tool_paths.deinit(allocator);
         return .{
             .allocator = allocator,
-            .root = try allocator.dupe(u8, root),
             .host_bin = tool_paths.host_bin,
             .vpty_bin = tool_paths.vpty_bin,
             .ptylog_bin = tool_paths.ptylog_bin,
@@ -120,7 +118,6 @@ pub const Executor = struct {
 
     pub fn deinit(self: *Executor) void {
         if (self.link) |*link| link.deinit();
-        self.allocator.free(self.root);
         self.allocator.free(self.host_bin);
         self.allocator.free(self.vpty_bin);
         self.allocator.free(self.ptylog_bin);
@@ -137,75 +134,16 @@ pub const Executor = struct {
         return switch (action) {
             .quit => .detached,
             .detach => self.runDetach() catch |err| .{ .err = try std.fmt.allocPrint(self.allocator, "detach failed: {s}", .{@errorName(err)}) },
-            .back => blk: {
-                var service = service_mod.WorkspaceService.init(self.allocator, self.host_bin, self.vpty_bin, self.ptylog_bin);
-                var outcome = commands.planBack(self.allocator, provider, &service, self.current_session_id, self.previous_session_id) catch |err| {
-                    break :blk .{ .err = try std.fmt.allocPrint(self.allocator, "back planning failed: {s}", .{@errorName(err)}) };
-                };
-                defer outcome.deinit(self.allocator);
-                switch (outcome) {
-                    .ready => |previous_id| break :blk self.attachReadyId(provider, previous_id, writer_fd, size, "back"),
-                    else => break :blk .{ .err = try backOutcomeMessage(self.allocator, outcome) },
-                }
-            },
-            .kill => blk: {
-                var service = service_mod.WorkspaceService.init(self.allocator, self.host_bin, self.vpty_bin, self.ptylog_bin);
-                const outcome = commands.killCurrentSession(provider, &service, self.current_session_id, .kill) catch |err| {
-                    break :blk .{ .err = try std.fmt.allocPrint(self.allocator, "kill failed: {s}", .{@errorName(err)}) };
-                };
-                switch (outcome) {
-                    .signaled => break :blk .{ .info = try killOutcomeMessage(self.allocator, outcome) },
-                    else => break :blk .{ .err = try killOutcomeMessage(self.allocator, outcome) },
-                }
-            },
+            .back => self.handleBack(provider, writer_fd, size),
+            .kill => self.handleKill(provider),
             .logs => blk: {
                 break :blk self.viewLogsLocal(provider) catch |err| .{
                     .err = try std.fmt.allocPrint(self.allocator, "logs failed: {s}", .{@errorName(err)}),
                 };
             },
-            .nav => |target| blk: {
-                defer self.allocator.free(target);
-                var service = service_mod.WorkspaceService.init(self.allocator, self.host_bin, self.vpty_bin, self.ptylog_bin);
-                var outcome = commands.planResolvedTarget(self.allocator, provider, &service, target) catch |err| {
-                    break :blk .{ .err = try std.fmt.allocPrint(self.allocator, "nav planning failed: {s}", .{@errorName(err)}) };
-                };
-                defer outcome.deinit(self.allocator);
-                switch (outcome) {
-                    .ready => |resolved_target| break :blk self.attachReadyId(provider, resolved_target, writer_fd, size, "attach"),
-                    else => break :blk .{ .err = try navOutcomeMessage(self.allocator, outcome) },
-                }
-            },
-            .attach => |target| blk: {
-                defer self.allocator.free(target);
-                if (target.len == 0) break :blk .{ .err = try self.allocator.dupe(u8, "attach target required") };
-                var service = service_mod.WorkspaceService.init(self.allocator, self.host_bin, self.vpty_bin, self.ptylog_bin);
-                var attach_outcome = commands.planAttach(self.allocator, provider, &service, target) catch |err| {
-                    break :blk .{ .err = try std.fmt.allocPrint(self.allocator, "attach planning failed: {s}", .{@errorName(err)}) };
-                };
-                defer attach_outcome.deinit(self.allocator);
-                switch (attach_outcome) {
-                    .ready => |resolved_target| break :blk self.attachReadyId(provider, resolved_target, writer_fd, size, "attach"),
-                    else => break :blk .{ .err = try attachOutcomeMessage(self.allocator, attach_outcome, target) },
-                }
-            },
-            .create => |name| blk: {
-                defer self.allocator.free(name);
-                const shell = if (std.c.getenv("SHELL")) |value| std.mem.span(value) else "/bin/sh";
-                var service = service_mod.WorkspaceService.init(self.allocator, self.host_bin, self.vpty_bin, self.ptylog_bin);
-                var outcome = commands.createAttached(provider, &service, name, shell, null, null) catch |err| {
-                    break :blk .{ .err = try std.fmt.allocPrint(self.allocator, "created but attach failed: {s}", .{@errorName(err)}) };
-                };
-                switch (outcome) {
-                    .created => |result| {
-                        defer result.session.deinit(self.allocator);
-                        try self.enterAttached(result.attached, result.session.id);
-                        outcome = .session_exists;
-                        break :blk .{ .attached = try self.allocator.dupe(u8, result.session.id) };
-                    },
-                    .session_exists => break :blk .{ .err = try self.allocator.dupe(u8, "session already exists") },
-                    .invalid_id => |reason| break :blk .{ .err = try createInvalidIdMessage(self.allocator, reason) },
-                }
-            },
+            .nav => |target| self.handleNav(provider, target, writer_fd, size),
+            .attach => |target| self.handleAttach(provider, target, writer_fd, size),
+            .create => |name| self.handleCreate(provider, name, null),
         };
     }
 
@@ -244,19 +182,10 @@ pub const Executor = struct {
 
     pub fn createAndAttachSized(self: *Executor, provider: *policy.Provider, name: []const u8, shell: []const u8, size: SessionSize) !Result {
         var service = service_mod.WorkspaceService.init(self.allocator, self.host_bin, self.vpty_bin, self.ptylog_bin);
-        var outcome = commands.createAttached(provider, &service, name, shell, size.cols, size.rows) catch |err| {
+        const outcome = commands.createAttached(provider, &service, name, shell, size.cols, size.rows) catch |err| {
             return .{ .err = try std.fmt.allocPrint(self.allocator, "created but attach failed: {s}", .{@errorName(err)}) };
         };
-        return switch (outcome) {
-            .created => |result| blk: {
-                defer result.session.deinit(self.allocator);
-                try self.enterAttached(result.attached, result.session.id);
-                outcome = .session_exists;
-                break :blk .{ .attached = try self.allocator.dupe(u8, result.session.id) };
-            },
-            .session_exists => .{ .err = try self.allocator.dupe(u8, "session already exists") },
-            .invalid_id => |reason| .{ .err = try createInvalidIdMessage(self.allocator, reason) },
-        };
+        return self.finishCreateOutcome(outcome);
     }
 
     pub fn bootstrapInteractive(self: *Executor, provider: *policy.Provider, mode: cli_main.Mode) !Result {
@@ -311,6 +240,82 @@ pub const Executor = struct {
         if (self.link) |*link| link.detach();
         self.interactive_attached = false;
         return .detached;
+    }
+
+    fn handleBack(self: *Executor, provider: *policy.Provider, writer_fd: ?std.posix.fd_t, size: ?SessionSize) Result {
+        var service = service_mod.WorkspaceService.init(self.allocator, self.host_bin, self.vpty_bin, self.ptylog_bin);
+        var outcome = commands.planBack(self.allocator, provider, &service, self.current_session_id, self.previous_session_id) catch |err| {
+            return .{ .err = std.fmt.allocPrint(self.allocator, "back planning failed: {s}", .{@errorName(err)}) catch unreachable };
+        };
+        defer outcome.deinit(self.allocator);
+        return switch (outcome) {
+            .ready => |previous_id| self.attachReadyId(provider, previous_id, writer_fd, size, "back"),
+            else => .{ .err = backOutcomeMessage(self.allocator, outcome) catch unreachable },
+        };
+    }
+
+    fn handleKill(self: *Executor, provider: *policy.Provider) Result {
+        var service = service_mod.WorkspaceService.init(self.allocator, self.host_bin, self.vpty_bin, self.ptylog_bin);
+        const outcome = commands.killCurrentSession(provider, &service, self.current_session_id, .kill) catch |err| {
+            return .{ .err = std.fmt.allocPrint(self.allocator, "kill failed: {s}", .{@errorName(err)}) catch unreachable };
+        };
+        return switch (outcome) {
+            .signaled => .{ .info = killOutcomeMessage(self.allocator, outcome) catch unreachable },
+            else => .{ .err = killOutcomeMessage(self.allocator, outcome) catch unreachable },
+        };
+    }
+
+    fn handleNav(self: *Executor, provider: *policy.Provider, target: []u8, writer_fd: ?std.posix.fd_t, size: ?SessionSize) Result {
+        defer self.allocator.free(target);
+        var service = service_mod.WorkspaceService.init(self.allocator, self.host_bin, self.vpty_bin, self.ptylog_bin);
+        var outcome = commands.planResolvedTarget(self.allocator, provider, &service, target) catch |err| {
+            return .{ .err = std.fmt.allocPrint(self.allocator, "nav planning failed: {s}", .{@errorName(err)}) catch unreachable };
+        };
+        defer outcome.deinit(self.allocator);
+        return switch (outcome) {
+            .ready => |resolved_target| self.attachReadyId(provider, resolved_target, writer_fd, size, "attach"),
+            else => .{ .err = navOutcomeMessage(self.allocator, outcome) catch unreachable },
+        };
+    }
+
+    fn handleAttach(self: *Executor, provider: *policy.Provider, target: []u8, writer_fd: ?std.posix.fd_t, size: ?SessionSize) Result {
+        defer self.allocator.free(target);
+        if (target.len == 0) return .{ .err = self.allocator.dupe(u8, "attach target required") catch unreachable };
+        var service = service_mod.WorkspaceService.init(self.allocator, self.host_bin, self.vpty_bin, self.ptylog_bin);
+        var outcome = commands.planAttach(self.allocator, provider, &service, target) catch |err| {
+            return .{ .err = std.fmt.allocPrint(self.allocator, "attach planning failed: {s}", .{@errorName(err)}) catch unreachable };
+        };
+        defer outcome.deinit(self.allocator);
+        return switch (outcome) {
+            .ready => |resolved_target| self.attachReadyId(provider, resolved_target, writer_fd, size, "attach"),
+            else => .{ .err = attachOutcomeMessage(self.allocator, outcome, target) catch unreachable },
+        };
+    }
+
+    fn handleCreate(self: *Executor, provider: *policy.Provider, name: []u8, size: ?SessionSize) Result {
+        defer self.allocator.free(name);
+        const shell = if (std.c.getenv("SHELL")) |value| std.mem.span(value) else "/bin/sh";
+        var service = service_mod.WorkspaceService.init(self.allocator, self.host_bin, self.vpty_bin, self.ptylog_bin);
+        const outcome = commands.createAttached(provider, &service, name, shell, if (size) |s| s.cols else null, if (size) |s| s.rows else null) catch |err| {
+            return .{ .err = std.fmt.allocPrint(self.allocator, "created but attach failed: {s}", .{@errorName(err)}) catch unreachable };
+        };
+        return self.finishCreateOutcome(outcome);
+    }
+
+    fn finishCreateOutcome(self: *Executor, outcome: commands.CreateAttachedOutcome) Result {
+        var mutable = outcome;
+        return switch (mutable) {
+            .created => |result| blk: {
+                defer result.session.deinit(self.allocator);
+                self.enterAttached(result.attached, result.session.id) catch |err| {
+                    return .{ .err = std.fmt.allocPrint(self.allocator, "create attach handoff failed: {s}", .{@errorName(err)}) catch unreachable };
+                };
+                mutable = .session_exists;
+                break :blk .{ .attached = self.allocator.dupe(u8, result.session.id) catch unreachable };
+            },
+            .session_exists => .{ .err = self.allocator.dupe(u8, "session already exists") catch unreachable },
+            .invalid_id => |reason| .{ .err = createInvalidIdMessage(self.allocator, reason) catch unreachable },
+        };
     }
 
     fn attachReadyId(self: *Executor, provider: *policy.Provider, id: []const u8, writer_fd: ?std.posix.fd_t, size: ?SessionSize, comptime context: []const u8) Result {
