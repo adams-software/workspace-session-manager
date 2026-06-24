@@ -21,6 +21,44 @@ pub const AttachOutcome = union(enum) {
     }
 };
 
+pub const CreateInvalidIdReason = enum {
+    empty,
+    starts_with_slash,
+    ends_with_slash,
+    empty_segment,
+    dot_segment,
+    invalid_char,
+};
+
+pub const CreateAttachedOutcome = union(enum) {
+    created: service_mod.CreateAttachResult,
+    session_exists,
+    invalid_id: CreateInvalidIdReason,
+
+    pub fn deinit(self: *CreateAttachedOutcome, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .created => |payload| {
+                payload.attached.deinit();
+                payload.session.deinit(allocator);
+            },
+            else => {},
+        }
+    }
+};
+
+pub const CreateDetachedOutcome = union(enum) {
+    created: service_mod.SessionRef,
+    session_exists,
+    invalid_id: CreateInvalidIdReason,
+
+    pub fn deinit(self: *CreateDetachedOutcome, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .created => |payload| payload.deinit(allocator),
+            else => {},
+        }
+    }
+};
+
 pub fn planAttach(
     allocator: std.mem.Allocator,
     provider: *policy.Provider,
@@ -38,6 +76,52 @@ pub fn planAttach(
         .no_match => return .no_match,
         .ambiguous => return .ambiguous,
     }
+}
+
+fn mapCreateInvalidId(err: anyerror) ?CreateInvalidIdReason {
+    return switch (err) {
+        error.Empty => .empty,
+        error.StartsWithSlash => .starts_with_slash,
+        error.EndsWithSlash => .ends_with_slash,
+        error.EmptySegment => .empty_segment,
+        error.DotSegment => .dot_segment,
+        error.InvalidChar => .invalid_char,
+        else => null,
+    };
+}
+
+pub fn createAttached(
+    provider: *policy.Provider,
+    service: *service_mod.WorkspaceService,
+    id: []const u8,
+    shell: []const u8,
+    cols: ?u16,
+    rows: ?u16,
+) !CreateAttachedOutcome {
+    const result = service.createAndAttach(provider, id, shell, cols, rows) catch |err| {
+        if (err == error.SessionAlreadyExists) return .session_exists;
+        if (mapCreateInvalidId(err)) |reason| return .{ .invalid_id = reason };
+        return err;
+    };
+    provider.rebuildWorkspaceIndex() catch {};
+    return .{ .created = result };
+}
+
+pub fn createDetached(
+    provider: *policy.Provider,
+    service: *service_mod.WorkspaceService,
+    id: []const u8,
+    shell: []const u8,
+    cols: ?u16,
+    rows: ?u16,
+) !CreateDetachedOutcome {
+    const session = service.create(provider, id, shell, cols, rows) catch |err| {
+        if (err == error.SessionAlreadyExists) return .session_exists;
+        if (mapCreateInvalidId(err)) |reason| return .{ .invalid_id = reason };
+        return err;
+    };
+    provider.rebuildWorkspaceIndex() catch {};
+    return .{ .created = session };
 }
 
 test "planAttach reports no match without touching service state" {
@@ -65,4 +149,17 @@ test "planAttach reports no match without touching service state" {
     defer outcome.deinit(allocator);
 
     try std.testing.expectEqual(.no_match, outcome);
+}
+
+test "createDetached surfaces invalid id as structured outcome" {
+    const allocator = std.testing.allocator;
+    var provider = try policy.Provider.init(allocator, "/tmp/workspace", null);
+    defer provider.deinit();
+    var service = service_mod.WorkspaceService.init(allocator, "host", "vpty", "ptylog");
+
+    var outcome = try createDetached(&provider, &service, "", "/bin/sh", null, null);
+    defer outcome.deinit(allocator);
+
+    try std.testing.expectEqual(.invalid_id, outcome);
+    try std.testing.expectEqual(CreateInvalidIdReason.empty, outcome.invalid_id);
 }

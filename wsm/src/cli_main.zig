@@ -2,6 +2,7 @@ const std = @import("std");
 const c = @cImport({
     @cInclude("unistd.h");
 });
+const commands = @import("commands.zig");
 const global_io = std.Io.Threaded.global_single_threaded.io();
 const policy = @import("policy.zig");
 const service_mod = @import("service.zig");
@@ -203,6 +204,17 @@ fn presentSummary(allocator: std.mem.Allocator, info: service_mod.SessionInfo) !
     return try std.mem.join(allocator, ",", parts.items);
 }
 
+fn createInvalidIdMessage(allocator: std.mem.Allocator, reason: commands.CreateInvalidIdReason) ![]u8 {
+    return try std.fmt.allocPrint(allocator, "invalid id: {s}\n", .{switch (reason) {
+        .empty => "Empty",
+        .starts_with_slash => "StartsWithSlash",
+        .ends_with_slash => "EndsWithSlash",
+        .empty_segment => "EmptySegment",
+        .dot_segment => "DotSegment",
+        .invalid_char => "InvalidChar",
+    }});
+}
+
 pub fn runCommand(allocator: std.mem.Allocator, root: []const u8, mode: Mode, writer: anytype) !u8 {
     var provider = try policy.Provider.init(allocator, root, null);
     defer provider.deinit();
@@ -314,13 +326,31 @@ pub fn runCommand(allocator: std.mem.Allocator, root: []const u8, mode: Mode, wr
         },
         .create_detached, .create_detached_alias => |id| {
             const shell = if (std.c.getenv("SHELL")) |value| std.mem.span(value) else "/bin/sh";
-            const session = try service.create(&provider, id, shell, null, null);
-            defer session.deinit(allocator);
-            provider.rebuildWorkspaceIndex() catch {};
-            const line = try std.fmt.allocPrint(allocator, "created {s}\n", .{session.id});
-            defer allocator.free(line);
-            try writer.writeAll(line);
-            return 0;
+            var outcome = commands.createDetached(&provider, &service, id, shell, null, null) catch |err| {
+                const msg = try std.fmt.allocPrint(allocator, "create failed: {s}\n", .{@errorName(err)});
+                defer allocator.free(msg);
+                try writer.writeAll(msg);
+                return 1;
+            };
+            defer outcome.deinit(allocator);
+            switch (outcome) {
+                .created => |session| {
+                    const line = try std.fmt.allocPrint(allocator, "created {s}\n", .{session.id});
+                    defer allocator.free(line);
+                    try writer.writeAll(line);
+                    return 0;
+                },
+                .session_exists => {
+                    try writer.writeAll("session already exists\n");
+                    return 1;
+                },
+                .invalid_id => |reason| {
+                    const msg = try createInvalidIdMessage(allocator, reason);
+                    defer allocator.free(msg);
+                    try writer.writeAll(msg);
+                    return 1;
+                },
+            }
         },
         .kill => |args| {
             service.killSession(&provider, args.id, if (args.force) .kill else .term) catch |err| {

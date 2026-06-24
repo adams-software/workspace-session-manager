@@ -36,6 +36,17 @@ fn attachOutcomeMessage(allocator: std.mem.Allocator, outcome: commands.AttachOu
     };
 }
 
+fn createInvalidIdMessage(allocator: std.mem.Allocator, reason: commands.CreateInvalidIdReason) ![]u8 {
+    return try std.fmt.allocPrint(allocator, "invalid id: {s}", .{switch (reason) {
+        .empty => "Empty",
+        .starts_with_slash => "StartsWithSlash",
+        .ends_with_slash => "EndsWithSlash",
+        .empty_segment => "EmptySegment",
+        .dot_segment => "DotSegment",
+        .invalid_char => "InvalidChar",
+    }});
+}
+
 pub const Result = union(enum) {
     info: []const u8,
     err: []const u8,
@@ -171,15 +182,19 @@ pub const Executor = struct {
                 defer self.allocator.free(name);
                 const shell = if (std.c.getenv("SHELL")) |value| std.mem.span(value) else "/bin/sh";
                 var service = service_mod.WorkspaceService.init(self.allocator, self.host_bin, self.vpty_bin, self.ptylog_bin);
-                const result = service.createAndAttach(provider, name, shell, null, null) catch |err| switch (err) {
-                    error.SessionAlreadyExists => break :blk .{ .err = try self.allocator.dupe(u8, "session already exists") },
-                    error.Empty, error.StartsWithSlash, error.EndsWithSlash, error.EmptySegment, error.DotSegment, error.InvalidChar => break :blk .{ .err = try std.fmt.allocPrint(self.allocator, "invalid id: {s}", .{@errorName(err)}) },
-                    else => break :blk .{ .err = try std.fmt.allocPrint(self.allocator, "created but attach failed: {s}", .{@errorName(err)}) },
+                var outcome = commands.createAttached(provider, &service, name, shell, null, null) catch |err| {
+                    break :blk .{ .err = try std.fmt.allocPrint(self.allocator, "created but attach failed: {s}", .{@errorName(err)}) };
                 };
-                provider.rebuildWorkspaceIndex() catch {};
-                try self.enterAttached(result.attached, result.session.id);
-                defer result.session.deinit(self.allocator);
-                break :blk .{ .attached = try self.allocator.dupe(u8, result.session.id) };
+                switch (outcome) {
+                    .created => |result| {
+                        defer result.session.deinit(self.allocator);
+                        try self.enterAttached(result.attached, result.session.id);
+                        outcome = .session_exists;
+                        break :blk .{ .attached = try self.allocator.dupe(u8, result.session.id) };
+                    },
+                    .session_exists => break :blk .{ .err = try self.allocator.dupe(u8, "session already exists") },
+                    .invalid_id => |reason| break :blk .{ .err = try createInvalidIdMessage(self.allocator, reason) },
+                }
             },
         };
     }
@@ -219,15 +234,19 @@ pub const Executor = struct {
 
     pub fn createAndAttachSized(self: *Executor, provider: *policy.Provider, name: []const u8, shell: []const u8, size: SessionSize) !Result {
         var service = service_mod.WorkspaceService.init(self.allocator, self.host_bin, self.vpty_bin, self.ptylog_bin);
-        const result = service.createAndAttach(provider, name, shell, size.cols, size.rows) catch |err| switch (err) {
-            error.SessionAlreadyExists => return .{ .err = try self.allocator.dupe(u8, "session already exists") },
-            error.Empty, error.StartsWithSlash, error.EndsWithSlash, error.EmptySegment, error.DotSegment, error.InvalidChar => return .{ .err = try std.fmt.allocPrint(self.allocator, "invalid id: {s}", .{@errorName(err)}) },
-            else => return .{ .err = try std.fmt.allocPrint(self.allocator, "created but attach failed: {s}", .{@errorName(err)}) },
+        var outcome = commands.createAttached(provider, &service, name, shell, size.cols, size.rows) catch |err| {
+            return .{ .err = try std.fmt.allocPrint(self.allocator, "created but attach failed: {s}", .{@errorName(err)}) };
         };
-        provider.rebuildWorkspaceIndex() catch {};
-        try self.enterAttached(result.attached, result.session.id);
-        defer result.session.deinit(self.allocator);
-        return .{ .attached = try self.allocator.dupe(u8, result.session.id) };
+        return switch (outcome) {
+            .created => |result| blk: {
+                defer result.session.deinit(self.allocator);
+                try self.enterAttached(result.attached, result.session.id);
+                outcome = .session_exists;
+                break :blk .{ .attached = try self.allocator.dupe(u8, result.session.id) };
+            },
+            .session_exists => .{ .err = try self.allocator.dupe(u8, "session already exists") },
+            .invalid_id => |reason| .{ .err = try createInvalidIdMessage(self.allocator, reason) },
+        };
     }
 
     pub fn bootstrapInteractive(self: *Executor, provider: *policy.Provider, mode: cli_main.Mode) !Result {
