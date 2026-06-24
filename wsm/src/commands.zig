@@ -65,6 +65,23 @@ pub const KillOutcome = union(enum) {
     no_control,
 };
 
+pub const BackOutcome = union(enum) {
+    ready: []u8,
+    no_previous_session,
+    not_attachable: struct {
+        id: []u8,
+        state: service_mod.AttachState,
+    },
+
+    pub fn deinit(self: *BackOutcome, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .ready => |id| allocator.free(id),
+            .not_attachable => |payload| allocator.free(payload.id),
+            else => {},
+        }
+    }
+};
+
 pub fn planAttach(
     allocator: std.mem.Allocator,
     provider: *policy.Provider,
@@ -154,6 +171,24 @@ pub fn killCurrentSession(
     return try killSessionById(provider, service, id, sig);
 }
 
+pub fn planBack(
+    allocator: std.mem.Allocator,
+    provider: *policy.Provider,
+    service: *service_mod.WorkspaceService,
+    current_id: ?[]const u8,
+    previous_id: ?[]const u8,
+) !BackOutcome {
+    const previous = previous_id orelse return .no_previous_session;
+    if (current_id) |current| {
+        if (std.mem.eql(u8, current, previous)) return .no_previous_session;
+    }
+    const id = try allocator.dupe(u8, previous);
+    errdefer allocator.free(id);
+    const state = try service.attachState(provider, id);
+    if (state == .ready) return .{ .ready = id };
+    return .{ .not_attachable = .{ .id = id, .state = state } };
+}
+
 test "planAttach reports no match without touching service state" {
     const allocator = std.testing.allocator;
     var provider = try policy.Provider.init(allocator, "/tmp/workspace", null);
@@ -202,4 +237,14 @@ test "killCurrentSession reports missing current session as structured outcome" 
 
     const outcome = try killCurrentSession(&provider, &service, null, .kill);
     try std.testing.expectEqual(.no_current_session, outcome);
+}
+
+test "planBack reports missing previous session as structured outcome" {
+    const allocator = std.testing.allocator;
+    var provider = try policy.Provider.init(allocator, "/tmp/workspace", null);
+    defer provider.deinit();
+    var service = service_mod.WorkspaceService.init(allocator, "host", "vpty", "ptylog");
+
+    const outcome = try planBack(allocator, &provider, &service, null, null);
+    try std.testing.expectEqual(.no_previous_session, outcome);
 }

@@ -55,6 +55,14 @@ fn killOutcomeMessage(allocator: std.mem.Allocator, outcome: commands.KillOutcom
     };
 }
 
+fn backOutcomeMessage(allocator: std.mem.Allocator, outcome: commands.BackOutcome) ![]u8 {
+    return switch (outcome) {
+        .ready => unreachable,
+        .no_previous_session => try allocator.dupe(u8, "no previous session"),
+        .not_attachable => |payload| try std.fmt.allocPrint(allocator, "session '{s}' is not attachable: {s}", .{ payload.id, attachStateMessage(payload.state) }),
+    };
+}
+
 pub const Result = union(enum) {
     info: []const u8,
     err: []const u8,
@@ -122,18 +130,22 @@ pub const Executor = struct {
             .quit => .detached,
             .detach => self.runDetach() catch |err| .{ .err = try std.fmt.allocPrint(self.allocator, "detach failed: {s}", .{@errorName(err)}) },
             .back => blk: {
-                const previous_id = self.previous_session_id orelse break :blk .{ .err = try self.allocator.dupe(u8, "no previous session") };
-                if (self.current_session_id) |current_id| {
-                    if (std.mem.eql(u8, current_id, previous_id)) {
-                        break :blk .{ .err = try self.allocator.dupe(u8, "no previous session") };
-                    }
-                }
-                const attached_id = self.attachCanonicalVerified(provider, previous_id, writer_fd, size) catch |err| {
-                    break :blk .{ .err = try std.fmt.allocPrint(self.allocator, "back failed: {s}", .{@errorName(err)}) };
+                var service = service_mod.WorkspaceService.init(self.allocator, self.host_bin, self.vpty_bin, self.ptylog_bin);
+                var outcome = commands.planBack(self.allocator, provider, &service, self.current_session_id, self.previous_session_id) catch |err| {
+                    break :blk .{ .err = try std.fmt.allocPrint(self.allocator, "back planning failed: {s}", .{@errorName(err)}) };
                 };
-                defer self.allocator.free(attached_id);
-                self.interactive_attached = true;
-                break :blk .{ .attached = try self.allocator.dupe(u8, attached_id) };
+                defer outcome.deinit(self.allocator);
+                switch (outcome) {
+                    .ready => |previous_id| {
+                        const attached_id = self.attachCanonicalVerified(provider, previous_id, writer_fd, size) catch |err| {
+                            break :blk .{ .err = try std.fmt.allocPrint(self.allocator, "back failed: {s}", .{@errorName(err)}) };
+                        };
+                        defer self.allocator.free(attached_id);
+                        self.interactive_attached = true;
+                        break :blk .{ .attached = try self.allocator.dupe(u8, attached_id) };
+                    },
+                    else => break :blk .{ .err = try backOutcomeMessage(self.allocator, outcome) },
+                }
             },
             .kill => blk: {
                 var service = service_mod.WorkspaceService.init(self.allocator, self.host_bin, self.vpty_bin, self.ptylog_bin);
