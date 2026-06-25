@@ -72,9 +72,11 @@ LESS_SHIM_DIR="$TMP/less-shim"
 mkdir -p "$LESS_SHIM_DIR"
 cat > "$LESS_SHIM_DIR/less" <<'EOS'
 #!/bin/sh
+PAYLOAD="$(cat)"
 printf 'TERM=%s\n' "${TERM:-}"
 printf 'LESSCHARSET=%s\n' "${LESSCHARSET:-}"
 printf 'ARGS:%s\n' "$*"
+printf 'PAYLOAD:%s\n' "$PAYLOAD"
 exit 0
 EOS
 chmod +x "$LESS_SHIM_DIR/less"
@@ -82,7 +84,16 @@ VIEWER_OUT="$(TERM=dumb PATH="$LESS_SHIM_DIR:$PATH" "$REPO_ROOT/wsm/scripts/wsm_
 printf '%s\n' "$VIEWER_OUT"
 printf '%s\n' "$VIEWER_OUT" | grep -q 'TERM=xterm-256color'
 printf '%s\n' "$VIEWER_OUT" | grep -q 'LESSCHARSET=utf-8'
-printf '%s\n' "$VIEWER_OUT" | grep -q "ARGS:+G -R -X $TMP/demo.log"
+printf '%s\n' "$VIEWER_OUT" | grep -q 'ARGS:+G -R -X'
+printf '%s\n' "$VIEWER_OUT" | grep -q 'PAYLOAD:hello from log'
+
+printf '=== wsm log viewer stitches segmented logs ===\n'
+printf 'older line\n' > "$TMP/demo.log.000001"
+printf 'newer line\n' > "$TMP/demo.log"
+SEGMENT_VIEWER_OUT="$(TERM=dumb PATH="$LESS_SHIM_DIR:$PATH" "$REPO_ROOT/wsm/scripts/wsm_logs_viewer" "$TMP/demo.log" 2>&1 || true)"
+printf '%s\n' "$SEGMENT_VIEWER_OUT"
+printf '%s\n' "$SEGMENT_VIEWER_OUT" | grep -q 'older line'
+printf '%s\n' "$SEGMENT_VIEWER_OUT" | grep -q 'newer line'
 
 printf '=== wsm kill ===\n'
 KILL_OUT="$(WSM_ROOT="$TMP" "$WSM_BIN" kill demo)"

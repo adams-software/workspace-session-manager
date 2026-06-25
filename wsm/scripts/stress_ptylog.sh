@@ -80,4 +80,18 @@ fi
 [[ -f "$KILL_LOG" ]]
 assert_contains 'kill-path' "$KILL_LOG"
 
+printf '=== segmented logs keep a bounded recent window ===\n'
+SEGMENT_LOG="$TMP/segmented.log"
+"$PTYLOG_BIN" \
+  --log "$SEGMENT_LOG" \
+  --log-budget-bytes 256 \
+  --log-segment-bytes 128 \
+  -- /bin/bash -lc 'for i in $(seq 0 199); do printf "line-%03d\r\n" "$i"; done; printf "$ "' >/dev/null
+[[ -f "$SEGMENT_LOG" ]]
+compgen -G "$TMP/segmented.log.0*" >/dev/null
+COMBINED_SEGMENT_LOG="$TMP/segmented.combined"
+cat "$TMP"/segmented.log.0* "$SEGMENT_LOG" > "$COMBINED_SEGMENT_LOG"
+assert_contains 'line-199' "$COMBINED_SEGMENT_LOG"
+assert_not_contains 'line-000' "$COMBINED_SEGMENT_LOG"
+
 printf 'stress ptylog ok\n'

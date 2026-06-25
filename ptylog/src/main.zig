@@ -13,28 +13,52 @@ const c = @cImport({
 });
 
 const io_chunk_size = 64 * 1024;
+const default_log_budget_bytes: u64 = 10 * 1024 * 1024;
+const default_log_segment_bytes: u64 = 512 * 1024;
 
 var winch_changed = false;
 var terminate_signal: c.sig_atomic_t = 0;
 
 const LogState = struct {
     allocator: std.mem.Allocator,
+    base_path: []u8,
+    budget_bytes: u64,
+    segment_bytes: u64,
     file: ?std.Io.File,
     logger: ?log_core.StreamLogger,
     buf: [4096]u8 = undefined,
     warned: bool = false,
+    next_segment_index: u32 = 1,
+    current_bytes: u64 = 0,
 
-    fn init(io: std.Io, allocator: std.mem.Allocator, path: []const u8, rows: u16, cols: u16) !LogState {
+    fn init(
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        path: []const u8,
+        rows: u16,
+        cols: u16,
+        budget_bytes: u64,
+        segment_bytes: u64,
+    ) !LogState {
+        const base_path = try allocator.dupe(u8, path);
+        errdefer allocator.free(base_path);
+        try cleanupOldSegments(base_path);
         const file = createOutput(io, path) catch |err| {
             std.debug.print("ptylog: logging disabled: {s}\n", .{@errorName(err)});
             return .{
                 .allocator = allocator,
+                .base_path = base_path,
+                .budget_bytes = budget_bytes,
+                .segment_bytes = segment_bytes,
                 .file = null,
                 .logger = null,
             };
         };
         return .{
             .allocator = allocator,
+            .base_path = base_path,
+            .budget_bytes = budget_bytes,
+            .segment_bytes = segment_bytes,
             .file = file,
             .logger = try log_core.StreamLogger.init(allocator, .ansi, rows, cols),
         };
@@ -43,6 +67,7 @@ const LogState = struct {
     fn deinit(self: *LogState, io: std.Io) void {
         if (self.logger) |*logger| logger.deinit();
         if (self.file) |*file| file.close(io);
+        self.allocator.free(self.base_path);
     }
 
     fn disable(self: *LogState, io: std.Io, err: anyerror) void {
@@ -57,6 +82,55 @@ const LogState = struct {
         if (self.file) |*file| {
             file.close(io);
             self.file = null;
+        }
+    }
+
+    fn postWrite(self: *LogState, io: std.Io) void {
+        if (self.file == null) return;
+        self.current_bytes = fileSize(self.base_path) catch |err| {
+            self.disable(io, err);
+            return;
+        };
+        if (self.current_bytes < self.segment_bytes) return;
+        self.rollSegment(io) catch |err| {
+            self.disable(io, err);
+        };
+    }
+
+    fn rollSegment(self: *LogState, io: std.Io) !void {
+        if (self.file) |*file| {
+            file.close(io);
+            self.file = null;
+        }
+        const segment_path = try self.segmentPath(self.next_segment_index);
+        defer self.allocator.free(segment_path);
+        try std.Io.Dir.renameAbsolute(self.base_path, segment_path, io);
+        self.next_segment_index += 1;
+        try self.enforceBudget();
+        self.file = try createOutput(io, self.base_path);
+        self.current_bytes = 0;
+    }
+
+    fn segmentPath(self: *const LogState, index: u32) ![]u8 {
+        return try std.fmt.allocPrint(self.allocator, "{s}.{d:0>6}", .{ self.base_path, index });
+    }
+
+    fn enforceBudget(self: *LogState) !void {
+        if (self.budget_bytes == 0) return;
+        const total = try totalRetainedBytes(self.allocator, self.base_path);
+        if (total <= self.budget_bytes) return;
+
+        var retained = total;
+        var oldest: u32 = 1;
+        while (retained > self.budget_bytes and oldest < self.next_segment_index) : (oldest += 1) {
+            const segment_path = try self.segmentPath(oldest);
+            defer self.allocator.free(segment_path);
+            const size = fileSize(segment_path) catch |err| switch (err) {
+                error.FileNotFound => continue,
+                else => return err,
+            };
+            try std.Io.Dir.deleteFileAbsolute(std.Io.Threaded.global_single_threaded.io(), segment_path);
+            retained -|= size;
         }
     }
 
@@ -75,42 +149,51 @@ const LogState = struct {
             return;
         };
 
-        var file = &self.file.?;
-        var writer = file.writer(io, &self.buf);
-        logger.flushLive(&writer.interface) catch |err| {
-            self.disable(io, err);
-            return;
-        };
-        writer.interface.flush() catch |err| {
-            self.disable(io, err);
-            return;
-        };
+        {
+            var file = &self.file.?;
+            var writer = file.writer(io, &self.buf);
+            logger.flushLive(&writer.interface) catch |err| {
+                self.disable(io, err);
+                return;
+            };
+            writer.interface.flush() catch |err| {
+                self.disable(io, err);
+                return;
+            };
+        }
+        self.postWrite(io);
     }
 
     fn finish(self: *LogState, io: std.Io) void {
         if (self.logger == null or self.file == null) return;
 
-        var logger = &self.logger.?;
-        var file = &self.file.?;
-        var writer = file.writer(io, &self.buf);
-        logger.finish(&writer.interface) catch |err| {
-            self.disable(io, err);
-            return;
-        };
-        writer.interface.flush() catch |err| {
-            self.disable(io, err);
-        };
+        {
+            var logger = &self.logger.?;
+            var file = &self.file.?;
+            var writer = file.writer(io, &self.buf);
+            logger.finish(&writer.interface) catch |err| {
+                self.disable(io, err);
+                return;
+            };
+            writer.interface.flush() catch |err| {
+                self.disable(io, err);
+                return;
+            };
+        }
+        self.postWrite(io);
     }
 };
 
 const Config = struct {
     log_path: []const u8,
+    log_budget_bytes: u64 = default_log_budget_bytes,
+    log_segment_bytes: u64 = default_log_segment_bytes,
     child_argv: []const []const u8,
 };
 
 fn usage() void {
     std.debug.print(
-        "NAME\n  ptylog - PTY passthrough logger\n\nUSAGE\n  ptylog --log <path> -- <command> [args...]\n",
+        "NAME\n  ptylog - PTY passthrough logger\n\nUSAGE\n  ptylog --log <path> [--log-budget-bytes <n>] [--log-segment-bytes <n>] -- <command> [args...]\n",
         .{},
     );
 }
@@ -125,6 +208,8 @@ fn handleTerminate(sig: c_int) callconv(.c) void {
 
 fn parseArgs(allocator: std.mem.Allocator, argv: []const []const u8) !Config {
     var log_path: ?[]const u8 = null;
+    var log_budget_bytes = default_log_budget_bytes;
+    var log_segment_bytes = default_log_segment_bytes;
     var child_start: ?usize = null;
 
     var i: usize = 1;
@@ -141,14 +226,30 @@ fn parseArgs(allocator: std.mem.Allocator, argv: []const []const u8) !Config {
             log_path = argv[i];
             continue;
         }
+        if (std.mem.eql(u8, arg, "--log-budget-bytes")) {
+            i += 1;
+            if (i >= argv.len) return error.InvalidArgs;
+            log_budget_bytes = try std.fmt.parseUnsigned(u64, argv[i], 10);
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--log-segment-bytes")) {
+            i += 1;
+            if (i >= argv.len) return error.InvalidArgs;
+            log_segment_bytes = try std.fmt.parseUnsigned(u64, argv[i], 10);
+            continue;
+        }
         return error.InvalidArgs;
     }
+
+    if (log_segment_bytes == 0 or log_budget_bytes == 0 or log_segment_bytes > log_budget_bytes) return error.InvalidArgs;
 
     const start = child_start orelse return error.InvalidArgs;
     if (start >= argv.len) return error.InvalidArgs;
 
     return .{
         .log_path = log_path orelse return error.InvalidArgs,
+        .log_budget_bytes = log_budget_bytes,
+        .log_segment_bytes = log_segment_bytes,
         .child_argv = try allocator.dupe([]const u8, argv[start..]),
     };
 }
@@ -161,6 +262,71 @@ fn ensureParent(io: std.Io, path: []const u8) !void {
 fn createOutput(io: std.Io, path: []const u8) !std.Io.File {
     try ensureParent(io, path);
     return try std.Io.Dir.createFile(.cwd(), io, path, .{ .truncate = true, .read = false });
+}
+
+fn cleanupOldSegments(base_path: []const u8) !void {
+    const dir_name = std.fs.path.dirname(base_path) orelse ".";
+    const file_name = std.fs.path.basename(base_path);
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var dir = try std.Io.Dir.openDirAbsolute(io, dir_name, .{ .iterate = true });
+    defer dir.close(io);
+
+    var iter = dir.iterate();
+    while (try iter.next(io)) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.startsWith(u8, entry.name, file_name)) continue;
+        if (entry.name.len <= file_name.len + 1) continue;
+        if (entry.name[file_name.len] != '.') continue;
+        if (!isNumeric(entry.name[(file_name.len + 1)..])) continue;
+        try dir.deleteFile(io, entry.name);
+    }
+}
+
+fn totalRetainedBytes(allocator: std.mem.Allocator, base_path: []const u8) !u64 {
+    const dir_name = std.fs.path.dirname(base_path) orelse ".";
+    const file_name = std.fs.path.basename(base_path);
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var dir = try std.Io.Dir.openDirAbsolute(io, dir_name, .{ .iterate = true });
+    defer dir.close(io);
+
+    var total: u64 = 0;
+    if (dir.statFile(io, file_name, .{})) |stat| {
+        total += stat.size;
+    } else |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    }
+
+    var iter = dir.iterate();
+    while (try iter.next(io)) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.startsWith(u8, entry.name, file_name)) continue;
+        if (entry.name.len <= file_name.len + 1) continue;
+        if (entry.name[file_name.len] != '.') continue;
+        if (!isNumeric(entry.name[(file_name.len + 1)..])) continue;
+        const stat = try dir.statFile(io, entry.name, .{});
+        total += stat.size;
+    }
+    _ = allocator;
+    return total;
+}
+
+fn fileSize(path: []const u8) !u64 {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const dir_name = std.fs.path.dirname(path) orelse ".";
+    const file_name = std.fs.path.basename(path);
+    var dir = try std.Io.Dir.openDirAbsolute(io, dir_name, .{});
+    defer dir.close(io);
+    const stat = try dir.statFile(io, file_name, .{});
+    return stat.size;
+}
+
+fn isNumeric(bytes: []const u8) bool {
+    if (bytes.len == 0) return false;
+    for (bytes) |byte| {
+        if (byte < '0' or byte > '9') return false;
+    }
+    return true;
 }
 
 fn currentSize() struct { rows: u16, cols: u16 } {
@@ -202,7 +368,15 @@ fn run(io: std.Io, allocator: std.mem.Allocator, config: Config) !u8 {
     defer if (raw_mode) |*guard| guard.restore();
 
     const size = currentSize();
-    var log_state = try LogState.init(io, allocator, config.log_path, size.rows, size.cols);
+    var log_state = try LogState.init(
+        io,
+        allocator,
+        config.log_path,
+        size.rows,
+        size.cols,
+        config.log_budget_bytes,
+        config.log_segment_bytes,
+    );
     defer log_state.deinit(io);
 
     var child = try PtyChildHost.init(allocator, .{
