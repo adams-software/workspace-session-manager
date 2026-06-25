@@ -13,7 +13,7 @@ const c = @cImport({
 });
 
 const io_chunk_size = 64 * 1024;
-const default_log_budget_bytes: u64 = 10 * 1024 * 1024;
+const default_log_budget_bytes: u64 = 1 * 1024 * 1024;
 const default_log_segment_bytes: u64 = 512 * 1024;
 
 var winch_changed = false;
