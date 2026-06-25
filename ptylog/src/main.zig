@@ -13,8 +13,9 @@ const c = @cImport({
 });
 
 const io_chunk_size = 64 * 1024;
-const default_log_budget_bytes: u64 = 1 * 1024 * 1024;
-const default_log_segment_bytes: u64 = 512 * 1024;
+const default_log_segment_bytes: u64 = 1 * 1024 * 1024;
+const default_log_segment_count: u64 = 10;
+const default_log_budget_bytes: u64 = default_log_segment_bytes * default_log_segment_count;
 
 var winch_changed = false;
 var terminate_signal: c.sig_atomic_t = 0;
@@ -193,7 +194,7 @@ const Config = struct {
 
 fn usage() void {
     std.debug.print(
-        "NAME\n  ptylog - PTY passthrough logger\n\nUSAGE\n  ptylog --log <path> [--log-budget-bytes <n>] [--log-segment-bytes <n>] -- <command> [args...]\n",
+        "NAME\n  ptylog - PTY passthrough logger\n\nUSAGE\n  ptylog --log <path> [--segment <bytes>] [--keep <count>] -- <command> [args...]\n",
         .{},
     );
 }
@@ -208,8 +209,10 @@ fn handleTerminate(sig: c_int) callconv(.c) void {
 
 fn parseArgs(allocator: std.mem.Allocator, argv: []const []const u8) !Config {
     var log_path: ?[]const u8 = null;
-    var log_budget_bytes = default_log_budget_bytes;
     var log_segment_bytes = default_log_segment_bytes;
+    var log_segment_count = default_log_segment_count;
+    var budget_override: ?u64 = null;
+    var keep_override = false;
     var child_start: ?usize = null;
 
     var i: usize = 1;
@@ -226,10 +229,23 @@ fn parseArgs(allocator: std.mem.Allocator, argv: []const []const u8) !Config {
             log_path = argv[i];
             continue;
         }
+        if (std.mem.eql(u8, arg, "--segment")) {
+            i += 1;
+            if (i >= argv.len) return error.InvalidArgs;
+            log_segment_bytes = try std.fmt.parseUnsigned(u64, argv[i], 10);
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--keep")) {
+            i += 1;
+            if (i >= argv.len) return error.InvalidArgs;
+            log_segment_count = try std.fmt.parseUnsigned(u64, argv[i], 10);
+            keep_override = true;
+            continue;
+        }
         if (std.mem.eql(u8, arg, "--log-budget-bytes")) {
             i += 1;
             if (i >= argv.len) return error.InvalidArgs;
-            log_budget_bytes = try std.fmt.parseUnsigned(u64, argv[i], 10);
+            budget_override = try std.fmt.parseUnsigned(u64, argv[i], 10);
             continue;
         }
         if (std.mem.eql(u8, arg, "--log-segment-bytes")) {
@@ -241,7 +257,15 @@ fn parseArgs(allocator: std.mem.Allocator, argv: []const []const u8) !Config {
         return error.InvalidArgs;
     }
 
-    if (log_segment_bytes == 0 or log_budget_bytes == 0 or log_segment_bytes > log_budget_bytes) return error.InvalidArgs;
+    if (log_segment_bytes == 0) return error.InvalidArgs;
+    if (keep_override and budget_override != null) return error.InvalidArgs;
+
+    const log_budget_bytes = if (budget_override) |budget|
+        budget
+    else
+        try std.math.mul(u64, log_segment_bytes, log_segment_count);
+
+    if (log_segment_count == 0 or log_budget_bytes == 0 or log_segment_bytes > log_budget_bytes) return error.InvalidArgs;
 
     const start = child_start orelse return error.InvalidArgs;
     if (start >= argv.len) return error.InvalidArgs;

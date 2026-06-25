@@ -84,8 +84,8 @@ printf '=== segmented logs keep a bounded recent window ===\n'
 SEGMENT_LOG="$TMP/segmented.log"
 "$PTYLOG_BIN" \
   --log "$SEGMENT_LOG" \
-  --log-budget-bytes 256 \
-  --log-segment-bytes 128 \
+  --segment 128 \
+  --keep 2 \
   -- /bin/bash -lc 'for i in $(seq 0 199); do printf "line-%03d\r\n" "$i"; done; printf "$ "' >/dev/null
 [[ -f "$SEGMENT_LOG" ]]
 compgen -G "$TMP/segmented.log.0*" >/dev/null
