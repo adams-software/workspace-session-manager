@@ -17,6 +17,92 @@ const io_chunk_size = 64 * 1024;
 var winch_changed = false;
 var terminate_signal: c.sig_atomic_t = 0;
 
+const LogState = struct {
+    allocator: std.mem.Allocator,
+    file: ?std.Io.File,
+    logger: ?log_core.StreamLogger,
+    buf: [4096]u8 = undefined,
+    warned: bool = false,
+
+    fn init(io: std.Io, allocator: std.mem.Allocator, path: []const u8, rows: u16, cols: u16) !LogState {
+        const file = createOutput(io, path) catch |err| {
+            std.debug.print("ptylog: logging disabled: {s}\n", .{@errorName(err)});
+            return .{
+                .allocator = allocator,
+                .file = null,
+                .logger = null,
+            };
+        };
+        return .{
+            .allocator = allocator,
+            .file = file,
+            .logger = try log_core.StreamLogger.init(allocator, .ansi, rows, cols),
+        };
+    }
+
+    fn deinit(self: *LogState, io: std.Io) void {
+        if (self.logger) |*logger| logger.deinit();
+        if (self.file) |*file| file.close(io);
+    }
+
+    fn disable(self: *LogState, io: std.Io, err: anyerror) void {
+        if (!self.warned) {
+            self.warned = true;
+            std.debug.print("ptylog: logging disabled after error: {s}\n", .{@errorName(err)});
+        }
+        if (self.logger) |*logger| {
+            logger.deinit();
+            self.logger = null;
+        }
+        if (self.file) |*file| {
+            file.close(io);
+            self.file = null;
+        }
+    }
+
+    fn resize(self: *LogState, rows: u16, cols: u16) void {
+        if (self.logger) |*logger| {
+            logger.resize(rows, cols) catch |err| self.disable(std.Io.Threaded.global_single_threaded.io(), err);
+        }
+    }
+
+    fn feed(self: *LogState, io: std.Io, bytes: []const u8) void {
+        if (self.logger == null or self.file == null) return;
+
+        var logger = &self.logger.?;
+        logger.feed(bytes) catch |err| {
+            self.disable(io, err);
+            return;
+        };
+
+        var file = &self.file.?;
+        var writer = file.writer(io, &self.buf);
+        logger.flushLive(&writer.interface) catch |err| {
+            self.disable(io, err);
+            return;
+        };
+        writer.interface.flush() catch |err| {
+            self.disable(io, err);
+            return;
+        };
+    }
+
+    fn finish(self: *LogState, io: std.Io) void {
+        if (self.logger == null or self.file == null) return;
+
+        var logger = &self.logger.?;
+        var file = &self.file.?;
+        var writer = file.writer(io, &self.buf);
+        logger.finish(&writer.interface) catch |err| {
+            self.disable(io, err);
+            return;
+        };
+        writer.interface.flush() catch |err| {
+            self.disable(io, err);
+        };
+    }
+};
+
 const Config = struct {
     log_path: []const u8,
     child_argv: []const []const u8,
@@ -115,12 +201,10 @@ fn run(io: std.Io, allocator: std.mem.Allocator, config: Config) !u8 {
     var raw_mode = if (stdin_is_tty) try enterRawMode(std.posix.STDIN_FILENO) else null;
     defer if (raw_mode) |*guard| guard.restore();
 
-    var log_file = try createOutput(io, config.log_path);
-    defer log_file.close(io);
-    var log_buf: [4096]u8 = undefined;
-    var log_writer = log_file.writer(io, &log_buf);
-
     const size = currentSize();
+    var log_state = try LogState.init(io, allocator, config.log_path, size.rows, size.cols);
+    defer log_state.deinit(io);
+
     var child = try PtyChildHost.init(allocator, .{
         .argv = config.child_argv,
         .cols = size.cols,
@@ -133,9 +217,6 @@ fn run(io: std.Io, allocator: std.mem.Allocator, config: Config) !u8 {
     try fd_stream.setNonBlocking(std.posix.STDIN_FILENO);
     try fd_stream.setNonBlocking(std.posix.STDOUT_FILENO);
     try fd_stream.setNonBlocking(pty_fd);
-
-    var logger = try log_core.StreamLogger.init(allocator, .ansi, size.rows, size.cols);
-    defer logger.deinit();
 
     var stdin_rx = ByteQueue.init();
     defer stdin_rx.deinit(allocator);
@@ -155,7 +236,7 @@ fn run(io: std.Io, allocator: std.mem.Allocator, config: Config) !u8 {
             winch_changed = false;
             const next_size = currentSize();
             child.applySize(.{ .cols = next_size.cols, .rows = next_size.rows }) catch {};
-            try logger.resize(next_size.rows, next_size.cols);
+            log_state.resize(next_size.rows, next_size.cols);
         }
 
         const requested_terminate: c_int = @intCast(terminate_signal);
@@ -189,9 +270,7 @@ fn run(io: std.Io, allocator: std.mem.Allocator, config: Config) !u8 {
             if (!pty_rx.isEmpty()) {
                 const bytes = pty_rx.readableSlice();
                 try stdout_tx.append(allocator, bytes);
-                try logger.feed(bytes);
-                try logger.flushLive(&log_writer.interface);
-                try log_writer.interface.flush();
+                log_state.feed(io, bytes);
                 pty_rx.clear();
             }
         }
@@ -209,8 +288,7 @@ fn run(io: std.Io, allocator: std.mem.Allocator, config: Config) !u8 {
         _ = c.poll(&pfds, pfds.len, 25);
     }
 
-    try logger.finish(&log_writer.interface);
-    try log_writer.interface.flush();
+    log_state.finish(io);
     const status = try child.wait();
     if (status.code) |code| return @intCast(@max(code, 0));
     return 1;
