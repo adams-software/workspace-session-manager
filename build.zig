@@ -566,6 +566,12 @@ pub fn build(b: *std.Build) void {
     smoke_ptylog_edit_step.dependOn(b.getInstallStep());
     smoke_ptylog_edit_step.dependOn(&smoke_ptylog_edit_cmd.step);
 
+    const smoke_wsm_burst_kill_cmd = b.addSystemCommand(&.{ "bash", "-u", "wsm/scripts/smoke_wsm_burst_kill.sh" });
+    smoke_wsm_burst_kill_cmd.setCwd(b.path("."));
+    const smoke_wsm_burst_kill_step = b.step("smoke-wsm-burst-kill", "Run focused force-kill burst best-effort smoke");
+    smoke_wsm_burst_kill_step.dependOn(b.getInstallStep());
+    smoke_wsm_burst_kill_step.dependOn(&smoke_wsm_burst_kill_cmd.step);
+
     const smoke_wsm_logs_cmd = b.addSystemCommand(&.{ "bash", "-u", "wsm/scripts/smoke_wsm_logs.sh" });
     smoke_wsm_logs_cmd.setCwd(b.path("."));
     const smoke_wsm_logs_step = b.step("smoke-wsm-logs", "Run log-behavior smoke test for wsm");
