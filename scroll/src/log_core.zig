@@ -4,7 +4,6 @@ const term_engine = @import("term_engine");
 pub const max_input_bytes = 64 * 1024 * 1024;
 pub const replay_chunk_size = 16 * 1024;
 const normalize_lf_for_replay = true;
-
 fn writerFromList(allocator: std.mem.Allocator, list: *std.ArrayList(u8)) std.Io.Writer.Allocating {
     return std.Io.Writer.Allocating.fromArrayList(allocator, list);
 }
@@ -309,10 +308,14 @@ pub const StreamLogger = struct {
     }
 
     pub fn flushLive(self: *StreamLogger, writer: anytype) !void {
-        try self.flushCommitted(writer);
+        const committed = try self.takeCommittedBytes();
+        defer self.allocator.free(committed);
 
         const tail = try renderVisibleTail(self.allocator, self.builder.format, &self.engine);
         defer self.allocator.free(tail);
+
+        const bytes_to_append = self.consumeLivePrefix(committed);
+        if (bytes_to_append.len > 0) try writer.writeAll(bytes_to_append);
         try self.promoteStableTailLines(writer, tail);
     }
 
@@ -498,6 +501,14 @@ fn finishToList(allocator: std.mem.Allocator, logger: *StreamLogger, out: *std.A
     var out_writer = writerFromList(allocator, out);
     defer out.* = out_writer.toArrayList();
     try logger.finish(&out_writer.writer);
+}
+
+fn expectOrderedSubstrings(haystack: []const u8, needles: []const []const u8) !void {
+    var cursor: usize = 0;
+    for (needles) |needle| {
+        const rel = std.mem.indexOf(u8, haystack[cursor..], needle) orelse return error.TestExpectedSubstringOrder;
+        cursor += rel + needle.len;
+    }
 }
 
 fn feedReplayBytes(engine: *term_engine.Engine, bytes: []const u8, prev_byte: *?u8) !void {
@@ -764,4 +775,138 @@ test "stream logger live flush keeps multiple committed lines but defers final p
 
     try finishToList(allocator, &logger, &out);
     try std.testing.expectEqualStrings("$ printf one\none\n$ printf two\ntwo\n$", out.items);
+}
+
+test "stream logger ansi detached edit path keeps edited command before later command" {
+    const allocator = std.testing.allocator;
+    var logger = try StreamLogger.init(allocator, .ansi, 24, 80);
+    defer logger.deinit();
+
+    const prompt =
+        "\x1b[1m\x1b[38;5;2mdev@moltbox\x1b[22m\x1b[39m:" ++
+        "\x1b[1m\x1b[38;5;4m~/.openclaw/workspace-director/projects/wsm/workspace-session-manager\x1b[22m\x1b[39m$ ";
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+
+    try logger.feed(prompt);
+    try logger.feed("lsx\x08 \x08");
+    try flushLiveToList(allocator, &logger, &out);
+
+    try logger.feed(
+        "\r\n" ++
+            "CONTRIBUTING.md  alt        dist         progress.md  scroll        vpty\r\n" ++
+            "LICENSE          attach     docs         ptyio        shared        wsm\r\n" ++
+            "README.md        build.zig  findings.md  ptylog       task_plan.md  zig-out\r\n" ++
+            "RELEASING.md     ctlwire    msr          scripts      term_engine\r\n" ++
+            prompt,
+    );
+    try flushLiveToList(allocator, &logger, &out);
+
+    try logger.feed("printf 'file.txt\\n'\r\nfile.txt\r\n");
+    try logger.feed(prompt);
+    try flushLiveToList(allocator, &logger, &out);
+    try finishToList(allocator, &logger, &out);
+
+    try expectOrderedSubstrings(out.items, &.{
+        "$ ls",
+        "CONTRIBUTING.md",
+        "$ printf 'file.txt\\n'",
+        "file.txt",
+    });
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "lsx") == null);
+}
+
+test "stream logger ansi exact direct-ptylog read chunks still keep ordering" {
+    const allocator = std.testing.allocator;
+    var logger = try StreamLogger.init(allocator, .ansi, 24, 80);
+    defer logger.deinit();
+
+    const prompt =
+        "\x1b[1m\x1b[38;5;2mdev@moltbox\x1b[22m\x1b[39m:" ++
+        "\x1b[1m\x1b[38;5;4m~/.openclaw/workspace-director/projects/wsm/workspace-session-manager\x1b[22m\x1b[39m$ ";
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+
+    try logger.feed(prompt ++ "lsx\x08 \x08");
+    try flushLiveToList(allocator, &logger, &out);
+
+    try logger.feed("\r\r\n");
+    try flushLiveToList(allocator, &logger, &out);
+
+    try logger.feed(
+        "CONTRIBUTING.md  alt        dist         progress.md  scroll        vpty\r\r\n" ++
+            "LICENSE          attach     docs         ptyio        shared        wsm\r\r\n" ++
+            "README.md        build.zig  findings.md  ptylog       task_plan.md  zig-out\r\r\n" ++
+            "RELEASING.md     ctlwire    msr          scripts      term_engine\r\r\n" ++
+            prompt,
+    );
+    try flushLiveToList(allocator, &logger, &out);
+
+    try logger.feed("printf 'file.txt\\n'\r\r\n");
+    try flushLiveToList(allocator, &logger, &out);
+
+    try logger.feed("file.txt\r\r\n" ++ prompt);
+    try flushLiveToList(allocator, &logger, &out);
+    try finishToList(allocator, &logger, &out);
+
+    try expectOrderedSubstrings(out.items, &.{
+        "$ ls",
+        "CONTRIBUTING.md",
+        "$ printf 'file.txt\\n'",
+        "file.txt",
+    });
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "lsx") == null);
+}
+
+test "stream logger ansi interactive prompt-first chunks keep edited command" {
+    const allocator = std.testing.allocator;
+    var logger = try StreamLogger.init(allocator, .ansi, 24, 80);
+    defer logger.deinit();
+
+    const prompt = "<e-director/projects/wsm/workspace-session-manager$ ";
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+
+    try logger.feed(prompt);
+    try flushLiveToList(allocator, &logger, &out);
+
+    try logger.feed("lsx\x08 \x08");
+    try flushLiveToList(allocator, &logger, &out);
+
+    try logger.feed(
+        "\r\n" ++
+            "CONTRIBUTING.md  alt\t    dist\t progress.md  scroll\t    vpty\r\n" ++
+            "LICENSE\t\t attach     docs\t ptyio\t      shared\t    wsm\r\n" ++
+            "README.md\t build.zig  findings.md  ptylog       task_plan.md  zig-out\r\n" ++
+            "RELEASING.md\t ctlwire    msr\t\t scripts      term_engine\r\n",
+    );
+    try flushLiveToList(allocator, &logger, &out);
+
+    try logger.feed(prompt);
+    try flushLiveToList(allocator, &logger, &out);
+
+    try logger.feed("printf 'file.txt\\n'\r\nfile.txt\r\n");
+    try flushLiveToList(allocator, &logger, &out);
+
+    try logger.feed(prompt);
+    try flushLiveToList(allocator, &logger, &out);
+
+    try logger.feed("exit\r\n");
+    try flushLiveToList(allocator, &logger, &out);
+
+    try logger.feed("exit\r\n");
+    try flushLiveToList(allocator, &logger, &out);
+    try finishToList(allocator, &logger, &out);
+
+    try expectOrderedSubstrings(out.items, &.{
+        "$ ls",
+        "CONTRIBUTING.md",
+        "$ printf 'file.txt\\n'",
+        "file.txt",
+        "$ exit",
+    });
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "lsx") == null);
 }

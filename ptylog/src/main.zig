@@ -152,7 +152,7 @@ const LogState = struct {
 
         {
             var file = &self.file.?;
-            var writer = file.writer(io, &self.buf);
+            var writer = file.writerStreaming(io, &self.buf);
             logger.flushLive(&writer.interface) catch |err| {
                 self.disable(io, err);
                 return;
@@ -171,7 +171,7 @@ const LogState = struct {
         {
             var logger = &self.logger.?;
             var file = &self.file.?;
-            var writer = file.writer(io, &self.buf);
+            var writer = file.writerStreaming(io, &self.buf);
             logger.finish(&writer.interface) catch |err| {
                 self.disable(io, err);
                 return;

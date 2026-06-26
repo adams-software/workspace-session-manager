@@ -560,6 +560,12 @@ pub fn build(b: *std.Build) void {
     stress_ptylog_step.dependOn(b.getInstallStep());
     stress_ptylog_step.dependOn(&stress_ptylog_cmd.step);
 
+    const smoke_ptylog_edit_cmd = b.addSystemCommand(&.{ "bash", "-u", "wsm/scripts/smoke_ptylog_edit.sh" });
+    smoke_ptylog_edit_cmd.setCwd(b.path("."));
+    const smoke_ptylog_edit_step = b.step("smoke-ptylog-edit", "Run focused direct ptylog edit regression");
+    smoke_ptylog_edit_step.dependOn(b.getInstallStep());
+    smoke_ptylog_edit_step.dependOn(&smoke_ptylog_edit_cmd.step);
+
     const smoke_wsm_logs_cmd = b.addSystemCommand(&.{ "bash", "-u", "wsm/scripts/smoke_wsm_logs.sh" });
     smoke_wsm_logs_cmd.setCwd(b.path("."));
     const smoke_wsm_logs_step = b.step("smoke-wsm-logs", "Run log-behavior smoke test for wsm");
