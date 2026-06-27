@@ -368,7 +368,8 @@ const App = struct {
             .info => |msg| {
                 defer self.allocator.free(msg);
                 debugLog("wsm pump info len={d} attached={}\n", .{ msg.len, self.executor.isInteractiveAttached() });
-                try self.render();
+                // App output should stay within the vpty viewport. Reasserting the bar on
+                // every pump can interleave overlay bytes with high-churn app redraws.
             },
             else => {},
         }
