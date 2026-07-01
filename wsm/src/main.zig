@@ -83,6 +83,7 @@ const App = struct {
     executor: executor_mod.Executor,
     size: OuterSize,
     layout: bar_layout.Layout,
+    reassert_bar_after_first_pump: bool,
 
     fn init(allocator: std.mem.Allocator, term: *TerminalState, initial_mode: ?cli_main.Mode) !App {
         var bar_state = ui_state.State.init(allocator);
@@ -111,6 +112,7 @@ const App = struct {
             .executor = try executor_mod.Executor.init(allocator, root),
             .size = size,
             .layout = layout_state,
+            .reassert_bar_after_first_pump = false,
         };
 
         if (initial_mode) |mode| {
@@ -301,11 +303,13 @@ const App = struct {
                 defer self.allocator.free(id);
                 try self.provider.setCurrentSession(id);
                 _ = self.bar_state.clearNotice();
+                self.reassert_bar_after_first_pump = true;
                 try self.syncAttachedViewport("post-attach sync failed");
             },
             .detached => {
                 try self.provider.setCurrentSession(null);
                 _ = self.bar_state.clearNotice();
+                self.reassert_bar_after_first_pump = false;
             },
             .idle => {},
         }
@@ -326,6 +330,10 @@ const App = struct {
                 debug.log("wsm pump info len={d} attached={}\n", .{ msg.len, self.executor.isInteractiveAttached() });
                 // App output should stay within the vpty viewport. Reasserting the bar on
                 // every pump can interleave overlay bytes with high-churn app redraws.
+                if (self.reassert_bar_after_first_pump) {
+                    self.reassert_bar_after_first_pump = false;
+                    try self.render();
+                }
             },
             else => {},
         }
@@ -379,6 +387,16 @@ fn setRuntimeExitMessage(app: *App, allocator: std.mem.Allocator, comptime conte
     app.exit_message = try allocator.dupe(u8, msg);
     _ = app.bar_state.setExternalError(msg);
     app.should_exit = true;
+}
+
+fn pumpAttachedOutputOrExit(app: *App, allocator: std.mem.Allocator, term: *TerminalState) !void {
+    const pump_result = app.executor.pumpAttachedOutput(&app.provider, term.tty_fd) catch |err| {
+        try setRuntimeExitMessage(app, allocator, "pump attached output", err);
+        return;
+    };
+    app.handlePumpResult(pump_result) catch |err| {
+        try setRuntimeExitMessage(app, allocator, "handle pump result", err);
+    };
 }
 
 fn keyFromInput(bytes: []const u8, hotkey: KeyBinding) ?ui_state.Key {
@@ -478,8 +496,11 @@ fn runInteractive(allocator: std.mem.Allocator, mode: cli_main.Mode) !void {
             };
         }
 
+        var tty_events: c_short = c.POLLIN;
+        if (app.executor.hasPendingAttachedOutput()) tty_events |= c.POLLOUT;
+
         var pfds: [2]c.struct_pollfd = .{
-            .{ .fd = term.tty_fd, .events = c.POLLIN, .revents = 0 },
+            .{ .fd = term.tty_fd, .events = tty_events, .revents = 0 },
             .{ .fd = -1, .events = 0, .revents = 0 },
         };
         var nfds: c.nfds_t = 1;
@@ -510,6 +531,11 @@ fn runInteractive(allocator: std.mem.Allocator, mode: cli_main.Mode) !void {
             }
         }
 
+        if ((pfds[0].revents & c.POLLOUT) != 0 and app.executor.hasPendingAttachedOutput()) {
+            try pumpAttachedOutputOrExit(&app, allocator, &term);
+            continue;
+        }
+
         if (nfds > 1) {
             const rev = pfds[1].revents;
             if (rev != 0) debug.log("wsm poll attached fd={d} revents=0x{x}\n", .{ pfds[1].fd, rev });
@@ -518,24 +544,10 @@ fn runInteractive(allocator: std.mem.Allocator, mode: cli_main.Mode) !void {
                 return Error.Unexpected;
             }
             if ((rev & (c.POLLHUP | c.POLLERR)) != 0) {
-                const pump_result = app.executor.pumpAttachedOutput(&app.provider, term.tty_fd) catch |err| {
-                    try setRuntimeExitMessage(&app, allocator, "pump attached output", err);
-                    continue;
-                };
-                app.handlePumpResult(pump_result) catch |err| {
-                    try setRuntimeExitMessage(&app, allocator, "handle pump result", err);
-                    continue;
-                };
+                try pumpAttachedOutputOrExit(&app, allocator, &term);
             }
             if ((rev & c.POLLIN) != 0) {
-                const pump_result = app.executor.pumpAttachedOutput(&app.provider, term.tty_fd) catch |err| {
-                    try setRuntimeExitMessage(&app, allocator, "pump attached output", err);
-                    continue;
-                };
-                app.handlePumpResult(pump_result) catch |err| {
-                    try setRuntimeExitMessage(&app, allocator, "handle pump result", err);
-                    continue;
-                };
+                try pumpAttachedOutputOrExit(&app, allocator, &term);
             }
         }
     }

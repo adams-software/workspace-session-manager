@@ -54,6 +54,10 @@ pub const AttachedSession = struct {
         return try self.link.pumpDataToOutput(output_fd);
     }
 
+    pub fn hasPendingOutput(self: *const AttachedSession) bool {
+        return self.link.hasPendingOutput();
+    }
+
     pub fn resize(self: *AttachedSession, cols: u16, rows: u16) !void {
         try self.link.resize(cols, rows);
     }

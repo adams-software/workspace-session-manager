@@ -79,6 +79,10 @@ pub const SessionLink = struct {
         return self.data_fd;
     }
 
+    pub fn hasPendingOutput(self: *const SessionLink) bool {
+        return !self.pump.right_to_left.isEmpty();
+    }
+
     pub fn writeInput(self: *SessionLink, bytes: []const u8) !void {
         try self.pump.pushLeft(bytes);
         if (self.data_fd) |fd| _ = try self.pump.flushLeftToRight(fd);

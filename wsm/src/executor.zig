@@ -114,6 +114,11 @@ pub const Executor = struct {
         return null;
     }
 
+    pub fn hasPendingAttachedOutput(self: *const Executor) bool {
+        if (self.link) |*link| return link.hasPendingOutput();
+        return false;
+    }
+
     pub fn forwardResize(self: *Executor, cols: u16, rows: u16) !ResizeResult {
         if (self.link) |*link| {
             try link.resize(cols, rows);
