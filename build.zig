@@ -308,6 +308,15 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+    const runtime_lifecycle_mod = b.addModule("runtime_lifecycle", .{
+        .root_source_file = b.path("vpty/src/runtime_lifecycle.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    runtime_lifecycle_mod.addImport("session_host_vpty", session_host_vpty_mod);
+    runtime_lifecycle_mod.addImport("vpty_terminal", vpty_terminal_mod);
+    runtime_lifecycle_mod.addImport("wake_pipe", wake_pipe_mod);
 
     const stdout_thread_mod = b.addModule("stdout_thread", .{
         .root_source_file = b.path("vpty/src/stdout_thread.zig"),
@@ -387,6 +396,7 @@ pub fn build(b: *std.Build) void {
     vpty_root.addImport("stdout_thread", stdout_thread_mod);
     vpty_root.addImport("actor_mailboxes", actor_mailboxes_mod);
     vpty_root.addImport("wake_pipe", wake_pipe_mod);
+    vpty_root.addImport("runtime_lifecycle", runtime_lifecycle_mod);
 
     const vpty_exe = b.addExecutable(.{
         .name = "vpty",

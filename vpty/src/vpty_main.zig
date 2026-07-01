@@ -20,7 +20,8 @@ const render_thread_mod = @import("render_thread");
 const RenderThread = render_thread_mod.RenderThread;
 const SharedTerminalModel = render_thread_mod.SharedTerminalModel;
 const Viewport = @import("vpty_render").Viewport;
-const WakePipe = @import("wake_pipe").WakePipe;
+const runtime_lifecycle_mod = @import("runtime_lifecycle");
+const RuntimeLifecycle = runtime_lifecycle_mod.RuntimeLifecycle;
 const ModelSize = terminal_model_mod.ModelSize;
 const GraphemeMode = terminal_model_mod.GraphemeMode;
 
@@ -34,20 +35,6 @@ fn parseU16Flag(flag: []const u8, value: []const u8) !u16 {
         return error.InvalidArgs;
     };
 }
-
-var winch_changed: bool = false;
-var terminate_requested: bool = false;
-var terminate_sent: bool = false;
-var terminate_signal: c_int = 0;
-var wake_pipe: WakePipe = .{};
-const RESIZE_SETTLE_NS: u64 = 35 * std.time.ns_per_ms;
-
-const PendingResize = struct {
-    size: vpty_terminal.Size,
-    observed_at_ns: u64,
-};
-
-var pending_resize: ?PendingResize = null;
 
 const RunMode = enum {
     fullscreen,
@@ -184,12 +171,6 @@ fn graphemeModeFromEnv() GraphemeMode {
     return .legacy;
 }
 
-fn monotonicTimeNs() u64 {
-    var ts: c.timespec = undefined;
-    if (c.clock_gettime(c.CLOCK_MONOTONIC, &ts) != 0) return 0;
-    return @as(u64, @intCast(ts.tv_sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.tv_nsec));
-}
-
 fn signalNumber(name: []const u8) u8 {
     if (std.mem.eql(u8, name, "HUP")) return @intCast(c.SIGHUP);
     if (std.mem.eql(u8, name, "INT")) return @intCast(c.SIGINT);
@@ -203,13 +184,6 @@ fn childExitCode(status: host.ExitStatus) u8 {
     if (status.code) |code| return @intCast(@max(0, @min(code, 255)));
     if (status.signal) |name| return 128 + signalNumber(name);
     return 0;
-}
-
-fn handleTerminationSignal(sig: c_int) callconv(.c) void {
-    terminate_requested = true;
-    terminate_sent = false;
-    terminate_signal = sig;
-    wake_pipe.notify();
 }
 
 fn applyViewerSize(
@@ -243,23 +217,6 @@ fn viewerSizeChanged(current: ?ModelSize, rows: u16, cols: u16) bool {
     return size.rows != rows or size.cols != cols;
 }
 
-fn handleSigwinch(_: c_int) callconv(.c) void {
-    winch_changed = true;
-    wake_pipe.notify();
-}
-
-fn notePendingResize(terminal: *vpty_terminal.TerminalMode) void {
-    var size = vpty_terminal.Size{ .rows = 24, .cols = 80 };
-    while (winch_changed) {
-        winch_changed = false;
-        size = terminal.currentSize() catch vpty_terminal.Size{ .rows = 24, .cols = 80 };
-    }
-    pending_resize = .{
-        .size = size,
-        .observed_at_ns = monotonicTimeNs(),
-    };
-}
-
 fn resolveViewport(partial: Viewport, size: vpty_terminal.Size) Viewport {
     const available_rows = if (partial.origin_row >= size.rows) @as(u16, 0) else size.rows - partial.origin_row;
     const available_cols = if (partial.origin_col >= size.cols) @as(u16, 0) else size.cols - partial.origin_col;
@@ -282,6 +239,7 @@ fn resolveViewport(partial: Viewport, size: vpty_terminal.Size) Viewport {
 }
 
 fn handleResizeIfNeeded(
+    lifecycle: *RuntimeLifecycle,
     session_host: *host.SessionHost,
     shared_model: *SharedTerminalModel,
     render_thread: *RenderThread,
@@ -291,16 +249,7 @@ fn handleResizeIfNeeded(
     viewport: Viewport,
     viewport_intent: ViewportIntent,
 ) void {
-    if (winch_changed) {
-        notePendingResize(terminal);
-    }
-
-    const pending = pending_resize orelse return;
-    const now_ns = monotonicTimeNs();
-    if (now_ns - pending.observed_at_ns < RESIZE_SETTLE_NS) return;
-    pending_resize = null;
-
-    const size = pending.size;
+    const size = lifecycle.takeSettledResizeIfNeeded(terminal) orelse return;
     const resolved = switch (mode) {
         .fullscreen => Viewport.init(0, 0, size.rows, size.cols),
         .bounded => resolveViewport(viewport, size),
@@ -326,45 +275,6 @@ fn handleResizeIfNeeded(
         applyViewerSize(session_host, shared_model, render_thread, stdout_actor, target_rows, target_cols);
     } else {
         forceViewerRepaint(shared_model, render_thread);
-    }
-}
-
-fn handleTerminationIfNeeded(session_host: *host.SessionHost) !?host.ExitStatus {
-    if (!terminate_requested) return null;
-
-    if (!terminate_sent) {
-        terminate_sent = true;
-        _ = session_host.terminate(
-            if (terminate_signal == c.SIGINT) "INT"
-            else if (terminate_signal == c.SIGTERM) "TERM"
-            else null,
-        ) catch {};
-    }
-
-    return null;
-}
-
-fn drainWakePipe() void {
-    wake_pipe.drain();
-}
-
-fn stepLifecycle(
-    session_host: *host.SessionHost,
-    shared_model: *SharedTerminalModel,
-    render_thread: *RenderThread,
-    stdout_actor: *StdoutThread,
-    terminal: *vpty_terminal.TerminalMode,
-    mode: RunMode,
-    viewport: Viewport,
-    viewport_intent: ViewportIntent,
-) !?host.ExitStatus {
-    handleResizeIfNeeded(session_host, shared_model, render_thread, stdout_actor, terminal, mode, viewport, viewport_intent);
-    return try handleTerminationIfNeeded(session_host);
-}
-
-fn stepWake(pfds: []const c.struct_pollfd) void {
-    if ((pfds[2].revents & c.POLLIN) != 0) {
-        drainWakePipe();
     }
 }
 
@@ -417,19 +327,20 @@ fn refreshAndMaybeExit(session_host: *host.SessionHost) !?host.ExitStatus {
     return null;
 }
 
-fn pumpUntilExit(session_host: *host.SessionHost, shared_model: *SharedTerminalModel, render_thread: *RenderThread, terminal: *vpty_terminal.TerminalMode, mode: RunMode, viewport: Viewport, viewport_intent: ViewportIntent, forwarder: *side_effects.SideEffectForwarder, stdout_actor: *StdoutThread) !host.ExitStatus {
+fn pumpUntilExit(lifecycle: *RuntimeLifecycle, session_host: *host.SessionHost, shared_model: *SharedTerminalModel, render_thread: *RenderThread, terminal: *vpty_terminal.TerminalMode, mode: RunMode, viewport: Viewport, viewport_intent: ViewportIntent, forwarder: *side_effects.SideEffectForwarder, stdout_actor: *StdoutThread) !host.ExitStatus {
     var transport = TransportState{};
     defer transport.deinit(std.heap.page_allocator);
 
     try transport.configureNonBlocking(session_host, terminal.stdin_fd, terminal.stdout_fd);
 
     while (true) {
-        if (try stepLifecycle(session_host, shared_model, render_thread, stdout_actor, terminal, mode, viewport, viewport_intent)) |status| return status;
+        handleResizeIfNeeded(lifecycle, session_host, shared_model, render_thread, stdout_actor, terminal, mode, viewport, viewport_intent);
+        lifecycle.issueTerminationIfNeeded(session_host);
 
         var pfds = [4]c.struct_pollfd{
             .{ .fd = if (transport.stdin_open) terminal.stdin_fd else -1, .events = if (transport.stdin_open) c.POLLIN else 0, .revents = 0 },
             .{ .fd = session_host.getMasterFd() orelse -1, .events = transport.ptyPollEvents(), .revents = 0 },
-            .{ .fd = wake_pipe.readFd(), .events = c.POLLIN, .revents = 0 },
+            .{ .fd = lifecycle.readFd(), .events = c.POLLIN, .revents = 0 },
             .{ .fd = -1, .events = 0, .revents = 0 },
         };
 
@@ -440,7 +351,7 @@ fn pumpUntilExit(session_host: *host.SessionHost, shared_model: *SharedTerminalM
             return error.IoError;
         }
 
-        stepWake(&pfds);
+        lifecycle.consumeWakeRevents(pfds[2].revents);
         try stepStdoutCommitted(stdout_actor, shared_model);
         try stepInput(&transport, session_host, terminal, &pfds);
         try stepPtyOutput(&transport, session_host, shared_model, render_thread, forwarder, stdout_actor, &pfds);
@@ -462,6 +373,7 @@ const VptyRuntime = struct {
     session_host: host.SessionHost,
     shared_model: SharedTerminalModel,
     render_thread: RenderThread,
+    lifecycle: RuntimeLifecycle,
 
     fn init(self: *VptyRuntime, allocator: std.mem.Allocator, io: anytype, child_argv: []const []const u8, mode: RunMode, viewport_override: Viewport, viewport_intent: ViewportIntent) !void {
         var terminal = vpty_terminal.TerminalMode.init(c.STDIN_FILENO, c.STDOUT_FILENO);
@@ -515,6 +427,7 @@ const VptyRuntime = struct {
             .session_host = session_host,
             .shared_model = shared_model,
             .render_thread = undefined,
+            .lifecycle = .{},
         };
         self.render_thread = RenderThread.init(
             allocator,
@@ -544,26 +457,6 @@ const VptyRuntime = struct {
         self.render_thread.publishModelChanged(update.asModelChanged());
     }
 
-    fn installSignalHandlers() !SignalHandlers {
-        wake_pipe = try WakePipe.init();
-        errdefer wake_pipe.deinit();
-
-        const handlers = SignalHandlers{
-            .old_winch = c.signal(c.SIGWINCH, handleSigwinch),
-            // Interactive Ctrl-C should reach the child PTY application, not tear
-            // down the vpty wrapper itself. Ignore host-side SIGINT while running.
-            .old_int = c.signal(c.SIGINT, c.SIG_IGN),
-            .old_term = c.signal(c.SIGTERM, handleTerminationSignal),
-        };
-
-        winch_changed = true;
-        terminate_requested = false;
-        terminate_sent = false;
-        terminate_signal = 0;
-        pending_resize = null;
-        return handlers;
-    }
-
     fn run(self: *VptyRuntime) !u8 {
         try self.session_host.start();
         if (self.mode == .fullscreen) try self.terminal.enterAltScreen();
@@ -573,10 +466,10 @@ const VptyRuntime = struct {
 
         self.primeRender();
 
-        const signal_handlers = try installSignalHandlers();
+        const signal_handlers = try self.lifecycle.install();
         defer signal_handlers.restore();
 
-        const status = try pumpUntilExit(&self.session_host, &self.shared_model, &self.render_thread, &self.terminal, self.mode, self.viewport, self.viewport_intent, &self.forwarder, &self.stdout_actor);
+        const status = try pumpUntilExit(&self.lifecycle, &self.session_host, &self.shared_model, &self.render_thread, &self.terminal, self.mode, self.viewport, self.viewport_intent, &self.forwarder, &self.stdout_actor);
         self.render_thread.shutdownActor();
         self.render_thread.stop();
         if (self.mode == .fullscreen) {
@@ -586,22 +479,9 @@ const VptyRuntime = struct {
             self.stdout_actor.stop();
             self.terminal.restore();
         }
-        pending_resize = null;
+        self.lifecycle.clearPendingResize();
         _ = self.session_host.close() catch {};
         return childExitCode(status);
-    }
-};
-
-const SignalHandlers = struct {
-    old_winch: ?*const fn (c_int) callconv(.c) void,
-    old_int: ?*const fn (c_int) callconv(.c) void,
-    old_term: ?*const fn (c_int) callconv(.c) void,
-
-    fn restore(self: SignalHandlers) void {
-        defer wake_pipe.deinit();
-        _ = c.signal(c.SIGWINCH, self.old_winch);
-        _ = c.signal(c.SIGINT, self.old_int);
-        _ = c.signal(c.SIGTERM, self.old_term);
     }
 };
 
