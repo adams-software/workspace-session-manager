@@ -37,6 +37,7 @@ fn parseU16Flag(flag: []const u8, value: []const u8) !u16 {
 
 var winch_changed: bool = false;
 var terminate_requested: bool = false;
+var terminate_sent: bool = false;
 var terminate_signal: c_int = 0;
 var wake_pipe: WakePipe = .{};
 const RESIZE_SETTLE_NS: u64 = 35 * std.time.ns_per_ms;
@@ -206,6 +207,7 @@ fn childExitCode(status: host.ExitStatus) u8 {
 
 fn handleTerminationSignal(sig: c_int) callconv(.c) void {
     terminate_requested = true;
+    terminate_sent = false;
     terminate_signal = sig;
     wake_pipe.notify();
 }
@@ -218,8 +220,8 @@ fn applyViewerSize(
     rows: u16,
     cols: u16,
 ) void {
-    stdout_actor.invalidatePendingRenders();
     session_host.applySessionSize(.{ .cols = cols, .rows = rows }) catch return;
+    stdout_actor.invalidatePendingRenders();
     shared_model.lock();
     const update = shared_model.model.resize(rows, cols);
     shared_model.unlock();
@@ -330,21 +332,16 @@ fn handleResizeIfNeeded(
 fn handleTerminationIfNeeded(session_host: *host.SessionHost) !?host.ExitStatus {
     if (!terminate_requested) return null;
 
-    _ = session_host.terminate(
-        if (terminate_signal == c.SIGINT) "INT"
-        else if (terminate_signal == c.SIGTERM) "TERM"
-        else null,
-    ) catch {};
-
-    while (session_host.getState() != .exited) {
-        session_host.refresh() catch {};
-        if (session_host.getState() == .exited) break;
-        _ = c.usleep(10_000);
+    if (!terminate_sent) {
+        terminate_sent = true;
+        _ = session_host.terminate(
+            if (terminate_signal == c.SIGINT) "INT"
+            else if (terminate_signal == c.SIGTERM) "TERM"
+            else null,
+        ) catch {};
     }
 
-    return session_host.getExitStatus() orelse host.ExitStatus{
-        .signal = if (terminate_signal == c.SIGINT) "INT" else "TERM",
-    };
+    return null;
 }
 
 fn drainWakePipe() void {
@@ -561,6 +558,7 @@ const VptyRuntime = struct {
 
         winch_changed = true;
         terminate_requested = false;
+        terminate_sent = false;
         terminate_signal = 0;
         pending_resize = null;
         return handlers;
