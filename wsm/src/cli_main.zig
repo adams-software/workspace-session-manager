@@ -303,33 +303,22 @@ pub fn runCommand(allocator: std.mem.Allocator, root: []const u8, mode: Mode, wr
             defer allocator.free(header);
             try writer.writeAll(header);
 
-            if (apply) {
-                const summary = try service.cleanupReport(&provider);
-                defer summary.deinit(allocator);
-                var applied_any = false;
-                for (summary.entries) |entry| {
-                    const present = try presentSummary(allocator, entry.info);
-                    defer allocator.free(present);
-                    const apply_result = service.applyCleanupEntry(entry);
-                    defer apply_result.deinit(allocator);
-                    const action = if (entry.cleanup == .remove) "removed" else "kept";
-                    if (entry.cleanup == .remove) applied_any = true;
-                    const line = try std.fmt.allocPrint(allocator, "{s:<20} {s:<20} {s:<14} {s}\n", .{ entry.info.session.id, @tagName(entry.health), present, action });
-                    defer allocator.free(line);
-                    try writer.writeAll(line);
-                }
-                if (applied_any) provider.rebuildWorkspaceIndex() catch {};
-            } else {
-                const summary = try service.cleanupReport(&provider);
-                defer summary.deinit(allocator);
-                for (summary.entries) |entry| {
-                    const present = try presentSummary(allocator, entry.info);
-                    defer allocator.free(present);
-                    const line = try std.fmt.allocPrint(allocator, "{s:<20} {s:<20} {s:<14} {s}\n", .{ entry.info.session.id, @tagName(entry.health), present, @tagName(entry.cleanup) });
-                    defer allocator.free(line);
-                    try writer.writeAll(line);
-                }
+            const summary = try service.cleanupReport(&provider);
+            defer summary.deinit(allocator);
+            var applied_any = false;
+            for (summary.entries) |entry| {
+                const present = try presentSummary(allocator, entry.info);
+                defer allocator.free(present);
+                const action = if (apply and entry.cleanup == .remove) blk: {
+                    service.applyCleanupEntry(entry);
+                    applied_any = true;
+                    break :blk "removed";
+                } else @tagName(entry.cleanup);
+                const line = try std.fmt.allocPrint(allocator, "{s:<20} {s:<20} {s:<14} {s}\n", .{ entry.info.session.id, @tagName(entry.health), present, action });
+                defer allocator.free(line);
+                try writer.writeAll(line);
             }
+            if (apply and applied_any) provider.rebuildWorkspaceIndex() catch {};
             return 0;
         },
         .create_detached, .create_detached_alias => |id| {

@@ -334,7 +334,7 @@ pub const Provider = struct {
     }
 };
 
-fn scanSessionIds(allocator: std.mem.Allocator, root: []const u8) ![][]u8 {
+pub fn scanSessionIds(allocator: std.mem.Allocator, root: []const u8) ![][]u8 {
     var out: std.ArrayList([]u8) = .empty;
     errdefer {
         freeOwnedStrings(allocator, out.items);

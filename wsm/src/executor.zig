@@ -147,11 +147,6 @@ pub const Executor = struct {
         };
     }
 
-    pub fn openLogs(self: *Executor, provider: *policy.Provider, size: SessionSize) !Result {
-        _ = size;
-        return self.viewLogsLocal(provider);
-    }
-
     pub fn viewLogsLocal(self: *Executor, provider: *policy.Provider) !Result {
         const base_id = self.current_session_id orelse return .{ .err = try self.allocator.dupe(u8, "no current session") };
         var service = service_mod.WorkspaceService.init(self.allocator, self.host_bin, self.vpty_bin, self.ptylog_bin);

@@ -110,31 +110,12 @@ pub const CleanupEntry = struct {
     }
 };
 
-pub const CleanupApplyResult = struct {
-    session_id: []u8,
-    removed_data: bool,
-    removed_control: bool,
-
-    pub fn deinit(self: CleanupApplyResult, allocator: std.mem.Allocator) void {
-        allocator.free(self.session_id);
-    }
-};
-
 pub const CleanupSummary = struct {
     entries: []CleanupEntry,
 
     pub fn deinit(self: CleanupSummary, allocator: std.mem.Allocator) void {
         for (self.entries) |entry| entry.deinit(allocator);
         allocator.free(self.entries);
-    }
-};
-
-pub const CleanupRun = struct {
-    results: []CleanupApplyResult,
-
-    pub fn deinit(self: CleanupRun, allocator: std.mem.Allocator) void {
-        for (self.results) |result| result.deinit(allocator);
-        allocator.free(self.results);
     }
 };
 
@@ -219,56 +200,7 @@ pub const WorkspaceService = struct {
     }
 
     pub fn listSessionIds(self: *WorkspaceService, provider: *policy.Provider) ![][]u8 {
-        var out: std.ArrayList([]u8) = .empty;
-        errdefer freeOwnedStrings(self.allocator, out.items);
-        var stack: std.ArrayList([]u8) = .empty;
-        defer {
-            for (stack.items) |item| self.allocator.free(item);
-            stack.deinit(self.allocator);
-        }
-        try stack.append(self.allocator, try self.allocator.dupe(u8, provider.root));
-
-        while (stack.items.len > 0) {
-            const dir_path = stack.pop().?;
-            defer self.allocator.free(dir_path);
-            var dir = try std.Io.Dir.openDirAbsolute(global_io, dir_path, .{ .iterate = true });
-            defer dir.close(global_io);
-            var iter = dir.iterate();
-            while (try iter.next(global_io)) |entry| {
-                const joined = try std.fs.path.join(self.allocator, &.{ dir_path, entry.name });
-                switch (entry.kind) {
-                    .directory => try stack.append(self.allocator, joined),
-                    .file, .unix_domain_socket => {
-                        if (std.mem.endsWith(u8, entry.name, ".wsm")) {
-                            if (try canonicalIdForSock(self.allocator, provider.root, joined)) |id| try out.append(self.allocator, id);
-                            self.allocator.free(joined);
-                        } else self.allocator.free(joined);
-                    },
-                    else => self.allocator.free(joined),
-                }
-            }
-        }
-
-        std.mem.sort([]u8, out.items, {}, lessThanString);
-        return try out.toOwnedSlice(self.allocator);
-    }
-
-    pub fn listSessionInfos(self: *WorkspaceService, provider: *policy.Provider) ![]SessionInfo {
-        const ids = try self.listSessionIds(provider);
-        defer {
-            for (ids) |id| self.allocator.free(id);
-            self.allocator.free(ids);
-        }
-
-        var out: std.ArrayList(SessionInfo) = .empty;
-        errdefer {
-            for (out.items) |item| item.deinit(self.allocator);
-            out.deinit(self.allocator);
-        }
-        for (ids) |id| {
-            try out.append(self.allocator, try self.sessionInfo(provider, id));
-        }
-        return try out.toOwnedSlice(self.allocator);
+        return policy.scanSessionIds(self.allocator, provider.root);
     }
 
     pub fn cleanupEntry(self: *WorkspaceService, provider: *policy.Provider, id: []const u8) !CleanupEntry {
@@ -314,34 +246,13 @@ pub const WorkspaceService = struct {
         return .{ .entries = try out.toOwnedSlice(self.allocator) };
     }
 
-    pub fn cleanupApply(self: *WorkspaceService, provider: *policy.Provider) !CleanupRun {
-        const summary = try self.cleanupReport(provider);
-        defer summary.deinit(self.allocator);
-
-        var out: std.ArrayList(CleanupApplyResult) = .empty;
-        defer out.deinit(self.allocator);
-        for (summary.entries) |entry| {
-            if (entry.cleanup != .remove) continue;
-            try out.append(self.allocator, self.applyCleanupEntry(entry));
-        }
-        return .{ .results = try out.toOwnedSlice(self.allocator) };
-    }
-
-    pub fn applyCleanupEntry(self: *WorkspaceService, entry: CleanupEntry) CleanupApplyResult {
-        var result = CleanupApplyResult{
-            .session_id = self.allocator.dupe(u8, entry.info.session.id) catch unreachable,
-            .removed_data = false,
-            .removed_control = false,
-        };
+    pub fn applyCleanupEntry(_: *WorkspaceService, entry: CleanupEntry) void {
         if (entry.remove_data) {
             unlinkBestEffort(entry.info.session.paths.data_path);
-            result.removed_data = true;
         }
         if (entry.remove_control) {
             unlinkBestEffort(entry.info.session.paths.control_path);
-            result.removed_control = true;
         }
-        return result;
     }
 
     pub fn health(self: *WorkspaceService, provider: *policy.Provider, id: []const u8) !SessionHealth {
@@ -447,22 +358,6 @@ fn isConnectableSocket(path: []const u8) !bool {
     if (e == .CONNREFUSED or e == .NOENT or e == .NOTSOCK) return false;
     if (e == .ACCES) return error.PermissionDenied;
     return false;
-}
-
-fn canonicalIdForSock(allocator: std.mem.Allocator, root: []const u8, sock: []const u8) !?[]u8 {
-    if (!std.mem.startsWith(u8, sock, root)) return null;
-    var rel = sock[root.len..];
-    if (rel.len > 0 and rel[0] == std.fs.path.sep) rel = rel[1..];
-    if (!std.mem.endsWith(u8, rel, ".wsm")) return null;
-    return try allocator.dupe(u8, rel[0 .. rel.len - 4]);
-}
-
-fn freeOwnedStrings(allocator: std.mem.Allocator, items: [][]u8) void {
-    for (items) |item| allocator.free(item);
-}
-
-fn lessThanString(_: void, a: []u8, b: []u8) bool {
-    return std.mem.lessThan(u8, a, b);
 }
 
 fn monotonicMs() u64 {
