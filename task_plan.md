@@ -1,4 +1,57 @@
-# Task Plan: Zig 0.16 Migration For WSM
+# Task Plan
+
+## Active Task: Package-By-Package Static Audit
+
+### Goal
+Run a package-by-package static audit across `workspace-session-manager` to identify:
+- correctness bugs
+- architectural smells
+- duplicated/shared logic that should be consolidated
+- dead code or stale layering
+- refactors that simplify the finalized product without adding feature churn
+
+### Current Phase
+Phase A1
+
+### Audit Phases
+
+#### Phase A1: Inventory And Review Order
+- [ ] Confirm package/build graph and choose audit order
+- [ ] Identify highest-leverage packages for first pass
+- **Status:** in progress
+
+#### Phase A2: Core Product Surface Audit
+- [ ] Audit `wsm`
+- [ ] Audit `vpty`
+- [ ] Audit `ptylog`
+- [ ] Audit `scroll`
+- **Status:** todo
+
+#### Phase A3: Runtime / Transport Audit
+- [ ] Audit `msr`
+- [ ] Audit `ptyio`
+- [ ] Audit `ctlwire`
+- [ ] Audit `term_engine`
+- **Status:** todo
+
+#### Phase A4: Peripheral / Legacy Surface Audit
+- [ ] Audit `attach`
+- [ ] Audit `alt`
+- [ ] Audit `shared`
+- **Status:** todo
+
+#### Phase A5: Consolidation Pass
+- [ ] Group findings by severity and leverage
+- [ ] Identify cross-package refactor themes
+- [ ] Separate “worth doing” from “pure churn”
+- **Status:** todo
+
+#### Phase A6: Delivery
+- [ ] Summarize findings for David
+- [ ] Propose next implementation candidates
+- **Status:** todo
+
+## Prior Task: Zig 0.16 Migration For WSM
 
 ## Goal
 Make `projects/wsm/workspace-session-manager` build and pass its test suite on Zig `0.16.0`, and update repo tooling/docs so local dev, CI, and release builds all target the same Zig version.

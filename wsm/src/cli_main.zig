@@ -4,6 +4,8 @@ const c = @cImport({
 });
 const commands = @import("commands.zig");
 const global_io = std.Io.Threaded.global_single_threaded.io();
+const logs_viewer = @import("logs_viewer.zig");
+const messages = @import("messages.zig");
 const policy = @import("policy.zig");
 const service_mod = @import("service.zig");
 const argv_parse = @import("argv_parse");
@@ -204,25 +206,6 @@ fn presentSummary(allocator: std.mem.Allocator, info: service_mod.SessionInfo) !
     return try std.mem.join(allocator, ",", parts.items);
 }
 
-fn createInvalidIdMessage(allocator: std.mem.Allocator, reason: commands.CreateInvalidIdReason) ![]u8 {
-    return try std.fmt.allocPrint(allocator, "invalid id: {s}\n", .{switch (reason) {
-        .empty => "Empty",
-        .starts_with_slash => "StartsWithSlash",
-        .ends_with_slash => "EndsWithSlash",
-        .empty_segment => "EmptySegment",
-        .dot_segment => "DotSegment",
-        .invalid_char => "InvalidChar",
-    }});
-}
-
-fn killOutcomeMessage(allocator: std.mem.Allocator, id: []const u8, outcome: commands.KillOutcome) ![]u8 {
-    return switch (outcome) {
-        .signaled => |sig| try std.fmt.allocPrint(allocator, "signaled {s} ({s})\n", .{ id, if (sig == .kill) "KILL" else "TERM" }),
-        .no_current_session => try allocator.dupe(u8, "kill failed: no current session\n"),
-        .no_control => try std.fmt.allocPrint(allocator, "kill failed for {s}: session has no control socket\n", .{id}),
-    };
-}
-
 pub fn runCommand(allocator: std.mem.Allocator, root: []const u8, mode: Mode, writer: anytype) !u8 {
     var provider = try policy.Provider.init(allocator, root, null);
     defer provider.deinit();
@@ -280,23 +263,7 @@ pub fn runCommand(allocator: std.mem.Allocator, root: []const u8, mode: Mode, wr
                 return 1;
             };
 
-            const argv = [_][]const u8{ tool_paths.logs_viewer_bin, log_path };
-            var spawn_runtime = std.Io.Threaded.init(std.heap.smp_allocator, .{});
-            defer spawn_runtime.deinit();
-            const spawn_io = spawn_runtime.io();
-            var child = try std.process.spawn(spawn_io, .{
-                .argv = &argv,
-                .stdin = .inherit,
-                .stdout = .inherit,
-                .stderr = .inherit,
-            });
-            defer child.kill(spawn_io);
-            const term = try child.wait(spawn_io);
-            return switch (term) {
-                .exited => |code| code,
-                .signal => 128,
-                else => 1,
-            };
+            return try logs_viewer.run(tool_paths.logs_viewer_bin, log_path);
         },
         .cleanup => |apply| {
             const header = try std.fmt.allocPrint(allocator, "{s:<20} {s:<20} {s:<14} {s}\n", .{ "SESSION", "HEALTH", "PRESENT", "ACTION" });
@@ -342,7 +309,7 @@ pub fn runCommand(allocator: std.mem.Allocator, root: []const u8, mode: Mode, wr
                     return 1;
                 },
                 .invalid_id => |reason| {
-                    const msg = try createInvalidIdMessage(allocator, reason);
+                    const msg = try messages.formatCreateInvalidId(allocator, reason, "\n");
                     defer allocator.free(msg);
                     try writer.writeAll(msg);
                     return 1;
@@ -356,7 +323,7 @@ pub fn runCommand(allocator: std.mem.Allocator, root: []const u8, mode: Mode, wr
                 try writer.writeAll(msg);
                 return 1;
             };
-            const msg = try killOutcomeMessage(allocator, args.id, outcome);
+            const msg = try messages.formatKillOutcomeForId(allocator, args.id, outcome, "\n");
             defer allocator.free(msg);
             try writer.writeAll(msg);
             return if (outcome == .signaled) 0 else 1;

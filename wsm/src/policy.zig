@@ -1,5 +1,6 @@
 const std = @import("std");
 const global_io = std.Io.Threaded.global_single_threaded.io();
+const bar_model = @import("bar_model.zig");
 const ui_state = @import("ui_state.zig");
 const canonical = @import("canonical.zig");
 
@@ -169,20 +170,7 @@ pub const Provider = struct {
     pub fn refresh(self: *Provider) !void {
         try self.rebuildWorkspaceIndex();
 
-        self.passive_label_buf.clearRetainingCapacity();
-        var next_active_summary: std.ArrayList(u8) = .empty;
-        defer next_active_summary.deinit(self.allocator);
-
-        if (self.current_session.len == 0) {
-            self.active_summary.clearRetainingCapacity();
-            try self.passive_label_buf.appendSlice(self.allocator, "detached");
-            return;
-        }
-
-        var passive_label_writer = std.Io.Writer.Allocating.fromArrayList(self.allocator, &self.passive_label_buf);
-        defer self.passive_label_buf = passive_label_writer.toArrayList();
-        try passive_label_writer.writer.print("{s}/{s}", .{ self.root, self.current_session });
-
+        try bar_model.buildPassiveLabel(&self.passive_label_buf, self.allocator, self.root, self.current_session);
         if (self.current_session.len == 0) {
             self.active_summary.clearRetainingCapacity();
             return;
@@ -197,33 +185,12 @@ pub const Provider = struct {
         const parent = try self.resolveNavTarget(.out);
         defer if (parent) |s| self.allocator.free(s);
 
-        if (prev) |target| {
-            const label = try relativeSiblingLabelAlloc(self.allocator, target);
-            defer self.allocator.free(label);
-            try appendTag(&next_active_summary, self.allocator, "←", label);
-        } else try appendTag(&next_active_summary, self.allocator, "←", "_");
-
-        if (child) |target| {
-            const label = try relativeChildLabelAlloc(self.allocator, target);
-            defer self.allocator.free(label);
-            try appendTag(&next_active_summary, self.allocator, "↓", label);
-        } else try appendTag(&next_active_summary, self.allocator, "↓", "_");
-
-        if (parent) |target| {
-            const label = try relativeParentLabelAlloc(self.allocator, target);
-            defer self.allocator.free(label);
-            try appendTag(&next_active_summary, self.allocator, "↑", label);
-        } else try appendTag(&next_active_summary, self.allocator, "↑", "_");
-
-        if (next) |target| {
-            const label = try relativeSiblingLabelAlloc(self.allocator, target);
-            defer self.allocator.free(label);
-            try appendTag(&next_active_summary, self.allocator, "→", label);
-        } else try appendTag(&next_active_summary, self.allocator, "→", "_");
-
-        self.active_summary.deinit(self.allocator);
-        self.active_summary = next_active_summary;
-        next_active_summary = .empty;
+        try bar_model.buildActiveSummary(&self.active_summary, self.allocator, .{
+            .prev = prev,
+            .next = next,
+            .child = child,
+            .parent = parent,
+        });
     }
 
     fn passiveLabel(self: *const Provider) []const u8 {
@@ -388,30 +355,6 @@ fn canonicalIdForSock(allocator: std.mem.Allocator, root: []const u8, sock: []co
     return try allocator.dupe(u8, rel[0 .. rel.len - 4]);
 }
 
-fn appendTag(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, prefix: []const u8, value: []const u8) !void {
-    if (buf.items.len > 0) try buf.appendSlice(allocator, " ");
-    try buf.appendSlice(allocator, "[");
-    try buf.appendSlice(allocator, prefix);
-    try buf.appendSlice(allocator, "] ");
-    try buf.appendSlice(allocator, value);
-}
-
-fn relativeSiblingLabelAlloc(allocator: std.mem.Allocator, sibling: []const u8) ![]u8 {
-    return try std.fmt.allocPrint(allocator, "./{s}", .{basename(sibling)});
-}
-
-fn relativeParentLabelAlloc(allocator: std.mem.Allocator, parent: []const u8) ![]u8 {
-    return try std.fmt.allocPrint(allocator, "../{s}", .{basename(parent)});
-}
-
-fn relativeChildLabelAlloc(allocator: std.mem.Allocator, child: []const u8) ![]u8 {
-    return try std.fmt.allocPrint(allocator, "./{s}", .{child});
-}
-
-fn basename(path: []const u8) []const u8 {
-    return std.fs.path.basename(path);
-}
-
 fn currentNodeDir(session: []const u8) []const u8 {
     return std.fs.path.dirname(session) orelse "";
 }
@@ -425,7 +368,7 @@ fn lessThanString(_: void, a: []u8, b: []u8) bool {
 }
 
 fn matchesQuery(id: []const u8, query: []const u8) bool {
-    return std.mem.startsWith(u8, id, query) or std.mem.startsWith(u8, basename(id), query);
+    return std.mem.startsWith(u8, id, query) or std.mem.startsWith(u8, std.fs.path.basename(id), query);
 }
 
 pub fn freeCandidates(allocator: std.mem.Allocator, items: []ui_state.Candidate) void {

@@ -118,10 +118,6 @@ const App = struct {
             if (!app.should_exit) {
                 try app.refreshPolicy();
             }
-            const initial_pump = app.executor.pumpAttachedOutput(&app.provider, term.tty_fd) catch null;
-            if (initial_pump) |pump_result| switch (pump_result) {
-                else => {},
-            };
             if (!app.executor.isInteractiveAttached()) {
                 app.should_exit = true;
             }
@@ -281,26 +277,13 @@ const App = struct {
         try writeAll(self.term.tty_fd, ENTER_ALT_SCREEN);
         self.size = try currentOuterSize(self.term);
         self.layout = bar_layout.compute(self.size.cols, self.size.rows, self.bar_state.mode);
-        _ = self.executor.forwardResize(self.layout.outer_cols, self.layout.main_rows) catch {};
-        const pump_result = self.executor.pumpAttachedOutput(&self.provider, self.term.tty_fd) catch |err| {
-            const msg = try std.fmt.allocPrint(self.allocator, "post-log sync failed: {s}", .{@errorName(err)});
-            _ = self.bar_state.setExternalError(msg);
-            self.allocator.free(msg);
-            return;
-        };
-        switch (pump_result) {
-            .err => |msg| {
-                defer self.allocator.free(msg);
-                _ = self.bar_state.setExternalError(msg);
-            },
-            else => {},
-        }
+        try self.syncAttachedViewport("post-log sync failed");
         try self.applyExecResult(exec_result);
         try self.refreshPolicy();
         try self.render();
     }
 
-    fn applyExecResult(self: *App, exec_result: executor_mod.Result) !void {
+    fn applyExecResult(self: *App, exec_result: executor_mod.Result) anyerror!void {
         switch (exec_result) {
             .info => |msg| {
                 defer self.allocator.free(msg);
@@ -318,20 +301,7 @@ const App = struct {
                 defer self.allocator.free(id);
                 try self.provider.setCurrentSession(id);
                 _ = self.bar_state.clearNotice();
-                _ = self.executor.forwardResize(self.layout.outer_cols, self.layout.main_rows) catch {};
-                const pump_result = self.executor.pumpAttachedOutput(&self.provider, self.term.tty_fd) catch |err| {
-                    const msg = try std.fmt.allocPrint(self.allocator, "post-attach sync failed: {s}", .{@errorName(err)});
-                    _ = self.bar_state.setExternalError(msg);
-                    self.allocator.free(msg);
-                    return;
-                };
-                switch (pump_result) {
-                    .err => |msg| {
-                        defer self.allocator.free(msg);
-                        _ = self.bar_state.setExternalError(msg);
-                    },
-                    else => {},
-                }
+                try self.syncAttachedViewport("post-attach sync failed");
             },
             .detached => {
                 try self.provider.setCurrentSession(null);
@@ -341,7 +311,7 @@ const App = struct {
         }
     }
 
-    fn handlePumpResult(self: *App, pump_result: executor_mod.Result) !void {
+    fn handlePumpResult(self: *App, pump_result: executor_mod.Result) anyerror!void {
         switch (pump_result) {
             .detached => {
                 if (!self.executor.isInteractiveAttached()) self.should_exit = true;
@@ -359,6 +329,17 @@ const App = struct {
             },
             else => {},
         }
+    }
+
+    fn syncAttachedViewport(self: *App, comptime failure_context: []const u8) anyerror!void {
+        _ = self.executor.forwardResize(self.layout.outer_cols, self.layout.main_rows) catch {};
+        const pump_result = self.executor.pumpAttachedOutput(&self.provider, self.term.tty_fd) catch |err| {
+            const msg = try std.fmt.allocPrint(self.allocator, "{s}: {s}", .{ failure_context, @errorName(err) });
+            _ = self.bar_state.setExternalError(msg);
+            self.allocator.free(msg);
+            return;
+        };
+        try self.handlePumpResult(pump_result);
     }
 };
 

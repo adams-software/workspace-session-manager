@@ -1,5 +1,38 @@
 # Progress Log
 
+## Session: 2026-07-01 Package Audit
+
+### Phase A1: Inventory And Review Order
+- **Status:** in progress
+- Actions taken:
+  - Read the existing project state, migration planning files, and current progress log.
+  - Read the `planning-with-files` skill and adopted it for this multi-pass audit.
+  - Enumerated the repo package/directory layout from the project root.
+  - Reviewed the top-level `build.zig` and broad import/build wiring to establish package boundaries.
+  - Identified the first audit wave as `wsm`, `vpty`, `ptylog`, and `scroll`.
+- Files created/modified:
+  - `task_plan.md`
+  - `findings.md`
+  - `progress.md`
+
+### Phase A2: WSM First Pass
+- **Status:** in progress
+- Actions taken:
+  - Enumerated `wsm/src` modules and rough file sizes.
+  - Mapped the current `wsm` package split across UI, command, policy, executor, service, and session primitives.
+  - Identified likely architectural pressure points for deeper review: `main.zig`, `policy.zig`, `executor.zig`, and `cli_main.zig`.
+  - Read the main control-flow portions of `main.zig`, `policy.zig`, `cli_main.zig`, and `executor.zig`.
+  - Wrote down the first concrete `wsm` findings in `findings.md`, including one likely real leftover bug/smell: duplicate initial post-attach pumping in `App.init()`.
+  - Implemented a focused `wsm` cleanup/fix slice:
+    - removed the extra startup post-attach pump in `App.init()`
+    - extracted shared attached-session viewport resync in `main.zig`
+    - extracted shared log-viewer launching into `wsm/src/logs_viewer.zig`
+    - extracted shared outcome/message formatting into `wsm/src/messages.zig`
+    - moved bar summary string formatting out of `policy.zig` into `wsm/src/bar_model.zig`
+  - Verification:
+    - `zig build` passes
+    - `zig build test` passes
+
 ## Session: 2026-06-08
 
 ### Phase 1: Discovery

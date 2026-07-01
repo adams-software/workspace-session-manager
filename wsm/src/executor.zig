@@ -2,66 +2,11 @@ const std = @import("std");
 const global_io = std.Io.Threaded.global_single_threaded.io();
 const cli_main = @import("cli_main.zig");
 const commands = @import("commands.zig");
+const logs_viewer = @import("logs_viewer.zig");
+const messages = @import("messages.zig");
 const policy = @import("policy.zig");
 const service_mod = @import("service.zig");
 const debug = @import("debug.zig");
-
-fn attachStateMessage(state: service_mod.AttachState) []const u8 {
-    return switch (state) {
-        .ready => "ready",
-        .missing_data => "session data socket missing",
-        .stale_data_socket => "session data socket stale",
-        .stale_control_socket => "session control socket stale",
-        .stale_both => "session data and control sockets stale",
-        .data_not_connectable => "session data socket not connectable",
-        .control_not_connectable => "session control socket not connectable",
-    };
-}
-
-fn attachOutcomeMessage(allocator: std.mem.Allocator, outcome: commands.AttachOutcome, query: []const u8) ![]u8 {
-    return switch (outcome) {
-        .ready => unreachable,
-        .no_sessions => try allocator.dupe(u8, "no sessions found; press c to create one"),
-        .no_match => try std.fmt.allocPrint(allocator, "no session matching '{s}'", .{query}),
-        .ambiguous => try std.fmt.allocPrint(allocator, "ambiguous session '{s}'", .{query}),
-        .not_attachable => |payload| try std.fmt.allocPrint(allocator, "session '{s}' is not attachable: {s}", .{ payload.id, attachStateMessage(payload.state) }),
-    };
-}
-
-fn createInvalidIdMessage(allocator: std.mem.Allocator, reason: commands.CreateInvalidIdReason) ![]u8 {
-    return try std.fmt.allocPrint(allocator, "invalid id: {s}", .{switch (reason) {
-        .empty => "Empty",
-        .starts_with_slash => "StartsWithSlash",
-        .ends_with_slash => "EndsWithSlash",
-        .empty_segment => "EmptySegment",
-        .dot_segment => "DotSegment",
-        .invalid_char => "InvalidChar",
-    }});
-}
-
-fn killOutcomeMessage(allocator: std.mem.Allocator, outcome: commands.KillOutcome) ![]u8 {
-    return switch (outcome) {
-        .signaled => |sig| try std.fmt.allocPrint(allocator, "sent {s}", .{if (sig == .kill) "KILL" else "TERM"}),
-        .no_current_session => try allocator.dupe(u8, "no current session"),
-        .no_control => try allocator.dupe(u8, "kill failed: session has no control socket"),
-    };
-}
-
-fn backOutcomeMessage(allocator: std.mem.Allocator, outcome: commands.BackOutcome) ![]u8 {
-    return switch (outcome) {
-        .ready => unreachable,
-        .no_previous_session => try allocator.dupe(u8, "no previous session"),
-        .not_attachable => |payload| try std.fmt.allocPrint(allocator, "session '{s}' is not attachable: {s}", .{ payload.id, attachStateMessage(payload.state) }),
-    };
-}
-
-fn navOutcomeMessage(allocator: std.mem.Allocator, outcome: commands.NavOutcome) ![]u8 {
-    return switch (outcome) {
-        .ready => unreachable,
-        .no_target => try allocator.dupe(u8, "no target"),
-        .not_attachable => |payload| try std.fmt.allocPrint(allocator, "session '{s}' is not attachable: {s}", .{ payload.id, attachStateMessage(payload.state) }),
-    };
-}
 
 pub const Result = union(enum) {
     info: []const u8,
@@ -148,23 +93,8 @@ pub const Executor = struct {
             return .{ .err = try std.fmt.allocPrint(self.allocator, "logs failed for {s}: log not found", .{base_id}) };
         };
 
-        const argv = [_][]const u8{ self.logs_viewer_bin, log_path };
-        var spawn_runtime = std.Io.Threaded.init(std.heap.smp_allocator, .{});
-        defer spawn_runtime.deinit();
-        const spawn_io = spawn_runtime.io();
-        var child = try std.process.spawn(spawn_io, .{
-            .argv = &argv,
-            .stdin = .inherit,
-            .stdout = .inherit,
-            .stderr = .inherit,
-        });
-        defer child.kill(spawn_io);
-        const term = try child.wait(spawn_io);
-        return switch (term) {
-            .exited => |code| if (code == 0) .idle else .{ .err = try std.fmt.allocPrint(self.allocator, "logs viewer exited with code {d}", .{code}) },
-            .signal => |sig| .{ .err = try std.fmt.allocPrint(self.allocator, "logs viewer exited on signal {d}", .{sig}) },
-            else => .{ .err = try self.allocator.dupe(u8, "logs viewer exited unexpectedly") },
-        };
+        const code = try logs_viewer.run(self.logs_viewer_bin, log_path);
+        return if (code == 0) .idle else .{ .err = try std.fmt.allocPrint(self.allocator, "logs viewer exited with code {d}", .{code}) };
     }
 
     pub fn bootstrapInteractive(self: *Executor, provider: *policy.Provider, mode: cli_main.Mode) !Result {
@@ -229,7 +159,7 @@ pub const Executor = struct {
         defer outcome.deinit(self.allocator);
         return switch (outcome) {
             .ready => |previous_id| self.attachReadyId(provider, previous_id, writer_fd, size, "back"),
-            else => .{ .err = backOutcomeMessage(self.allocator, outcome) catch unreachable },
+            else => .{ .err = messages.formatBackOutcome(self.allocator, outcome, "") catch unreachable },
         };
     }
 
@@ -239,8 +169,8 @@ pub const Executor = struct {
             return .{ .err = std.fmt.allocPrint(self.allocator, "kill failed: {s}", .{@errorName(err)}) catch unreachable };
         };
         return switch (outcome) {
-            .signaled => .{ .info = killOutcomeMessage(self.allocator, outcome) catch unreachable },
-            else => .{ .err = killOutcomeMessage(self.allocator, outcome) catch unreachable },
+            .signaled => .{ .info = messages.formatKillOutcome(self.allocator, outcome, "") catch unreachable },
+            else => .{ .err = messages.formatKillOutcome(self.allocator, outcome, "") catch unreachable },
         };
     }
 
@@ -253,7 +183,7 @@ pub const Executor = struct {
         defer outcome.deinit(self.allocator);
         return switch (outcome) {
             .ready => |resolved_target| self.attachReadyId(provider, resolved_target, writer_fd, size, "attach"),
-            else => .{ .err = navOutcomeMessage(self.allocator, outcome) catch unreachable },
+            else => .{ .err = messages.formatNavOutcome(self.allocator, outcome, "") catch unreachable },
         };
     }
 
@@ -267,7 +197,7 @@ pub const Executor = struct {
         defer outcome.deinit(self.allocator);
         return switch (outcome) {
             .ready => |resolved_target| self.attachReadyId(provider, resolved_target, writer_fd, size, "attach"),
-            else => .{ .err = attachOutcomeMessage(self.allocator, outcome, target) catch unreachable },
+            else => .{ .err = messages.formatAttachOutcome(self.allocator, outcome, target, "") catch unreachable },
         };
     }
 
@@ -293,7 +223,7 @@ pub const Executor = struct {
                 break :blk .{ .attached = self.allocator.dupe(u8, result.session.id) catch unreachable };
             },
             .session_exists => .{ .err = self.allocator.dupe(u8, "session already exists") catch unreachable },
-            .invalid_id => |reason| .{ .err = createInvalidIdMessage(self.allocator, reason) catch unreachable },
+            .invalid_id => |reason| .{ .err = messages.formatCreateInvalidId(self.allocator, reason, "") catch unreachable },
         };
     }
 
