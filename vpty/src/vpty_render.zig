@@ -2,14 +2,15 @@ const std = @import("std");
 const actor_mailboxes = @import("actor_mailboxes");
 const host = @import("session_host_vpty");
 const single_viewport_adapter = @import("single_viewport_adapter");
+const viewport_patch = @import("viewport_patch");
 const TerminalModel = @import("terminal_model").TerminalModel;
 const StdoutThread = @import("stdout_thread").StdoutThread;
 
-pub const VirtualCursor = single_viewport_adapter.VirtualCursor;
-pub const Viewport = single_viewport_adapter.Viewport;
-pub const TextRun = single_viewport_adapter.TextRun;
-pub const RowPatch = single_viewport_adapter.RowPatch;
-pub const ViewportPatch = single_viewport_adapter.ViewportPatch;
+pub const VirtualCursor = viewport_patch.VirtualCursor;
+pub const Viewport = viewport_patch.Viewport;
+pub const TextRun = viewport_patch.TextRun;
+pub const RowPatch = viewport_patch.RowPatch;
+pub const ViewportPatch = viewport_patch.ViewportPatch;
 pub const SingleViewportAdapter = single_viewport_adapter.SingleViewportAdapter;
 
 pub const SurfaceState = struct {
@@ -87,12 +88,6 @@ pub const Renderer = struct {
 
         const snapshot = model.snapshot(std.heap.page_allocator) catch return null;
         return .{ .version = model.currentVersion(), .snapshot = snapshot };
-    }
-
-    pub fn renderSnapshot(self: *Renderer, version: u64, snapshot: host.HostScreenSnapshot) void {
-        if (self.buildRenderProduct(version, snapshot)) |product| {
-            self.publishRenderProduct(product);
-        }
     }
 
     pub fn buildRenderProduct(self: *Renderer, version: u64, snapshot: host.HostScreenSnapshot) ?RenderProduct {
@@ -217,8 +212,7 @@ pub const Renderer = struct {
             }
         }
     }
-    pub fn shutdown(self: *Renderer, version: u64) void {
-        _ = version;
+    pub fn shutdown(self: *Renderer) void {
         self.render_buf.clearRetainingCapacity();
         self.surface_state = .{};
         self.pending_surface_state = null;

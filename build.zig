@@ -325,6 +325,14 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+    const viewport_patch_mod = b.addModule("viewport_patch", .{
+        .root_source_file = b.path("vpty/src/viewport_patch.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    viewport_patch_mod.addImport("session_host_vpty", session_host_vpty_mod);
+    single_viewport_adapter_mod.addImport("viewport_patch", viewport_patch_mod);
     single_viewport_adapter_mod.addImport("session_host_vpty", session_host_vpty_mod);
 
     const vpty_render_mod = b.addModule("vpty_render", .{
@@ -334,6 +342,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     vpty_render_mod.addImport("session_host_vpty", session_host_vpty_mod);
+    vpty_render_mod.addImport("viewport_patch", viewport_patch_mod);
     vpty_render_mod.addImport("single_viewport_adapter", single_viewport_adapter_mod);
     vpty_render_mod.addImport("stdout_thread", stdout_thread_mod);
     vpty_render_mod.addImport("terminal_model", terminal_model_mod);

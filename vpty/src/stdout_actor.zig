@@ -92,11 +92,14 @@ pub const StdoutBuffer = struct {
         return self.control_offset < self.control_queue.items.len or self.pending_render != null;
     }
 
-    pub fn pendingBytes(self: *const StdoutBuffer) usize {
-        const control_pending = if (self.control_offset < self.control_queue.items.len)
+    pub fn pendingControlBytes(self: *const StdoutBuffer) usize {
+        return if (self.control_offset < self.control_queue.items.len)
             self.control_queue.items.len - self.control_offset
         else
             0;
+    }
+
+    pub fn pendingRenderBytes(self: *const StdoutBuffer) usize {
         const render_pending = if (self.pending_render) |candidate|
             candidate.storage.items.len - candidate.offset
         else
@@ -105,7 +108,11 @@ pub const StdoutBuffer = struct {
             candidate.storage.items.len - candidate.offset
         else
             0;
-        return control_pending + render_pending + deferred_pending;
+        return render_pending + deferred_pending;
+    }
+
+    pub fn pendingBytes(self: *const StdoutBuffer) usize {
+        return self.pendingControlBytes() + self.pendingRenderBytes();
     }
 
     pub fn invalidatePendingRenders(self: *StdoutBuffer) void {
@@ -232,4 +239,20 @@ test "started render candidate defers newer render until current batch completes
     try std.testing.expect(buffer.deferred_render != null);
     try std.testing.expectEqual(@as(u64, 2), buffer.deferred_render.?.publish.version);
     try std.testing.expectEqualStrings("second", buffer.deferred_render.?.storage.items);
+}
+
+test "pending byte categories keep control separate from render backlog" {
+    var buffer = StdoutBuffer.init(std.testing.allocator);
+    defer buffer.deinit();
+
+    try buffer.enqueueControl(.{ .bytes = "osc52" });
+    buffer.publishOwnedRenderCandidate(1, try std.testing.allocator.dupe(u8, "frame"), .{
+        .visible = true,
+        .row = 0,
+        .col = 0,
+    });
+
+    try std.testing.expectEqual(@as(usize, 5), buffer.pendingControlBytes());
+    try std.testing.expectEqual(@as(usize, 5), buffer.pendingRenderBytes());
+    try std.testing.expectEqual(@as(usize, 10), buffer.pendingBytes());
 }

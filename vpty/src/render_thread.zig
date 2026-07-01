@@ -121,12 +121,6 @@ pub const RenderThread = struct {
         self.wake();
     }
 
-    fn currentVersion(self: *RenderThread) u64 {
-        self.shared_model.lock();
-        defer self.shared_model.unlock();
-        return self.shared_model.model.currentVersion();
-    }
-
     fn syncCommittedVersion(self: *RenderThread) void {
         self.renderer.noteCommitted(.{ .version = self.stdout_thread.committedRenderVersion() });
     }
@@ -157,7 +151,7 @@ pub const RenderThread = struct {
             self.renderer.publishModelChanged(changed);
         }
         if (pending.shutdown_requested) {
-            self.renderer.shutdown(self.currentVersion());
+            self.renderer.shutdown();
         }
     }
 
@@ -171,7 +165,7 @@ pub const RenderThread = struct {
             self.applyPendingRequests();
 
             if (self.renderer.needsRender()) {
-                if (self.stdout_thread.pendingBytes() > 0 and !self.renderer.shouldBypassBacklogCoalescing()) {
+                if (self.stdout_thread.pendingRenderBytes() > 0 and !self.renderer.shouldBypassBacklogCoalescing()) {
                     if (self.stop_requested.load(.seq_cst)) break;
 
                     var pfd_busy = c.struct_pollfd{

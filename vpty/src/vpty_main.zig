@@ -135,8 +135,7 @@ const TransportState = struct {
         }
     }
 
-    fn processOutput(self: *TransportState, shared_model: *SharedTerminalModel, render_thread: *RenderThread, forwarder: *side_effects.SideEffectForwarder, stdout_actor: *StdoutThread) !bool {
-        var emitted_osc52 = false;
+    fn processOutput(self: *TransportState, shared_model: *SharedTerminalModel, render_thread: *RenderThread, forwarder: *side_effects.SideEffectForwarder, stdout_actor: *StdoutThread) !void {
         var spins: usize = 0;
         while (!self.output_rx.isEmpty() and spins < IO_SPIN_LIMIT) : (spins += 1) {
             const readable = self.output_rx.readableSlice();
@@ -144,7 +143,6 @@ const TransportState = struct {
             const chunk = readable[0..chunk_len];
 
             const result = try forwarder.feed(stdout_actor, chunk);
-            emitted_osc52 = emitted_osc52 or result.emitted_osc52;
 
             shared_model.lock();
             const update = shared_model.model.feedScreenBytes(result.screen_bytes);
@@ -153,7 +151,6 @@ const TransportState = struct {
             render_thread.publishModelChanged(update.asModelChanged());
             self.output_rx.discard(chunk_len);
         }
-        return emitted_osc52;
     }
 };
 
@@ -374,8 +371,7 @@ fn stepWake(pfds: []const c.struct_pollfd) void {
     }
 }
 
-fn stepStdoutCommitted(stdout_actor: *StdoutThread, shared_model: *SharedTerminalModel, pfds: []const c.struct_pollfd) !void {
-    _ = pfds;
+fn stepStdoutCommitted(stdout_actor: *StdoutThread, shared_model: *SharedTerminalModel) !void {
     if (stdout_actor.takeNewlyCommittedRenderVersion()) |notice| {
         shared_model.lock();
         shared_model.model.markCommittedThrough(notice.version);
@@ -401,20 +397,14 @@ fn stepPtyOutput(
     forwarder: *side_effects.SideEffectForwarder,
     stdout_actor: *StdoutThread,
     pfds: []const c.struct_pollfd,
-) !bool {
+) !void {
     if ((pfds[1].revents & c.POLLIN) != 0) {
         try transport.ingestPtyOutput(session_host);
     }
 
-    var emitted_osc52 = false;
     if (!transport.output_rx.isEmpty()) {
-        emitted_osc52 = try transport.processOutput(shared_model, render_thread, forwarder, stdout_actor);
+        try transport.processOutput(shared_model, render_thread, forwarder, stdout_actor);
     }
-    return emitted_osc52;
-}
-
-fn stepStdoutLate(stdout_actor: *StdoutThread, shared_model: *SharedTerminalModel, pfds: []const c.struct_pollfd) !void {
-    try stepStdoutCommitted(stdout_actor, shared_model, pfds);
 }
 
 fn refreshAndMaybeExit(session_host: *host.SessionHost) !?host.ExitStatus {
@@ -454,10 +444,10 @@ fn pumpUntilExit(session_host: *host.SessionHost, shared_model: *SharedTerminalM
         }
 
         stepWake(&pfds);
-        try stepStdoutCommitted(stdout_actor, shared_model, &pfds);
+        try stepStdoutCommitted(stdout_actor, shared_model);
         try stepInput(&transport, session_host, terminal, &pfds);
-        _ = try stepPtyOutput(&transport, session_host, shared_model, render_thread, forwarder, stdout_actor, &pfds);
-        try stepStdoutLate(stdout_actor, shared_model, &pfds);
+        try stepPtyOutput(&transport, session_host, shared_model, render_thread, forwarder, stdout_actor, &pfds);
+        try stepStdoutCommitted(stdout_actor, shared_model);
 
         if (try refreshAndMaybeExit(session_host)) |status| return status;
     }

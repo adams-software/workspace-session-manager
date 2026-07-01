@@ -32,7 +32,8 @@ const OwnedRenderPublish = struct {
 
 const SharedState = struct {
     committed_render_version: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
-    pending_bytes: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+    pending_control_bytes: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+    pending_render_bytes: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
     latest_commit_notice: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
 };
 
@@ -83,17 +84,17 @@ pub const StdoutThread = struct {
     pub fn stopDiscardPending(self: *StdoutThread) void {
         self.render_mutex.lock();
         if (self.pending_render_publish) |publish| {
-            _ = self.shared.pending_bytes.fetchSub(publish.bytes.len, .seq_cst);
+            _ = self.shared.pending_render_bytes.fetchSub(publish.bytes.len, .seq_cst);
             self.allocator.free(publish.bytes);
             self.pending_render_publish = null;
         }
         self.render_mutex.unlock();
 
-        const before = self.buffer.pendingBytes();
+        const before = self.buffer.pendingRenderBytes();
         self.buffer.invalidatePendingRenders();
-        const after = self.buffer.pendingBytes();
+        const after = self.buffer.pendingRenderBytes();
         if (before > after) {
-            _ = self.shared.pending_bytes.fetchSub(before - after, .seq_cst);
+            _ = self.shared.pending_render_bytes.fetchSub(before - after, .seq_cst);
         }
         _ = self.shared.latest_commit_notice.swap(0, .seq_cst);
 
@@ -110,7 +111,7 @@ pub const StdoutThread = struct {
         const owned = try self.allocator.dupe(u8, chunk.bytes);
         errdefer self.allocator.free(owned);
         try self.control_queue.push(.{ .bytes = owned });
-        _ = self.shared.pending_bytes.fetchAdd(owned.len, .seq_cst);
+        _ = self.shared.pending_control_bytes.fetchAdd(owned.len, .seq_cst);
         self.wake();
     }
 
@@ -120,11 +121,11 @@ pub const StdoutThread = struct {
         defer self.render_mutex.unlock();
 
         if (self.pending_render_publish) |previous| {
-            _ = self.shared.pending_bytes.fetchSub(previous.bytes.len, .seq_cst);
+            _ = self.shared.pending_render_bytes.fetchSub(previous.bytes.len, .seq_cst);
             self.allocator.free(previous.bytes);
         }
         self.pending_render_publish = .{ .version = publish.version, .bytes = owned, .final_cursor = publish.final_cursor };
-        _ = self.shared.pending_bytes.fetchAdd(owned.len, .seq_cst);
+        _ = self.shared.pending_render_bytes.fetchAdd(owned.len, .seq_cst);
         self.wake();
     }
 
@@ -133,16 +134,16 @@ pub const StdoutThread = struct {
         defer self.render_mutex.unlock();
 
         if (self.pending_render_publish) |publish| {
-            _ = self.shared.pending_bytes.fetchSub(publish.bytes.len, .seq_cst);
+            _ = self.shared.pending_render_bytes.fetchSub(publish.bytes.len, .seq_cst);
             self.allocator.free(publish.bytes);
             self.pending_render_publish = null;
         }
 
-        const before = self.buffer.pendingBytes();
+        const before = self.buffer.pendingRenderBytes();
         self.buffer.invalidatePendingRenders();
-        const after = self.buffer.pendingBytes();
+        const after = self.buffer.pendingRenderBytes();
         if (before > after) {
-            _ = self.shared.pending_bytes.fetchSub(before - after, .seq_cst);
+            _ = self.shared.pending_render_bytes.fetchSub(before - after, .seq_cst);
         }
         _ = self.shared.latest_commit_notice.swap(0, .seq_cst);
         self.wake();
@@ -158,7 +159,15 @@ pub const StdoutThread = struct {
     }
 
     pub fn pendingBytes(self: *const StdoutThread) usize {
-        return self.shared.pending_bytes.load(.seq_cst);
+        return self.pendingControlBytes() + self.pendingRenderBytes();
+    }
+
+    pub fn pendingControlBytes(self: *const StdoutThread) usize {
+        return self.shared.pending_control_bytes.load(.seq_cst);
+    }
+
+    pub fn pendingRenderBytes(self: *const StdoutThread) usize {
+        return self.shared.pending_render_bytes.load(.seq_cst);
     }
 
     pub fn hasPending(self: *const StdoutThread) bool {
@@ -177,11 +186,16 @@ pub const StdoutThread = struct {
         while (true) {
             self.drainInbound();
             while (self.buffer.hasPending()) {
-                const before = self.buffer.pendingBytes();
+                const before_control = self.buffer.pendingControlBytes();
+                const before_render = self.buffer.pendingRenderBytes();
                 _ = self.buffer.flushSome(64 * 1024) catch break;
-                const after = self.buffer.pendingBytes();
-                if (before > after) {
-                    _ = self.shared.pending_bytes.fetchSub(before - after, .seq_cst);
+                const after_control = self.buffer.pendingControlBytes();
+                const after_render = self.buffer.pendingRenderBytes();
+                if (before_control > after_control) {
+                    _ = self.shared.pending_control_bytes.fetchSub(before_control - after_control, .seq_cst);
+                }
+                if (before_render > after_render) {
+                    _ = self.shared.pending_render_bytes.fetchSub(before_render - after_render, .seq_cst);
                 }
                 const committed = self.buffer.takeNewlyCommittedRenderVersion();
                 if (committed) |notice| {
@@ -207,7 +221,7 @@ pub const StdoutThread = struct {
     fn drainInbound(self: *StdoutThread) void {
         while (self.control_queue.pop()) |chunk| {
             self.buffer.enqueueOwnedControl(chunk.bytes) catch {
-                _ = self.shared.pending_bytes.fetchSub(chunk.bytes.len, .seq_cst);
+                _ = self.shared.pending_control_bytes.fetchSub(chunk.bytes.len, .seq_cst);
                 self.allocator.free(chunk.bytes);
                 break;
             };
@@ -219,11 +233,14 @@ pub const StdoutThread = struct {
         self.render_mutex.unlock();
 
         if (publish) |owned| {
-            const before = self.buffer.pendingBytes();
+            _ = self.shared.pending_render_bytes.fetchSub(owned.bytes.len, .seq_cst);
+            const before = self.buffer.pendingRenderBytes();
             self.buffer.publishOwnedRenderCandidate(owned.version, owned.bytes, owned.final_cursor);
-            const after = self.buffer.pendingBytes();
-            if (before > after) {
-                _ = self.shared.pending_bytes.fetchSub(before - after, .seq_cst);
+            const after = self.buffer.pendingRenderBytes();
+            if (after > before) {
+                _ = self.shared.pending_render_bytes.fetchAdd(after - before, .seq_cst);
+            } else if (before > after) {
+                _ = self.shared.pending_render_bytes.fetchSub(before - after, .seq_cst);
             }
         }
     }
