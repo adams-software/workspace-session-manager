@@ -5,6 +5,7 @@ const bar_render = @import("bar_render.zig");
 const policy = @import("policy.zig");
 const executor_mod = @import("executor.zig");
 const cli_main = @import("cli_main.zig");
+const debug = @import("debug.zig");
 const enterRawMode = @import("ptyio_raw_mode").enterRawMode;
 const getTtySize = @import("ptyio_tty_size").getTtySize;
 
@@ -70,15 +71,6 @@ const OuterSize = struct {
     cols: u16,
     rows: u16,
 };
-
-fn debugEnabled() bool {
-    return std.c.getenv("WSM_DEBUG") != null;
-}
-
-fn debugLog(comptime fmt: []const u8, args: anytype) void {
-    if (!debugEnabled()) return;
-    std.debug.print(fmt, args);
-}
 
 const App = struct {
     should_exit: bool = false,
@@ -151,13 +143,7 @@ const App = struct {
     }
 
     fn render(self: *App) !void {
-        try self.renderBody();
         try self.renderBar();
-    }
-
-    fn renderBody(self: *App) !void {
-        _ = self;
-        return;
     }
 
     fn renderBar(self: *App) !void {
@@ -367,7 +353,7 @@ const App = struct {
             },
             .info => |msg| {
                 defer self.allocator.free(msg);
-                debugLog("wsm pump info len={d} attached={}\n", .{ msg.len, self.executor.isInteractiveAttached() });
+                debug.log("wsm pump info len={d} attached={}\n", .{ msg.len, self.executor.isInteractiveAttached() });
                 // App output should stay within the vpty viewport. Reasserting the bar on
                 // every pump can interleave overlay bytes with high-churn app redraws.
             },
@@ -545,7 +531,7 @@ fn runInteractive(allocator: std.mem.Allocator, mode: cli_main.Mode) !void {
 
         if (nfds > 1) {
             const rev = pfds[1].revents;
-            if (rev != 0) debugLog("wsm poll attached fd={d} revents=0x{x}\n", .{ pfds[1].fd, rev });
+            if (rev != 0) debug.log("wsm poll attached fd={d} revents=0x{x}\n", .{ pfds[1].fd, rev });
             if ((rev & c.POLLNVAL) != 0) {
                 std.debug.print("wsm attached data POLLNVAL fd={d}\n", .{pfds[1].fd});
                 return Error.Unexpected;

@@ -4,15 +4,7 @@ const cli_main = @import("cli_main.zig");
 const commands = @import("commands.zig");
 const policy = @import("policy.zig");
 const service_mod = @import("service.zig");
-
-fn debugEnabled() bool {
-    return std.c.getenv("WSM_DEBUG") != null;
-}
-
-fn debugLog(comptime fmt: []const u8, args: anytype) void {
-    if (!debugEnabled()) return;
-    std.debug.print(fmt, args);
-}
+const debug = @import("debug.zig");
 
 fn attachStateMessage(state: service_mod.AttachState) []const u8 {
     return switch (state) {
@@ -204,7 +196,7 @@ pub const Executor = struct {
         _ = provider;
         if (self.link) |*link| {
             const result = try link.pumpOutput(writer_fd);
-            debugLog("executor pump stream_lost={} did_work={}\n", .{ result.stream_lost, result.did_work });
+            debug.log("executor pump stream_lost={} did_work={}\n", .{ result.stream_lost, result.did_work });
             if (result.stream_lost) {
                 self.interactive_attached = false;
                 link.detach();
