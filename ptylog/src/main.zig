@@ -2,13 +2,13 @@ const std = @import("std");
 const ByteQueue = @import("byte_queue").ByteQueue;
 const fd_stream = @import("fd_stream");
 const PtyChildHost = @import("host").PtyChildHost;
-const getTtySize = @import("ptyio_tty_size").getTtySize;
 const enterRawMode = @import("ptyio_raw_mode").enterRawMode;
+const runtime_lifecycle_mod = @import("ptylog_runtime_lifecycle");
+const RuntimeLifecycle = runtime_lifecycle_mod.RuntimeLifecycle;
 const log_core = @import("scroll_log_core");
 
 const c = @cImport({
     @cInclude("poll.h");
-    @cInclude("signal.h");
     @cInclude("unistd.h");
 });
 
@@ -20,9 +20,6 @@ const default_log_budget_bytes: u64 = default_log_segment_bytes * default_log_se
 fn writerFromList(allocator: std.mem.Allocator, list: *std.ArrayList(u8)) std.Io.Writer.Allocating {
     return std.Io.Writer.Allocating.fromArrayList(allocator, list);
 }
-
-var winch_changed = false;
-var terminate_signal: c.sig_atomic_t = 0;
 
 const LogState = struct {
     allocator: std.mem.Allocator,
@@ -134,7 +131,7 @@ const LogState = struct {
         }
     }
 
-    fn resize(self: *LogState, rows: u16, cols: u16) void {
+    pub fn resize(self: *LogState, rows: u16, cols: u16) void {
         if (self.logger) |*logger| {
             logger.resize(rows, cols) catch |err| self.disable(std.Io.Threaded.global_single_threaded.io(), err);
         }
@@ -222,14 +219,6 @@ fn usage() void {
         "NAME\n  ptylog - PTY passthrough logger\n\nUSAGE\n  ptylog --log <path> [--segment <bytes>] [--keep <count>] -- <command> [args...]\n",
         .{},
     );
-}
-
-fn handleSigwinch(_: c_int) callconv(.c) void {
-    winch_changed = true;
-}
-
-fn handleTerminate(sig: c_int) callconv(.c) void {
-    terminate_signal = sig;
 }
 
 fn parseArgs(allocator: std.mem.Allocator, argv: []const []const u8) !Config {
@@ -395,15 +384,6 @@ fn isNumeric(bytes: []const u8) bool {
     return true;
 }
 
-fn currentSize() struct { rows: u16, cols: u16 } {
-    const fds = [_]c_int{ std.posix.STDIN_FILENO, std.posix.STDOUT_FILENO, std.posix.STDERR_FILENO };
-    for (fds) |fd| {
-        const size = getTtySize(fd) catch continue;
-        if (size.rows != 0 and size.cols != 0) return .{ .rows = size.rows, .cols = size.cols };
-    }
-    return .{ .rows = 24, .cols = 80 };
-}
-
 fn readIntoQueuePty(allocator: std.mem.Allocator, fd: c_int, queue: *ByteQueue, max_bytes: usize) !fd_stream.ReadStatus {
     if (max_bytes == 0) return .{ .progress = 0 };
 
@@ -426,14 +406,14 @@ fn readIntoQueuePty(allocator: std.mem.Allocator, fd: c_int, queue: *ByteQueue, 
     }
 }
 
-fn run(io: std.Io, allocator: std.mem.Allocator, config: Config) !u8 {
+fn run(io: std.Io, allocator: std.mem.Allocator, config: Config, lifecycle: *RuntimeLifecycle) !u8 {
     defer allocator.free(config.child_argv);
 
     const stdin_is_tty = c.isatty(std.posix.STDIN_FILENO) == 1;
     var raw_mode = if (stdin_is_tty) try enterRawMode(std.posix.STDIN_FILENO) else null;
     defer if (raw_mode) |*guard| guard.restore();
 
-    const size = currentSize();
+    const size = lifecycle.currentSize();
     var log_state = try LogState.init(
         io,
         allocator,
@@ -469,21 +449,9 @@ fn run(io: std.Io, allocator: std.mem.Allocator, config: Config) !u8 {
 
     var stdin_open = true;
     var pty_open = true;
-    var forwarded_terminate = false;
-
     while (true) {
-        if (winch_changed) {
-            winch_changed = false;
-            const next_size = currentSize();
-            child.applySize(.{ .cols = next_size.cols, .rows = next_size.rows }) catch {};
-            log_state.resize(next_size.rows, next_size.cols);
-        }
-
-        const requested_terminate: c_int = @intCast(terminate_signal);
-        if (requested_terminate != 0 and !forwarded_terminate) {
-            child.sendSignal(requested_terminate) catch {};
-            forwarded_terminate = true;
-        }
+        lifecycle.applyPendingResizeIfNeeded(&child, &log_state);
+        lifecycle.issueTerminationIfNeeded(&child);
 
         if (stdin_open) {
             const stdin_status = try fd_stream.readIntoQueue(allocator, std.posix.STDIN_FILENO, &stdin_rx, io_chunk_size);
@@ -524,8 +492,10 @@ fn run(io: std.Io, allocator: std.mem.Allocator, config: Config) !u8 {
             .{ .fd = std.posix.STDIN_FILENO, .events = if (stdin_open) c.POLLIN else 0, .revents = 0 },
             .{ .fd = pty_fd, .events = @as(c_short, if (pty_open) c.POLLIN else 0) | (if (!pty_tx.isEmpty()) @as(c_short, c.POLLOUT) else 0), .revents = 0 },
             .{ .fd = std.posix.STDOUT_FILENO, .events = if (!stdout_tx.isEmpty()) c.POLLOUT else 0, .revents = 0 },
+            .{ .fd = lifecycle.readFd(), .events = c.POLLIN, .revents = 0 },
         };
         _ = c.poll(&pfds, pfds.len, 25);
+        lifecycle.consumeWakeRevents(pfds[3].revents);
     }
 
     log_state.finish(io);
@@ -545,13 +515,6 @@ pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const argv = try allocArgs(init.arena.allocator(), init.minimal.args);
 
-    const old_winch = c.signal(c.SIGWINCH, handleSigwinch);
-    defer _ = c.signal(c.SIGWINCH, old_winch);
-    const old_term = c.signal(c.SIGTERM, handleTerminate);
-    defer _ = c.signal(c.SIGTERM, old_term);
-    const old_int = c.signal(c.SIGINT, handleTerminate);
-    defer _ = c.signal(c.SIGINT, old_int);
-
     const config = parseArgs(allocator, argv) catch |err| switch (err) {
         error.ShowHelp => {
             usage();
@@ -563,7 +526,11 @@ pub fn main(init: std.process.Init) !void {
         },
     };
 
-    const code = run(init.io, allocator, config) catch |err| {
+    var lifecycle = RuntimeLifecycle{};
+    const signal_handlers = try lifecycle.install();
+    defer signal_handlers.restore();
+
+    const code = run(init.io, allocator, config, &lifecycle) catch |err| {
         std.debug.print("ptylog: {s}\n", .{@errorName(err)});
         std.process.exit(1);
     };

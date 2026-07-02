@@ -449,6 +449,14 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+    const ptylog_runtime_lifecycle_mod = b.addModule("ptylog_runtime_lifecycle", .{
+        .root_source_file = b.path("ptylog/src/runtime_lifecycle.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    ptylog_runtime_lifecycle_mod.addImport("ptyio_tty_size", ptyio_tty_size_mod);
+    ptylog_runtime_lifecycle_mod.addImport("wake_pipe", wake_pipe_mod);
     ptylog_root.linkSystemLibrary("util", .{});
     ptylog_root.addImport("byte_queue", byte_queue_mod);
     ptylog_root.addImport("fd_stream", fd_stream_mod);
@@ -456,6 +464,7 @@ pub fn build(b: *std.Build) void {
     ptylog_root.addImport("ptyio_raw_mode", raw_mode_mod);
     ptylog_root.addImport("ptyio_tty_size", ptyio_tty_size_mod);
     ptylog_root.addImport("scroll_log_core", scroll_log_core_mod);
+    ptylog_root.addImport("ptylog_runtime_lifecycle", ptylog_runtime_lifecycle_mod);
     const ptylog_exe = b.addExecutable(.{
         .name = "ptylog",
         .root_module = ptylog_root,
