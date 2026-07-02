@@ -136,9 +136,10 @@ Inside the UI:
 - `a` opens attach prompt
 - `c` opens create prompt
 - `g` opens logs
-- `x` sends TERM to the current session child
+- `x` force-kills the current session child
 - `d` detaches from the current interactive session
-- `h/j/k/l` navigate sibling/child/parent/next session targets
+- `h/j/k/l` or arrow keys navigate sibling/child/parent/next session targets
+- `b` toggles back to the previously visited session target
 
 To leave an attached session, use the in-session detach flow, then reattach later:
 
@@ -147,6 +148,9 @@ wsm attach test
 ```
 
 The in-session action menu hotkey is currently fixed to `ctrl-g`.
+
+From the top-level status menu, `Esc`, `Enter`, and `ctrl-g` all return to the
+attached session view.
 
 Interactive attach/create is intentionally blocked from inside an already-interactive nested `wsm` session. If you are already inside one attached session and want another, use detached create from the UI and then attach/switch.
 
