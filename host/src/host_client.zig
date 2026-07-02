@@ -141,14 +141,8 @@ pub fn roundTrip(
     command: host_control.Command,
     buf: []u8,
 ) !Response {
-    const cmd_buf: [128]u8 = undefined;
-    _ = cmd_buf;
-    var cmd_stream: std.ArrayList(u8) = .empty;
-    defer cmd_stream.deinit(std.testing.allocator);
-    var cmd_writer = std.Io.Writer.Allocating.fromArrayList(std.testing.allocator, &cmd_stream);
-    defer cmd_stream = cmd_writer.toArrayList();
-    try formatCommand(&cmd_writer.writer, command);
-    const command_text = cmd_writer.written();
+    var cmd_buf: [128]u8 = undefined;
+    const command_text = try formatCommandInto(&cmd_buf, command);
 
     const ForwardCtx = struct {
         sink: EventSink,
@@ -172,6 +166,15 @@ pub fn roundTrip(
         .ok => |payload| .{ .ok = payload },
         .err => |err_line| .{ .err = if (err_line.detail.len == 0) err_line.kind else err_line.detail },
         .event => unreachable,
+    };
+}
+
+fn formatCommandInto(buf: []u8, command: host_control.Command) ![]const u8 {
+    return switch (command) {
+        .state => std.fmt.bufPrint(buf, "state\n", .{}),
+        .resize => |size| std.fmt.bufPrint(buf, "resize {d} {d}\n", .{ size.cols, size.rows }),
+        .signal => |sig| std.fmt.bufPrint(buf, "signal {s}\n", .{@tagName(sig)}),
+        .exit => std.fmt.bufPrint(buf, "exit\n", .{}),
     };
 }
 
