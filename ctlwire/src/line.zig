@@ -41,7 +41,7 @@ fn readLineBytewise(reader: anytype, buf: []u8) !?[]u8 {
         const n = try readCompat(reader, buf[used .. used + 1]);
         if (n == 0) {
             if (used == 0) return null;
-            return @constCast(trimFraming(buf[0..used]));
+            return Error.UnexpectedEof;
         }
         const b = buf[used];
         if (b == '\n' or b == '\r') {
@@ -64,4 +64,42 @@ fn readCompat(reader: anytype, out: []u8) !usize {
         return try reader.read(out);
     }
     return Error.InvalidLine;
+}
+
+test "readLine bytewise rejects unterminated EOF line" {
+    const Reader = struct {
+        bytes: []const u8,
+        index: usize = 0,
+
+        pub fn read(self: *@This(), out: []u8) !usize {
+            if (self.index >= self.bytes.len) return 0;
+            out[0] = self.bytes[self.index];
+            self.index += 1;
+            return 1;
+        }
+    };
+
+    var reader = Reader{ .bytes = "event ready" };
+    var buf: [64]u8 = undefined;
+    try std.testing.expectError(Error.UnexpectedEof, readLine(&reader, &buf));
+}
+
+test "readLine bytewise accepts newline-terminated line" {
+    const Reader = struct {
+        bytes: []const u8,
+        index: usize = 0,
+
+        pub fn read(self: *@This(), out: []u8) !usize {
+            if (self.index >= self.bytes.len) return 0;
+            out[0] = self.bytes[self.index];
+            self.index += 1;
+            return 1;
+        }
+    };
+
+    var reader = Reader{ .bytes = "event ready\n" };
+    var buf: [64]u8 = undefined;
+    const line_text = try readLine(&reader, &buf);
+    try std.testing.expect(line_text != null);
+    try std.testing.expectEqualStrings("event ready", line_text.?);
 }
