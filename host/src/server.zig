@@ -29,6 +29,8 @@ pub const ServerState = enum {
 };
 
 pub const SessionServer = struct {
+    const io_chunk_size = 64 * 1024;
+
     allocator: std.mem.Allocator,
     session_host: *host.PtyChildHost,
     state: ServerState = .created,
@@ -207,7 +209,7 @@ pub const SessionServer = struct {
             _ = c.shutdown(fd, c.SHUT_RDWR);
             _ = c.close(fd);
             self.owner_fd = null;
-            if (self.runtime) |*runtime| runtime.onClientDisconnected();
+            self.notifyClientDisconnected();
         }
         self.owner_tx.clear();
     }
@@ -217,9 +219,7 @@ pub const SessionServer = struct {
         self.dropOwner();
         try fd_stream.setNonBlocking(fd);
         self.owner_fd = fd;
-        if (self.runtime) |*runtime| {
-            if (had_owner) runtime.onClientReplaced() else runtime.onClientConnected();
-        }
+        self.notifyClientAttached(had_owner);
     }
 
     fn acceptLatestConnection(self: *SessionServer) Error!bool {
@@ -253,18 +253,11 @@ pub const SessionServer = struct {
         var progressed = false;
 
         if (self.owner_fd) |owner_fd| {
-            const rd = fd_stream.readIntoQueue(self.allocator, owner_fd, &self.owner_rx, 64 * 1024) catch {
+            const rd = fd_stream.readIntoQueue(self.allocator, owner_fd, &self.owner_rx, io_chunk_size) catch {
                 try self.commitOwnerRx();
                 self.dropOwner();
                 progressed = true;
-                const wr_after_drop = fd_stream.writeFromQueue(master_fd, &self.pty_tx, 64 * 1024) catch {
-                    return Error.IoError;
-                };
-                switch (wr_after_drop) {
-                    .progress => |n| progressed = progressed or (n > 0),
-                    .would_block => {},
-                }
-                return progressed;
+                return try self.flushPtyWrites(master_fd, progressed);
             };
             switch (rd) {
                 .progress => |n| progressed = progressed or (n > 0),
@@ -279,17 +272,7 @@ pub const SessionServer = struct {
             try self.commitOwnerRx();
         }
 
-        if (!self.pty_tx.isEmpty()) {
-            const wr = fd_stream.writeFromQueue(master_fd, &self.pty_tx, 64 * 1024) catch {
-                return Error.IoError;
-            };
-            switch (wr) {
-                .progress => |n| progressed = progressed or (n > 0),
-                .would_block => {},
-            }
-        }
-
-        return progressed;
+        return try self.flushPtyWrites(master_fd, progressed);
     }
 
     fn pumpPtyToOwner(self: *SessionServer) Error!bool {
@@ -297,7 +280,7 @@ pub const SessionServer = struct {
         const owner_fd = self.owner_fd;
         var progressed = false;
 
-        const rd = fd_stream.readIntoQueue(self.allocator, master_fd, &self.owner_tx, 64 * 1024) catch {
+        const rd = fd_stream.readIntoQueue(self.allocator, master_fd, &self.owner_tx, io_chunk_size) catch {
             return false;
         };
         switch (rd) {
@@ -307,20 +290,50 @@ pub const SessionServer = struct {
         }
 
         if (owner_fd) |fd| {
-            if (!self.owner_tx.isEmpty()) {
-                const wr = fd_stream.writeFromQueue(fd, &self.owner_tx, 64 * 1024) catch {
-                    self.dropOwner();
-                    return true;
-                };
-                switch (wr) {
-                    .progress => |n| progressed = progressed or (n > 0),
-                    .would_block => {},
-                }
-            }
+            return try self.flushOwnerWrites(fd, progressed);
         } else {
             self.owner_tx.clear();
         }
 
         return progressed;
+    }
+
+    fn notifyClientDisconnected(self: *SessionServer) void {
+        if (self.runtime) |*runtime| runtime.onClientDisconnected();
+    }
+
+    fn notifyClientAttached(self: *SessionServer, had_owner: bool) void {
+        if (self.runtime) |*runtime| {
+            if (had_owner) runtime.onClientReplaced() else runtime.onClientConnected();
+        }
+    }
+
+    fn flushPtyWrites(self: *SessionServer, master_fd: c_int, progressed: bool) Error!bool {
+        var did_progress = progressed;
+        if (!self.pty_tx.isEmpty()) {
+            const wr = fd_stream.writeFromQueue(master_fd, &self.pty_tx, io_chunk_size) catch {
+                return Error.IoError;
+            };
+            switch (wr) {
+                .progress => |n| did_progress = did_progress or (n > 0),
+                .would_block => {},
+            }
+        }
+        return did_progress;
+    }
+
+    fn flushOwnerWrites(self: *SessionServer, owner_fd: c_int, progressed: bool) Error!bool {
+        var did_progress = progressed;
+        if (!self.owner_tx.isEmpty()) {
+            const wr = fd_stream.writeFromQueue(owner_fd, &self.owner_tx, io_chunk_size) catch {
+                self.dropOwner();
+                return true;
+            };
+            switch (wr) {
+                .progress => |n| did_progress = did_progress or (n > 0),
+                .would_block => {},
+            }
+        }
+        return did_progress;
     }
 };
