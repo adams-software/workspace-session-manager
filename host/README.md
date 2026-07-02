@@ -1,4 +1,4 @@
-# host runtime package (`msr/`)
+# host runtime package (`host/`)
 
 This package contains the generic session host runtime in this repository.
 

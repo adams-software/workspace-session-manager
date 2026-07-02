@@ -65,7 +65,6 @@ Important contract:
   - or `err ...`
 
 See also:
-- `../docs/msr-stdin-stdout-protocol.md`
 - `../src/host_client.zig`
 
 ### Child PTY attach surface
@@ -89,7 +88,7 @@ See also:
 
 ### Low-level line client
 
-`msr/src/host_client.zig` provides the transport-agnostic line protocol layer.
+`host/src/host_client.zig` provides the transport-agnostic line protocol layer.
 
 Responsibilities:
 

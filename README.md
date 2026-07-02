@@ -159,7 +159,7 @@ Workspace session manager.
 
 The main user-facing entrypoint for workspace-wide naming, lookup, and navigation.
 
-### `msr/`
+### `host/`
 Generic session host runtime package (exports the internal `host` helper).
 
 Responsible for the low-level host runtime: starting a single child, binding the session socket, and owning the core host status / control behavior. End users normally enter through `wsm`, which locates this helper privately at install time.
@@ -198,7 +198,7 @@ A practical mental model is:
 If you are trying to understand the repo in more depth, continue with:
 
 1. `wsm/README.md`
-2. `msr/README.md`
+2. `host/README.md`
 3. `vpty/README.md`
 4. `alt/README.md`
 5. `ptylog/src/log_core.zig`

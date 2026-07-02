@@ -7,12 +7,12 @@
 #   source shared/scripts/dev_env.sh
 #
 # Optional:
-#   export MSR_REPO_ROOT=/absolute/path/to/repo
-#   export MSR_BIN_DIR=/absolute/path/to/repo/zig-out/bin
+#   export HOST_REPO_ROOT=/absolute/path/to/repo
+#   export HOST_BIN_DIR=/absolute/path/to/repo/zig-out/bin
 #   source shared/scripts/dev_env.sh --build   # build host/wsm first if zig-out/bin/host is missing
 #
 # This script resolves its real location, so sourcing through a symlink works.
-# If you copy it elsewhere, set MSR_REPO_ROOT first so it can find the repo.
+# If you copy it elsewhere, set HOST_REPO_ROOT first so it can find the repo.
 
 resolve_source_path() {
   local src="${BASH_SOURCE[0]}"
@@ -26,9 +26,9 @@ resolve_source_path() {
 }
 
 SCRIPT_DIR="$(resolve_source_path)"
-REPO_DIR="${MSR_REPO_ROOT:-$(cd -- "$SCRIPT_DIR/../.." && pwd)}"
-BIN_DIR="${MSR_BIN_DIR:-$REPO_DIR/zig-out/bin}"
-MSR_SCRIPTS_DIR="$REPO_DIR/msr/scripts"
+REPO_DIR="${HOST_REPO_ROOT:-${MSR_REPO_ROOT:-$(cd -- "$SCRIPT_DIR/../.." && pwd)}}"
+BIN_DIR="${HOST_BIN_DIR:-${MSR_BIN_DIR:-$REPO_DIR/zig-out/bin}}"
+HOST_SCRIPTS_DIR="$REPO_DIR/host/scripts"
 WSM_SCRIPTS_DIR="$REPO_DIR/wsm/scripts"
 
 if [[ "${1-}" == "--build" ]]; then
@@ -49,9 +49,12 @@ path_prepend() {
 }
 
 path_prepend "$BIN_DIR"
-path_prepend "$MSR_SCRIPTS_DIR"
+path_prepend "$HOST_SCRIPTS_DIR"
 path_prepend "$WSM_SCRIPTS_DIR"
 export PATH
+export HOST_REPO_DIR="$REPO_DIR"
+export HOST_REPO_ROOT="$REPO_DIR"
+export HOST_BIN_DIR="$BIN_DIR"
 export MSR_REPO_DIR="$REPO_DIR"
 export MSR_REPO_ROOT="$REPO_DIR"
 export MSR_BIN_DIR="$BIN_DIR"
@@ -69,7 +72,7 @@ Loaded repo-local WSM/host dev environment.
 
 Repo:    $REPO_DIR
 PATH+:   $BIN_DIR
-         $MSR_SCRIPTS_DIR
+         $HOST_SCRIPTS_DIR
          $WSM_SCRIPTS_DIR
 
 Commands now resolved from this repo:

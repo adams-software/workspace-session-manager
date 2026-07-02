@@ -2,8 +2,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
-REPO_ROOT="${MSR_REPO_ROOT:-$(cd -- "$SCRIPT_DIR/../.." && pwd)}"
-BIN_DIR="${MSR_BIN_DIR:-$REPO_ROOT/zig-out/bin}"
+REPO_ROOT="${HOST_REPO_ROOT:-${MSR_REPO_ROOT:-$(cd -- "$SCRIPT_DIR/../.." && pwd)}}"
+BIN_DIR="${HOST_BIN_DIR:-${MSR_BIN_DIR:-$REPO_ROOT/zig-out/bin}}"
 WSM_BIN="${WSM_BIN:-$BIN_DIR/wsm}"
 TMP="$(mktemp -d)"
 

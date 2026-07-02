@@ -49,7 +49,7 @@ It should not silently treat the current directory as the workspace root.
 
 ## Role in the repo
 
-`wsm` sits above the host runtime package under `msr/`.
+`wsm` sits above the host runtime package under `host/`.
 
 Conceptually:
 

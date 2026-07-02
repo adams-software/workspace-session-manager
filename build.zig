@@ -65,14 +65,14 @@ pub fn build(b: *std.Build) void {
     duplex_link_mod.addImport("fd_stream", fd_stream_mod);
 
     const host_runtime_mod = b.addModule("host_runtime", .{
-        .root_source_file = b.path("msr/src/host_runtime.zig"),
+        .root_source_file = b.path("host/src/host_runtime.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
 
     const host_control_mod = b.addModule("host_control", .{
-        .root_source_file = b.path("msr/src/host_control.zig"),
+        .root_source_file = b.path("host/src/host_control.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -80,7 +80,7 @@ pub fn build(b: *std.Build) void {
     host_control_mod.addImport("host_runtime", host_runtime_mod);
 
     const host_client_mod = b.addModule("host_client", .{
-        .root_source_file = b.path("msr/src/host_client.zig"),
+        .root_source_file = b.path("host/src/host_client.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -99,7 +99,7 @@ pub fn build(b: *std.Build) void {
     host_mod.linkSystemLibrary("util", .{});
 
     const host_repl_mod = b.addModule("host_repl", .{
-        .root_source_file = b.path("msr/src/host_repl.zig"),
+        .root_source_file = b.path("host/src/host_repl.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -110,7 +110,7 @@ pub fn build(b: *std.Build) void {
     host_repl_mod.addImport("ctlwire", ctlwire_mod);
 
     const server_mod = b.addModule("server", .{
-        .root_source_file = b.path("msr/src/server.zig"),
+        .root_source_file = b.path("host/src/server.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -135,7 +135,7 @@ pub fn build(b: *std.Build) void {
     });
 
     const host_exe_root = b.createModule(.{
-        .root_source_file = b.path("msr/src/main.zig"),
+        .root_source_file = b.path("host/src/main.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -529,7 +529,7 @@ pub fn build(b: *std.Build) void {
     const test_ptylog_log_core_step = b.step("test-ptylog-log-core", "Run ptylog log-core tests");
     test_ptylog_log_core_step.dependOn(&run_ptylog_log_core_tests.step);
 
-    const smoke_cmd = b.addSystemCommand(&.{ "bash", "-u", "msr/scripts/smoke_host_binary.sh" });
+    const smoke_cmd = b.addSystemCommand(&.{ "bash", "-u", "host/scripts/smoke_host_binary.sh" });
     smoke_cmd.setCwd(b.path("."));
     const smoke_step = b.step("smoke-binary", "Run real-binary smoke test for the host runtime");
     smoke_step.dependOn(b.getInstallStep());
