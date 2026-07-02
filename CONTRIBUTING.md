@@ -58,7 +58,7 @@ Please include when possible:
 - command(s) run
 - expected behavior
 - actual behavior
-- whether the issue reproduces under `host`, `vpty`, `alt`, or `wsm`
+- whether the issue reproduces under `host`, `vpty`, or `wsm`
 - terminal/environment details if they seem relevant
 
 ## Discussion

@@ -173,11 +173,6 @@ Terminal integration and rendering layer.
 
 Holds the PTY / terminal-state / rendering work needed for interactive sessions.
 
-### `alt/`
-PTY switcher.
-
-Runs a primary side and an alternate side on separate PTYs behind a local hotkey.
-
 ### `ptylog/`
 Readable session log capture.
 
@@ -196,7 +191,6 @@ A practical mental model is:
 - `wsm` is the main workspace-facing command
 - `host` is the generic session host runtime used behind `wsm`
 - `vpty` handles terminal modeling and redraw behavior
-- `alt` switches between PTY-backed sides with a configurable hotkey
 - `ptylog` captures readable session logs for later viewing
 
 If you are trying to understand the repo in more depth, continue with:
@@ -204,8 +198,7 @@ If you are trying to understand the repo in more depth, continue with:
 1. `wsm/README.md`
 2. `host/README.md`
 3. `vpty/README.md`
-4. `alt/README.md`
-5. `ptylog/src/log_core.zig`
+4. `ptylog/src/log_core.zig`
 
 ## Current maturity
 
@@ -216,7 +209,6 @@ A practical current read is:
 - `wsm` is the ergonomic operator-facing layer
 - `host` is the runtime foundation behind `wsm`
 - `vpty` is an implementation-heavy terminal subsystem under active refinement
-- `alt` is part of the intended tool suite and still evolving
 - release/install flow is usable, but still worth sanity-checking with a real installed-binary session before tagging
 
 Expect some churn while the public surface settles.
@@ -241,7 +233,6 @@ Current binaries include:
 - `zig-out/bin/wsm`
 - `zig-out/bin/host`
 - `zig-out/bin/vpty`
-- `zig-out/bin/alt`
 - `zig-out/bin/ptylog`
 
 ## Development shell

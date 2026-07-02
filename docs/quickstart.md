@@ -21,7 +21,6 @@ Main binaries:
 
 - `zig-out/bin/host`
 - `zig-out/bin/vpty`
-- `zig-out/bin/alt`
 - `zig-out/bin/ptylog`
 
 Primary user-facing entrypoint:
@@ -132,12 +131,6 @@ Run `vpty` directly:
 vpty -- bash
 ```
 
-Run `alt` with a simple alternate side:
-
-```bash
-alt --run /bin/bash --signal-2 TERM -- vpty -- bash
-```
-
 ## Current status
 
 This is still an actively evolving tool suite.
@@ -146,4 +139,4 @@ A practical current read is:
 
 - `host` is the core runtime behind `wsm`
 - `wsm` is the operator-facing naming/navigation layer
-- `vpty` and `alt` are still under active terminal UX refinement
+- `vpty` is still under active terminal UX refinement
