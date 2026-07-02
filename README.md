@@ -57,8 +57,8 @@ Check which binary you are actually running:
 
 ```bash
 which wsm
-ls -l ~/.local/bin/wsm ~/.local/libexec/wsm/{host,vpty,scroll,wsm_logs_viewer}
-ls -l zig-out/bin/{wsm,host,vpty,scroll}
+ls -l ~/.local/bin/wsm ~/.local/libexec/wsm/{host,vpty,ptylog,wsm_logs_viewer}
+ls -l zig-out/bin/{wsm,host,vpty,ptylog}
 ```
 
 If behavior differs between the repo build and the installed command, rebuild
@@ -174,10 +174,10 @@ PTY switcher.
 
 Runs a primary side and an alternate side on separate PTYs behind a local hotkey.
 
-### `scroll/`
-Offline transcript-to-buffer extractor.
+### `ptylog/`
+Readable session log capture.
 
-Replays a `script` typescript file through the shared terminal engine and emits either plain text or ANSI-preserving linear output for pagers like `less -R`.
+Promotes PTY output into bounded, human-readable `.log` files and owns the shared log rendering semantics used by that path.
 
 ### `shared/`
 Small cross-cutting package for truly shared code and scripts.
@@ -193,7 +193,7 @@ A practical mental model is:
 - `host` is the generic session host runtime used behind `wsm`
 - `vpty` handles terminal modeling and redraw behavior
 - `alt` switches between PTY-backed sides with a configurable hotkey
-- `scroll` turns transcript files into terminal-aware linear output for logs/replay
+- `ptylog` captures readable session logs for later viewing
 
 If you are trying to understand the repo in more depth, continue with:
 
@@ -201,7 +201,7 @@ If you are trying to understand the repo in more depth, continue with:
 2. `msr/README.md`
 3. `vpty/README.md`
 4. `alt/README.md`
-5. `scroll/docs/design.md`
+5. `ptylog/src/log_core.zig`
 
 ## Current maturity
 
@@ -238,7 +238,6 @@ Current binaries include:
 - `zig-out/bin/host`
 - `zig-out/bin/vpty`
 - `zig-out/bin/alt`
-- `zig-out/bin/scroll`
 - `zig-out/bin/ptylog`
 
 ## Development shell

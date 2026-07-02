@@ -411,37 +411,22 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
 
-    const scroll_log_core_mod = b.addModule("scroll_log_core", .{
-        .root_source_file = b.path("scroll/src/log_core.zig"),
+    const ptylog_log_core_mod = b.addModule("ptylog_log_core", .{
+        .root_source_file = b.path("ptylog/src/log_core.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
-    scroll_log_core_mod.addImport("term_engine", term_engine_mod);
+    ptylog_log_core_mod.addImport("term_engine", term_engine_mod);
 
-    // scroll spike
-    const scroll_root = b.createModule(.{
-        .root_source_file = b.path("scroll/src/main.zig"),
+    const ptylog_log_core_test_root = b.createModule(.{
+        .root_source_file = b.path("ptylog/src/log_core.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
-    scroll_root.addImport("term_engine", term_engine_mod);
-    scroll_root.addImport("ptyio_tty_size", ptyio_tty_size_mod);
-    const scroll_exe = b.addExecutable(.{
-        .name = "scroll",
-        .root_module = scroll_root,
-    });
-    b.installArtifact(scroll_exe);
-
-    const scroll_log_core_test_root = b.createModule(.{
-        .root_source_file = b.path("scroll/src/log_core.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    scroll_log_core_test_root.addImport("term_engine", term_engine_mod);
-    const scroll_log_core_tests = b.addTest(.{ .root_module = scroll_log_core_test_root });
+    ptylog_log_core_test_root.addImport("term_engine", term_engine_mod);
+    const ptylog_log_core_tests = b.addTest(.{ .root_module = ptylog_log_core_test_root });
 
     const ptylog_root = b.createModule(.{
         .root_source_file = b.path("ptylog/src/main.zig"),
@@ -463,7 +448,7 @@ pub fn build(b: *std.Build) void {
     ptylog_root.addImport("host", host_mod);
     ptylog_root.addImport("ptyio_raw_mode", raw_mode_mod);
     ptylog_root.addImport("ptyio_tty_size", ptyio_tty_size_mod);
-    ptylog_root.addImport("scroll_log_core", scroll_log_core_mod);
+    ptylog_root.addImport("ptylog_log_core", ptylog_log_core_mod);
     ptylog_root.addImport("ptylog_runtime_lifecycle", ptylog_runtime_lifecycle_mod);
     const ptylog_exe = b.addExecutable(.{
         .name = "ptylog",
@@ -519,7 +504,7 @@ pub fn build(b: *std.Build) void {
     const run_wsm_ui_state_tests = b.addRunArtifact(wsm_ui_state_tests);
     const run_wsm_bar_layout_tests = b.addRunArtifact(wsm_bar_layout_tests);
     const run_wsm_bar_render_tests = b.addRunArtifact(wsm_bar_render_tests);
-    const run_scroll_log_core_tests = b.addRunArtifact(scroll_log_core_tests);
+    const run_ptylog_log_core_tests = b.addRunArtifact(ptylog_log_core_tests);
 
     const test_step = b.step("test", "Run workspace tests");
     test_step.dependOn(&run_alt_tests.step);
@@ -532,7 +517,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_wsm_ui_state_tests.step);
     test_step.dependOn(&run_wsm_bar_layout_tests.step);
     test_step.dependOn(&run_wsm_bar_render_tests.step);
-    test_step.dependOn(&run_scroll_log_core_tests.step);
+    test_step.dependOn(&run_ptylog_log_core_tests.step);
 
     const test_terminal_state_vterm_step = b.step("test-vterm", "Run libvterm adapter tests");
     test_terminal_state_vterm_step.dependOn(&run_terminal_state_vterm_tests.step);
@@ -567,8 +552,8 @@ pub fn build(b: *std.Build) void {
     const test_wsm_bar_render_step = b.step("test-wsm-bar-render", "Run wsm bar_render tests");
     test_wsm_bar_render_step.dependOn(&run_wsm_bar_render_tests.step);
 
-    const test_scroll_log_core_step = b.step("test-scroll-log-core", "Run scroll log-core tests");
-    test_scroll_log_core_step.dependOn(&run_scroll_log_core_tests.step);
+    const test_ptylog_log_core_step = b.step("test-ptylog-log-core", "Run ptylog log-core tests");
+    test_ptylog_log_core_step.dependOn(&run_ptylog_log_core_tests.step);
 
     const smoke_cmd = b.addSystemCommand(&.{ "python3", "-u", "msr/scripts/smoke_msr_binary.py" });
     smoke_cmd.setCwd(b.path("."));

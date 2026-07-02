@@ -41,7 +41,7 @@ Expected install layout:
 - `bin/wsm`
 - `libexec/wsm/host`
 - `libexec/wsm/vpty`
-- `libexec/wsm/scroll`
+- `libexec/wsm/ptylog`
 - `libexec/wsm/wsm_logs_viewer`
 
 ## 3) Push main

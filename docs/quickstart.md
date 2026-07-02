@@ -22,7 +22,7 @@ Main binaries:
 - `zig-out/bin/host`
 - `zig-out/bin/vpty`
 - `zig-out/bin/alt`
-- `zig-out/bin/scroll`
+- `zig-out/bin/ptylog`
 
 Primary user-facing entrypoint:
 
@@ -59,7 +59,7 @@ After unpacking the tarball:
 sh install.sh
 ```
 
-No separate `libvterm0` runtime package is required. `vpty` and `scroll` vendor libvterm as part of the project build and release bundle.
+No separate `libvterm0` runtime package is required. The private runtime helpers vendor libvterm as part of the project build and release bundle.
 
 By default this installs to:
 
@@ -71,17 +71,11 @@ The installed completion files use command-name autoload filenames:
 
 - `wsm`
 
-## Transcript viewing
+## Log viewing
 
-`wsm log` now prefers the richer transcript path:
-
-```bash
-scroll --ansi <session.typescript> | less -R
-```
-
-When `scroll` and `less` are available, this is used automatically by
-`wsm log` and by the in-session `logs` action. The standard install bundles
-the required helpers under `~/.local/libexec/wsm`.
+`wsm log` opens the readable `.log` output directly through the bundled
+viewer helper. Single-file logs are opened directly in `less`; segmented logs
+are stitched into a temporary file first so they still behave like one log.
 
 You can override the install prefix:
 
@@ -96,8 +90,8 @@ binary your shell is actually resolving:
 
 ```bash
 which wsm
-ls -l ~/.local/bin/wsm ~/.local/libexec/wsm/{host,vpty,scroll,wsm_logs_viewer}
-ls -l zig-out/bin/{wsm,host,vpty,scroll}
+ls -l ~/.local/bin/wsm ~/.local/libexec/wsm/{host,vpty,ptylog,wsm_logs_viewer}
+ls -l zig-out/bin/{wsm,host,vpty,ptylog}
 ```
 
 When in doubt, rebuild the local distribution bundle and reinstall it:

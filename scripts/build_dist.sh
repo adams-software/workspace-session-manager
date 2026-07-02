@@ -33,7 +33,6 @@ install -m 0755 "$REPO_ROOT/zig-out/bin/wsm" "$BIN_DIR/wsm"
 install -m 0755 "$REPO_ROOT/zig-out/bin/host" "$LIBEXEC_DIR/host"
 install -m 0755 "$REPO_ROOT/zig-out/bin/vpty" "$LIBEXEC_DIR/vpty"
 install -m 0755 "$REPO_ROOT/zig-out/bin/ptylog" "$LIBEXEC_DIR/ptylog"
-install -m 0755 "$REPO_ROOT/zig-out/bin/scroll" "$LIBEXEC_DIR/scroll"
 install -m 0755 "$REPO_ROOT/wsm/scripts/wsm_logs_viewer" "$LIBEXEC_DIR/wsm_logs_viewer"
 
 install -m 0644 "$REPO_ROOT/wsm/scripts/wsm_completion.bash" "$COMPLETIONS_DIR/wsm"
@@ -68,7 +67,7 @@ Contents:
 - libexec/wsm/: private runtime helpers used by `wsm`
 - completions/: bash completion autoload files
 - install.sh: POSIX sh installer (defaults to ~/.local)
-- vendored libvterm is compiled into `vpty` and `scroll`; no separate system libvterm runtime package is required
+- vendored libvterm is compiled into the private runtime helpers; no separate system libvterm runtime package is required
 
 Install:
   sh install.sh

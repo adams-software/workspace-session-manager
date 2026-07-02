@@ -5,7 +5,7 @@ const PtyChildHost = @import("host").PtyChildHost;
 const enterRawMode = @import("ptyio_raw_mode").enterRawMode;
 const runtime_lifecycle_mod = @import("ptylog_runtime_lifecycle");
 const RuntimeLifecycle = runtime_lifecycle_mod.RuntimeLifecycle;
-const log_core = @import("scroll_log_core");
+const log_core = @import("ptylog_log_core");
 
 const c = @cImport({
     @cInclude("poll.h");

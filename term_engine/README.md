@@ -19,7 +19,7 @@ It does not own:
 Current intended consumers:
 
 - `vpty`
-- `scroll`
+- `ptylog`
 
 ## Intended public surface
 
