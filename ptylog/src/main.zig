@@ -17,6 +17,10 @@ const default_log_segment_bytes: u64 = 1 * 1024 * 1024;
 const default_log_segment_count: u64 = 10;
 const default_log_budget_bytes: u64 = default_log_segment_bytes * default_log_segment_count;
 
+fn writerFromList(allocator: std.mem.Allocator, list: *std.ArrayList(u8)) std.Io.Writer.Allocating {
+    return std.Io.Writer.Allocating.fromArrayList(allocator, list);
+}
+
 var winch_changed = false;
 var terminate_signal: c.sig_atomic_t = 0;
 
@@ -93,18 +97,6 @@ const LogState = struct {
         }
     }
 
-    fn postWrite(self: *LogState, io: std.Io) void {
-        if (self.file == null) return;
-        self.current_bytes = fileSize(self.base_path) catch |err| {
-            self.disable(io, err);
-            return;
-        };
-        if (self.current_bytes < self.segment_bytes) return;
-        self.rollSegment(io) catch |err| {
-            self.disable(io, err);
-        };
-    }
-
     fn rollSegment(self: *LogState, io: std.Io) !void {
         if (self.file) |*file| {
             file.close(io);
@@ -148,6 +140,40 @@ const LogState = struct {
         }
     }
 
+    fn appendLoggedBytes(self: *LogState, io: std.Io, bytes: []const u8) void {
+        if (bytes.len == 0 or self.file == null) return;
+
+        var remaining = bytes;
+        while (remaining.len > 0) {
+            if (self.current_bytes >= self.segment_bytes) {
+                self.rollSegment(io) catch |err| {
+                    self.disable(io, err);
+                    return;
+                };
+                if (self.file == null) return;
+            }
+
+            const space_u64 = self.segment_bytes - self.current_bytes;
+            const space: usize = @intCast(@min(space_u64, @as(u64, @intCast(remaining.len))));
+            if (space == 0) break;
+
+            {
+                var file = &self.file.?;
+                var writer = file.writerStreaming(io, &self.buf);
+                writer.interface.writeAll(remaining[0..space]) catch |err| {
+                    self.disable(io, err);
+                    return;
+                };
+                writer.interface.flush() catch |err| {
+                    self.disable(io, err);
+                    return;
+                };
+            }
+            self.current_bytes += space;
+            remaining = remaining[space..];
+        }
+    }
+
     fn feed(self: *LogState, io: std.Io, bytes: []const u8) void {
         if (self.logger == null or self.file == null) return;
 
@@ -157,38 +183,30 @@ const LogState = struct {
             return;
         };
 
-        {
-            var file = &self.file.?;
-            var writer = file.writerStreaming(io, &self.buf);
-            logger.flushLive(&writer.interface) catch |err| {
-                self.disable(io, err);
-                return;
-            };
-            writer.interface.flush() catch |err| {
-                self.disable(io, err);
-                return;
-            };
-        }
-        self.postWrite(io);
+        var flushed: std.ArrayList(u8) = .empty;
+        defer flushed.deinit(self.allocator);
+        var flushed_writer = writerFromList(self.allocator, &flushed);
+        logger.flushLive(&flushed_writer.writer) catch |err| {
+            self.disable(io, err);
+            return;
+        };
+        flushed = flushed_writer.toArrayList();
+        self.appendLoggedBytes(io, flushed.items);
     }
 
     fn finish(self: *LogState, io: std.Io) void {
         if (self.logger == null or self.file == null) return;
 
-        {
-            var logger = &self.logger.?;
-            var file = &self.file.?;
-            var writer = file.writerStreaming(io, &self.buf);
-            logger.finish(&writer.interface) catch |err| {
-                self.disable(io, err);
-                return;
-            };
-            writer.interface.flush() catch |err| {
-                self.disable(io, err);
-                return;
-            };
-        }
-        self.postWrite(io);
+        var logger = &self.logger.?;
+        var flushed: std.ArrayList(u8) = .empty;
+        defer flushed.deinit(self.allocator);
+        var flushed_writer = writerFromList(self.allocator, &flushed);
+        logger.finish(&flushed_writer.writer) catch |err| {
+            self.disable(io, err);
+            return;
+        };
+        flushed = flushed_writer.toArrayList();
+        self.appendLoggedBytes(io, flushed.items);
     }
 };
 
