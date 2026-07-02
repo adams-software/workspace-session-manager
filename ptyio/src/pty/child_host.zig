@@ -144,6 +144,16 @@ pub const PtyChildHost = struct {
         return c.SIGTERM;
     }
 
+    fn signalName(signal: c_int) []const u8 {
+        return switch (signal) {
+            c.SIGINT => "INT",
+            c.SIGTERM => "TERM",
+            c.SIGKILL => "KILL",
+            c.SIGWINCH => "WINCH",
+            else => "SIGNALED",
+        };
+    }
+
     fn writeAll(fd: c_int, bytes: []const u8) Error!void {
         var off: usize = 0;
         while (off < bytes.len) {
@@ -293,7 +303,7 @@ pub const PtyChildHost = struct {
                 if (c.WIFEXITED(wait_status)) {
                     out.code = @intCast(c.WEXITSTATUS(wait_status));
                 } else if (c.WIFSIGNALED(wait_status)) {
-                    out.signal = "SIGNALED";
+                    out.signal = signalName(c.WTERMSIG(wait_status));
                 }
                 self.exit_status = out;
                 self.state = .exited;
@@ -318,7 +328,7 @@ pub const PtyChildHost = struct {
                 if (c.WIFEXITED(wait_status)) {
                     out.code = @intCast(c.WEXITSTATUS(wait_status));
                 } else if (c.WIFSIGNALED(wait_status)) {
-                    out.signal = "SIGNALED";
+                    out.signal = signalName(c.WTERMSIG(wait_status));
                 }
                 self.exit_status = out;
                 self.state = .exited;
@@ -355,3 +365,9 @@ pub const PtyChildHost = struct {
         return self.master_fd;
     }
 };
+
+test "signalName preserves known signal labels" {
+    try std.testing.expectEqualStrings("INT", PtyChildHost.signalName(c.SIGINT));
+    try std.testing.expectEqualStrings("TERM", PtyChildHost.signalName(c.SIGTERM));
+    try std.testing.expectEqualStrings("KILL", PtyChildHost.signalName(c.SIGKILL));
+}
