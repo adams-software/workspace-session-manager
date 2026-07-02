@@ -43,7 +43,8 @@ const LogState = struct {
     ) !LogState {
         const base_path = try allocator.dupe(u8, path);
         errdefer allocator.free(base_path);
-        try cleanupOldSegments(base_path);
+        var next_segment_index = try nextRetainedSegmentIndex(allocator, base_path);
+        next_segment_index = try rollExistingBaseLog(io, allocator, base_path, next_segment_index);
         const file = createOutput(io, path) catch |err| {
             std.debug.print("ptylog: logging disabled: {s}\n", .{@errorName(err)});
             return .{
@@ -53,16 +54,22 @@ const LogState = struct {
                 .segment_bytes = segment_bytes,
                 .file = null,
                 .logger = null,
+                .next_segment_index = next_segment_index,
             };
         };
-        return .{
+        var state: LogState = .{
             .allocator = allocator,
             .base_path = base_path,
             .budget_bytes = budget_bytes,
             .segment_bytes = segment_bytes,
             .file = file,
             .logger = try log_core.StreamLogger.init(allocator, .ansi, rows, cols),
+            .next_segment_index = next_segment_index,
         };
+        state.enforceBudget() catch |err| {
+            state.disable(io, err);
+        };
+        return state;
     }
 
     fn deinit(self: *LogState, io: std.Io) void {
@@ -118,7 +125,7 @@ const LogState = struct {
 
     fn enforceBudget(self: *LogState) !void {
         if (self.budget_bytes == 0) return;
-        const total = try totalRetainedBytes(self.allocator, self.base_path);
+        const total = try totalRetainedBytes(self.base_path);
         if (total <= self.budget_bytes) return;
 
         var retained = total;
@@ -288,25 +295,43 @@ fn createOutput(io: std.Io, path: []const u8) !std.Io.File {
     return try std.Io.Dir.createFile(.cwd(), io, path, .{ .truncate = true, .read = false });
 }
 
-fn cleanupOldSegments(base_path: []const u8) !void {
+fn nextRetainedSegmentIndex(allocator: std.mem.Allocator, base_path: []const u8) !u32 {
     const dir_name = std.fs.path.dirname(base_path) orelse ".";
     const file_name = std.fs.path.basename(base_path);
     const io = std.Io.Threaded.global_single_threaded.io();
     var dir = try std.Io.Dir.openDirAbsolute(io, dir_name, .{ .iterate = true });
     defer dir.close(io);
 
+    var max_index: u32 = 0;
     var iter = dir.iterate();
     while (try iter.next(io)) |entry| {
         if (entry.kind != .file) continue;
         if (!std.mem.startsWith(u8, entry.name, file_name)) continue;
         if (entry.name.len <= file_name.len + 1) continue;
         if (entry.name[file_name.len] != '.') continue;
-        if (!isNumeric(entry.name[(file_name.len + 1)..])) continue;
-        try dir.deleteFile(io, entry.name);
+        const suffix = entry.name[(file_name.len + 1)..];
+        if (!isNumeric(suffix)) continue;
+        const index = try std.fmt.parseUnsigned(u32, suffix, 10);
+        max_index = @max(max_index, index);
     }
+    _ = allocator;
+    return max_index + 1;
 }
 
-fn totalRetainedBytes(allocator: std.mem.Allocator, base_path: []const u8) !u64 {
+fn rollExistingBaseLog(io: std.Io, allocator: std.mem.Allocator, base_path: []const u8, next_segment_index: u32) !u32 {
+    const existing_size = fileSize(base_path) catch |err| switch (err) {
+        error.FileNotFound => return next_segment_index,
+        else => return err,
+    };
+    if (existing_size == 0) return next_segment_index;
+
+    const segment_path = try std.fmt.allocPrint(allocator, "{s}.{d:0>6}", .{ base_path, next_segment_index });
+    defer allocator.free(segment_path);
+    try std.Io.Dir.renameAbsolute(base_path, segment_path, io);
+    return next_segment_index + 1;
+}
+
+fn totalRetainedBytes(base_path: []const u8) !u64 {
     const dir_name = std.fs.path.dirname(base_path) orelse ".";
     const file_name = std.fs.path.basename(base_path);
     const io = std.Io.Threaded.global_single_threaded.io();
@@ -331,7 +356,6 @@ fn totalRetainedBytes(allocator: std.mem.Allocator, base_path: []const u8) !u64 
         const stat = try dir.statFile(io, entry.name, .{});
         total += stat.size;
     }
-    _ = allocator;
     return total;
 }
 
