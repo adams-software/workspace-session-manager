@@ -59,7 +59,7 @@ pub const PtyChildHost = struct {
     exit_status: ?ExitStatus,
 
     pub fn init(allocator: std.mem.Allocator, opts: SpawnOptions) Error!PtyChildHost {
-        if (opts.argv.len == 0) return Error.InvalidArgs;
+        try validateSpawnOptions(opts);
         return .{
             .allocator = allocator,
             .opts = opts,
@@ -82,6 +82,13 @@ pub const PtyChildHost = struct {
         if (path.len >= std.fs.max_path_bytes) return;
         std.mem.copyForwards(u8, buf[0..path.len], path);
         @call(.auto, F, .{buf[0..path.len :0]} ++ args);
+    }
+
+    fn validateSpawnOptions(opts: SpawnOptions) Error!void {
+        if (opts.argv.len == 0) return Error.InvalidArgs;
+        if (opts.cwd) |cwd| {
+            if (cwd.len >= std.fs.max_path_bytes) return Error.InvalidArgs;
+        }
     }
 
     fn spawnChild(opts: SpawnOptions) Error!struct { pid: c.pid_t, master_fd: c_int } {
@@ -154,6 +161,21 @@ pub const PtyChildHost = struct {
         };
     }
 
+    fn sendPosixSignal(self: *PtyChildHost, signal: c_int) Error!void {
+        const pid = self.pid orelse return Error.InvalidState;
+        if (c.kill(pid, signal) != 0) return Error.InvalidArgs;
+    }
+
+    fn decodeWaitStatus(wait_status: c_int) ExitStatus {
+        var out = ExitStatus{};
+        if (c.WIFEXITED(wait_status)) {
+            out.code = @intCast(c.WEXITSTATUS(wait_status));
+        } else if (c.WIFSIGNALED(wait_status)) {
+            out.signal = signalName(c.WTERMSIG(wait_status));
+        }
+        return out;
+    }
+
     fn writeAll(fd: c_int, bytes: []const u8) Error!void {
         var off: usize = 0;
         while (off < bytes.len) {
@@ -210,8 +232,7 @@ pub const PtyChildHost = struct {
         return switch (self.state) {
             .idle, .starting => Error.NotStarted,
             .running => blk: {
-                const pid = self.pid orelse return Error.InvalidState;
-                if (c.kill(pid, c.SIGWINCH) != 0) break :blk Error.InvalidArgs;
+                try self.sendPosixSignal(c.SIGWINCH);
                 break :blk;
             },
             .exited => Error.InvalidState,
@@ -223,8 +244,7 @@ pub const PtyChildHost = struct {
         return switch (self.state) {
             .idle, .starting => Error.NotStarted,
             .running => blk: {
-                const pid = self.pid orelse return Error.InvalidState;
-                if (c.kill(pid, signal) != 0) break :blk Error.InvalidArgs;
+                try self.sendPosixSignal(signal);
                 break :blk;
             },
             .exited => {},
@@ -236,8 +256,7 @@ pub const PtyChildHost = struct {
         return switch (self.state) {
             .idle, .starting => Error.NotStarted,
             .running => blk: {
-                const pid = self.pid orelse return Error.InvalidState;
-                if (c.kill(pid, signalFromName(signal)) != 0) break :blk Error.InvalidArgs;
+                try self.sendPosixSignal(signalFromName(signal));
                 break :blk;
             },
             .exited => {},
@@ -298,14 +317,7 @@ pub const PtyChildHost = struct {
                     return Error.IoError;
                 }
                 if (got == 0) return;
-
-                var out = ExitStatus{};
-                if (c.WIFEXITED(wait_status)) {
-                    out.code = @intCast(c.WEXITSTATUS(wait_status));
-                } else if (c.WIFSIGNALED(wait_status)) {
-                    out.signal = signalName(c.WTERMSIG(wait_status));
-                }
-                self.exit_status = out;
+                self.exit_status = decodeWaitStatus(wait_status);
                 self.state = .exited;
             },
         }
@@ -322,14 +334,9 @@ pub const PtyChildHost = struct {
                     if (got >= 0) break;
                     const e = std.posix.errno(-1);
                     if (e == .INTR) continue;
-                    break :blk Error.InvalidArgs;
+                    break :blk Error.IoError;
                 }
-                var out = ExitStatus{};
-                if (c.WIFEXITED(wait_status)) {
-                    out.code = @intCast(c.WEXITSTATUS(wait_status));
-                } else if (c.WIFSIGNALED(wait_status)) {
-                    out.signal = signalName(c.WTERMSIG(wait_status));
-                }
+                const out = decodeWaitStatus(wait_status);
                 self.exit_status = out;
                 self.state = .exited;
                 break :blk out;
@@ -370,4 +377,12 @@ test "signalName preserves known signal labels" {
     try std.testing.expectEqualStrings("INT", PtyChildHost.signalName(c.SIGINT));
     try std.testing.expectEqualStrings("TERM", PtyChildHost.signalName(c.SIGTERM));
     try std.testing.expectEqualStrings("KILL", PtyChildHost.signalName(c.SIGKILL));
+}
+
+test "init rejects oversized cwd" {
+    var long_path = [_]u8{'a'} ** std.fs.max_path_bytes;
+    try std.testing.expectError(Error.InvalidArgs, PtyChildHost.init(std.testing.allocator, .{
+        .argv = &.{"/bin/sh"},
+        .cwd = long_path[0..],
+    }));
 }
