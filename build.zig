@@ -134,27 +134,6 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
 
-    // session host runtime (installed as both host and msr during migration)
-    const exe_root = b.createModule(.{
-        .root_source_file = b.path("msr/src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    exe_root.linkSystemLibrary("util", .{});
-    exe_root.addImport("host", host_mod);
-    exe_root.addImport("host_runtime", host_runtime_mod);
-    exe_root.addImport("host_control", host_control_mod);
-    exe_root.addImport("host_repl", host_repl_mod);
-    exe_root.addImport("server", server_mod);
-    exe_root.addImport("ptyio_tty_size", tty_size_mod);
-
-    const msr_exe = b.addExecutable(.{
-        .name = "msr",
-        .root_module = exe_root,
-    });
-    b.installArtifact(msr_exe);
-
     const host_exe_root = b.createModule(.{
         .root_source_file = b.path("msr/src/main.zig"),
         .target = target,
@@ -217,14 +196,9 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(wsm_exe);
 
-    const run_cmd = b.addRunArtifact(msr_exe);
-    if (b.args) |args| run_cmd.addArgs(args);
-    const run_step = b.step("run", "Run the compatibility msr executable");
-    run_step.dependOn(&run_cmd.step);
-
     const run_host_cmd = b.addRunArtifact(host_exe);
     if (b.args) |args| run_host_cmd.addArgs(args);
-    const run_host_step = b.step("run-host", "Run the host executable");
+    const run_host_step = b.step("run", "Run the host executable");
     run_host_step.dependOn(&run_host_cmd.step);
 
     const byte_queue_tests = b.addTest(.{ .root_module = b.createModule(.{
@@ -555,7 +529,7 @@ pub fn build(b: *std.Build) void {
     const test_ptylog_log_core_step = b.step("test-ptylog-log-core", "Run ptylog log-core tests");
     test_ptylog_log_core_step.dependOn(&run_ptylog_log_core_tests.step);
 
-    const smoke_cmd = b.addSystemCommand(&.{ "python3", "-u", "msr/scripts/smoke_msr_binary.py" });
+    const smoke_cmd = b.addSystemCommand(&.{ "bash", "-u", "msr/scripts/smoke_host_binary.sh" });
     smoke_cmd.setCwd(b.path("."));
     const smoke_step = b.step("smoke-binary", "Run real-binary smoke test for the host runtime");
     smoke_step.dependOn(b.getInstallStep());

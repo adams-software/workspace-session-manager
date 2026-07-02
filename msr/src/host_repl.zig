@@ -28,7 +28,7 @@ pub const Repl = struct {
         if (!self.ready_emitted) {
             var stdout_buf: [256]u8 = undefined;
             var stdout = std.Io.File.stdout().writer(self.io, &stdout_buf);
-            try ctlwire.message.writeEvent(&stdout.interface, .{ .kind = "ready", .payload = "app=msr version=1" });
+            try ctlwire.message.writeEvent(&stdout.interface, .{ .kind = "ready", .payload = "app=host version=1" });
             try stdout.interface.flush();
             self.ready_emitted = true;
         }

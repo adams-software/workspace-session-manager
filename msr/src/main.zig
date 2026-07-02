@@ -230,7 +230,7 @@ fn allocArgs(arena: std.mem.Allocator, args: std.process.Args) ![]const []const 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const argv = try allocArgs(init.arena.allocator(), init.minimal.args);
-    const name = if (argv.len > 0) progName(argv[0]) else "msr";
+    const name = if (argv.len > 0) progName(argv[0]) else "host";
 
     const parsed = parseArgs(allocator, argv) catch |e| {
         switch (e) {

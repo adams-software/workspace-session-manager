@@ -49,11 +49,11 @@ It should not silently treat the current directory as the workspace root.
 
 ## Role in the repo
 
-`wsm` sits above `msr`.
+`wsm` sits above the host runtime package under `msr/`.
 
 Conceptually:
 
-- `msr` manages raw session sockets/processes
+- `host` manages raw session sockets/processes
 - `wsm` manages canonical session ids across a workspace tree
 
 ## Current status

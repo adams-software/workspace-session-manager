@@ -72,7 +72,7 @@ The canonical id model is purely lexical. There is no metadata graph in v0.
 2. Map canonical id to backing socket path.
 3. Reject if the backing session already exists.
 4. Create parent directories as needed.
-5. Create the backing `msr` session at the mapped socket path.
+5. Create the backing `host` session at the mapped socket path.
 6. Use `$SHELL -i` when no explicit child command is provided.
 7. Return or surface the canonical id that was created.
 

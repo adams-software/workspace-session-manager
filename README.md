@@ -160,9 +160,9 @@ Workspace session manager.
 The main user-facing entrypoint for workspace-wide naming, lookup, and navigation.
 
 ### `msr/`
-Generic session host runtime (internal `host` helper; legacy package path retained for now).
+Generic session host runtime package (exports the internal `host` helper).
 
-Responsible for creating sessions, attaching and detaching, and core status / wait / terminate operations. End users normally enter through `wsm`, which locates this helper privately at install time.
+Responsible for the low-level host runtime: starting a single child, binding the session socket, and owning the core host status / control behavior. End users normally enter through `wsm`, which locates this helper privately at install time.
 
 ### `vpty/`
 Terminal integration and rendering layer.

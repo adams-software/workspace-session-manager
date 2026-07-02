@@ -3,7 +3,7 @@ const host_control = @import("host_control");
 const host_runtime = @import("host_runtime");
 const ctlwire = @import("ctlwire");
 
-// Typed msr facade over raw ctlwire message lines.
+// Typed host-control facade over raw ctlwire message lines.
 pub const Line = union(enum) {
     ok: []const u8,
     err: []const u8,
@@ -252,6 +252,7 @@ fn parseExitInfo(value: []const u8) Error!host_runtime.ExitInfo {
 }
 
 fn parseHostPhase(value: []const u8) Error!host_runtime.HostPhase {
+    if (std.mem.eql(u8, value, "starting")) return .starting;
     if (std.mem.eql(u8, value, "running")) return .running;
     if (std.mem.eql(u8, value, "exiting")) return .exiting;
     if (std.mem.eql(u8, value, "exited")) return .exited;
@@ -259,6 +260,7 @@ fn parseHostPhase(value: []const u8) Error!host_runtime.HostPhase {
 }
 
 fn parseChildPhase(value: []const u8) Error!host_runtime.ChildPhase {
+    if (std.mem.eql(u8, value, "starting")) return .starting;
     if (std.mem.eql(u8, value, "running")) return .running;
     if (std.mem.eql(u8, value, "exited")) return .exited;
     return Error.InvalidChildPhase;
@@ -301,6 +303,18 @@ test "host_client parseStateView parses structured state payload" {
     try std.testing.expect(view.size != null);
     try std.testing.expectEqual(@as(u16, 80), view.size.?.cols);
     try std.testing.expectEqual(@as(u16, 24), view.size.?.rows);
+    try std.testing.expectEqual(host_runtime.ExitInfo.none, view.exit_info);
+}
+
+test "host_client parseStateView accepts starting phases" {
+    const view = try parseStateView(
+        "host=starting child=starting client_attached=false pid=none size=none exit=none",
+    );
+    try std.testing.expectEqual(host_runtime.HostPhase.starting, view.host_phase);
+    try std.testing.expectEqual(host_runtime.ChildPhase.starting, view.child_phase);
+    try std.testing.expectEqual(false, view.client_attached);
+    try std.testing.expectEqual(@as(?std.posix.pid_t, null), view.child_pid);
+    try std.testing.expectEqual(@as(?host_runtime.Size, null), view.size);
     try std.testing.expectEqual(host_runtime.ExitInfo.none, view.exit_info);
 }
 

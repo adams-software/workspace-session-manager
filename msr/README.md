@@ -1,4 +1,4 @@
-# host runtime (`msr/`)
+# host runtime package (`msr/`)
 
 This package contains the generic session host runtime in this repository.
 
@@ -47,7 +47,7 @@ Expect:
 
 - interface changes
 - internal refactors
-- ongoing polish of the public CLI surface
+- ongoing polish of the host runtime surface
 
 ## Developer notes
 

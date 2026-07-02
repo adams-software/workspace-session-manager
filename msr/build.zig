@@ -87,26 +87,6 @@ pub fn build(b: *std.Build) void {
     server_mod.addImport("byte_queue", byte_queue_mod);
     server_mod.addImport("fd_stream", fd_stream_mod);
 
-    const exe_root = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    exe_root.linkSystemLibrary("util", .{});
-    exe_root.addImport("host", host_mod);
-    exe_root.addImport("host_runtime", host_runtime_mod);
-    exe_root.addImport("host_control", host_control_mod);
-    exe_root.addImport("host_repl", host_repl_mod);
-    exe_root.addImport("server", server_mod);
-    exe_root.addImport("ptyio_tty_size", ptyio_tty_size_mod);
-
-    const exe = b.addExecutable(.{
-        .name = "msr",
-        .root_module = exe_root,
-    });
-    b.installArtifact(exe);
-
     const host_exe_root = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
