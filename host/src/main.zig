@@ -1,8 +1,7 @@
 const std = @import("std");
 const host = @import("host");
+const host_session = @import("host_session");
 const host_runtime = @import("host_runtime");
-const host_repl = @import("host_repl");
-const session_server = @import("server");
 const getTtySize = @import("ptyio_tty_size").getTtySize;
 
 const c = @cImport({
@@ -105,14 +104,6 @@ fn parseArgs(allocator: std.mem.Allocator, argv: []const []const u8) !Parsed {
     };
 }
 
-fn mapExitSignal(text: ?[]const u8) host_runtime.Signal {
-    if (text) |t| {
-        if (std.mem.eql(u8, t, "INT")) return .int;
-        if (std.mem.eql(u8, t, "KILL")) return .kill;
-    }
-    return .term;
-}
-
 const StdoutEventSink = struct {
     const Ctx = struct {
         io: std.Io,
@@ -127,10 +118,6 @@ const StdoutEventSink = struct {
     }
 };
 
-fn applyChildResize(child: *host.PtyChildHost, size: host_runtime.Size) !void {
-    try child.applySize(.{ .cols = size.cols, .rows = size.rows });
-}
-
 fn runHost(allocator: std.mem.Allocator, io: std.Io, parsed: Parsed) !u8 {
     const initial_size = parsed.size orelse blk: {
         if (getTtySize(std.posix.STDIN_FILENO)) |tty_size| {
@@ -141,80 +128,27 @@ fn runHost(allocator: std.mem.Allocator, io: std.Io, parsed: Parsed) !u8 {
         break :blk null;
     };
 
-    var child = try host.PtyChildHost.init(allocator, .{
-        .argv = parsed.child_argv,
-        .cols = if (initial_size) |s| s.cols else null,
-        .rows = if (initial_size) |s| s.rows else null,
-    });
-    defer child.deinit();
-
-    try child.start();
-
-    var server = session_server.SessionServer.init(allocator, &child);
-    defer server.deinit();
     var sink_ctx = StdoutEventSink.Ctx{ .io = io };
     const event_sink: ?host_runtime.EventSink = if (parsed.headless)
         null
     else
         .{ .ctx = &sink_ctx, .onEventFn = StdoutEventSink.onEvent };
-    try server.listenWithEventSink(parsed.socket_path, event_sink);
-    if (child.pid == null or child.masterFd() == null) return error.InvalidState;
-    try server.markReady();
-    if (server.runtime) |*runtime| {
-        if (initial_size) |s| try runtime.resize(s.cols, s.rows);
-        if (child.pid) |pid| runtime.onChildStarted(pid);
-    }
-
-    var repl: ?host_repl.Repl = null;
-    defer if (repl) |*r| r.deinit();
-    if (!parsed.headless) {
-        repl = host_repl.Repl.init(allocator, io);
-        try repl.?.setup();
-    }
+    var session = try host_session.HostSession.init(allocator, io, .{
+        .socket_path = parsed.socket_path,
+        .initial_size = initial_size,
+        .headless = parsed.headless,
+        .child_argv = parsed.child_argv,
+        .event_sink = event_sink,
+    });
+    defer session.deinit();
 
     while (true) {
-        _ = try server.step();
-        try child.refresh();
-        if (repl) |*r| {
-            if (server.runtime) |*runtime| {
-                const ResizeBridge = struct {
-                    var child_ptr: *host.PtyChildHost = undefined;
-                    fn call(size: host_runtime.Size) anyerror!void {
-                        try applyChildResize(child_ptr, size);
-                    }
-                };
-                ResizeBridge.child_ptr = &child;
-                try r.step(runtime, ResizeBridge.call);
-            }
-        }
-
-        switch (child.currentState()) {
-            .running, .starting => {},
-            .idle => {},
-            .exited => {
-                if (server.runtime) |*runtime| {
-                    if (child.exitStatus()) |st| {
-                        if (st.code) |code| runtime.onChildExitedCode(code) else runtime.onChildExitedSignal(mapExitSignal(st.signal));
-                    } else {
-                        runtime.onChildExitedCode(0);
-                    }
-                }
-                return 0;
-            },
-            .closed => return 0,
-        }
-
-        if (server.runtime) |runtime| {
-            if (runtime.state().host_phase == .exiting) {
-                return 0;
-            }
-        }
-
+        if (try session.step()) |code| return code;
         var pfds = [_]c.struct_pollfd{
-            .{ .fd = server.listener_fd orelse -1, .events = c.POLLIN, .revents = 0 },
-            .{ .fd = server.owner_fd orelse -1, .events = c.POLLIN, .revents = 0 },
-            .{ .fd = child.masterFd() orelse -1, .events = c.POLLIN, .revents = 0 },
-            .{ .fd = std.posix.STDIN_FILENO, .events = if (parsed.headless) 0 else c.POLLIN, .revents = 0 },
+            .{ .fd = session.listenerFd(), .events = c.POLLIN, .revents = 0 },
+            .{ .fd = session.ownerFd(), .events = c.POLLIN, .revents = 0 },
+            .{ .fd = session.masterFd(), .events = c.POLLIN, .revents = 0 },
+            .{ .fd = std.posix.STDIN_FILENO, .events = if (session.stdinPollEnabled()) c.POLLIN else 0, .revents = 0 },
         };
         _ = c.poll(&pfds, pfds.len, 25);
     }

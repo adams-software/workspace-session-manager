@@ -87,6 +87,17 @@ pub fn build(b: *std.Build) void {
     server_mod.addImport("byte_queue", byte_queue_mod);
     server_mod.addImport("fd_stream", fd_stream_mod);
 
+    const host_session_mod = b.addModule("host_session", .{
+        .root_source_file = b.path("src/host_session.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    host_session_mod.addImport("host", host_mod);
+    host_session_mod.addImport("host_runtime", host_runtime_mod);
+    host_session_mod.addImport("host_repl", host_repl_mod);
+    host_session_mod.addImport("server", server_mod);
+
     const host_exe_root = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
@@ -95,6 +106,7 @@ pub fn build(b: *std.Build) void {
     });
     host_exe_root.linkSystemLibrary("util", .{});
     host_exe_root.addImport("host", host_mod);
+    host_exe_root.addImport("host_session", host_session_mod);
     host_exe_root.addImport("host_runtime", host_runtime_mod);
     host_exe_root.addImport("host_control", host_control_mod);
     host_exe_root.addImport("host_repl", host_repl_mod);
