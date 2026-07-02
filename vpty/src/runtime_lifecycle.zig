@@ -15,7 +15,7 @@ const PendingResize = struct {
     observed_at_ns: u64,
 };
 
-var active_lifecycle: ?*RuntimeLifecycle = null;
+var active_lifecycle = std.atomic.Value(?*RuntimeLifecycle).init(null);
 
 fn monotonicTimeNs() u64 {
     var ts: c.timespec = undefined;
@@ -24,16 +24,16 @@ fn monotonicTimeNs() u64 {
 }
 
 fn handleTerminationSignal(sig: c_int) callconv(.c) void {
-    const lifecycle = active_lifecycle orelse return;
-    lifecycle.terminate_requested = true;
-    lifecycle.terminate_sent = false;
-    lifecycle.terminate_signal = sig;
+    const lifecycle = active_lifecycle.load(.seq_cst) orelse return;
+    lifecycle.terminate_requested.store(true, .seq_cst);
+    lifecycle.terminate_sent.store(false, .seq_cst);
+    lifecycle.terminate_signal.store(sig, .seq_cst);
     lifecycle.wake_pipe.notify();
 }
 
 fn handleSigwinch(_: c_int) callconv(.c) void {
-    const lifecycle = active_lifecycle orelse return;
-    lifecycle.winch_changed = true;
+    const lifecycle = active_lifecycle.load(.seq_cst) orelse return;
+    lifecycle.winch_changed.store(true, .seq_cst);
     lifecycle.wake_pipe.notify();
 }
 
@@ -44,7 +44,7 @@ pub const SignalHandlers = struct {
     lifecycle: *RuntimeLifecycle,
 
     pub fn restore(self: SignalHandlers) void {
-        active_lifecycle = null;
+        active_lifecycle.store(null, .seq_cst);
         self.lifecycle.wake_pipe.deinit();
         _ = c.signal(c.SIGWINCH, self.old_winch);
         _ = c.signal(c.SIGINT, self.old_int);
@@ -53,10 +53,10 @@ pub const SignalHandlers = struct {
 };
 
 pub const RuntimeLifecycle = struct {
-    winch_changed: bool = false,
-    terminate_requested: bool = false,
-    terminate_sent: bool = false,
-    terminate_signal: c_int = 0,
+    winch_changed: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    terminate_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    terminate_sent: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    terminate_signal: std.atomic.Value(c_int) = std.atomic.Value(c_int).init(0),
     wake_pipe: WakePipe = .{},
     pending_resize: ?PendingResize = null,
 
@@ -65,7 +65,7 @@ pub const RuntimeLifecycle = struct {
         errdefer self.wake_pipe.deinit();
 
         self.resetForRun();
-        active_lifecycle = self;
+        active_lifecycle.store(self, .seq_cst);
 
         return .{
             .old_winch = c.signal(c.SIGWINCH, handleSigwinch),
@@ -78,10 +78,10 @@ pub const RuntimeLifecycle = struct {
     }
 
     pub fn resetForRun(self: *RuntimeLifecycle) void {
-        self.winch_changed = true;
-        self.terminate_requested = false;
-        self.terminate_sent = false;
-        self.terminate_signal = 0;
+        self.winch_changed.store(true, .seq_cst);
+        self.terminate_requested.store(false, .seq_cst);
+        self.terminate_sent.store(false, .seq_cst);
+        self.terminate_signal.store(0, .seq_cst);
         self.pending_resize = null;
     }
 
@@ -100,11 +100,10 @@ pub const RuntimeLifecycle = struct {
     }
 
     pub fn notePendingResizeIfNeeded(self: *RuntimeLifecycle, terminal: *vpty_terminal.TerminalMode) void {
-        if (!self.winch_changed) return;
+        if (!self.winch_changed.load(.seq_cst)) return;
 
         var size = vpty_terminal.Size{ .rows = 24, .cols = 80 };
-        while (self.winch_changed) {
-            self.winch_changed = false;
+        while (self.winch_changed.swap(false, .seq_cst)) {
             size = terminal.currentSize() catch vpty_terminal.Size{ .rows = 24, .cols = 80 };
         }
         self.pending_resize = .{
@@ -127,12 +126,12 @@ pub const RuntimeLifecycle = struct {
     }
 
     pub fn issueTerminationIfNeeded(self: *RuntimeLifecycle, session_host: *host.SessionHost) void {
-        if (!self.terminate_requested or self.terminate_sent) return;
+        if (!self.terminate_requested.load(.seq_cst) or self.terminate_sent.load(.seq_cst)) return;
 
-        self.terminate_sent = true;
+        self.terminate_sent.store(true, .seq_cst);
         _ = session_host.terminate(
-            if (self.terminate_signal == c.SIGINT) "INT"
-            else if (self.terminate_signal == c.SIGTERM) "TERM"
+            if (self.terminate_signal.load(.seq_cst) == c.SIGINT) "INT"
+            else if (self.terminate_signal.load(.seq_cst) == c.SIGTERM) "TERM"
             else null,
         ) catch {};
     }

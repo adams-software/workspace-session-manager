@@ -64,7 +64,7 @@ const TerminalState = struct {
 };
 
 const ResizeState = struct {
-    var pending: bool = false;
+    var pending = std.atomic.Value(bool).init(false);
 };
 
 const OuterSize = struct {
@@ -352,7 +352,7 @@ const App = struct {
 };
 
 fn handleSigwinch(_: c_int) callconv(.c) void {
-    ResizeState.pending = true;
+    ResizeState.pending.store(true, .seq_cst);
 }
 
 fn installSigwinchHandler() void {
@@ -488,8 +488,7 @@ fn runInteractive(allocator: std.mem.Allocator, mode: cli_main.Mode) !void {
 
     var tty_buf: [256]u8 = undefined;
     while (!app.should_exit) {
-        if (ResizeState.pending) {
-            ResizeState.pending = false;
+        if (ResizeState.pending.swap(false, .seq_cst)) {
             app.handleResize() catch |err| {
                 try setRuntimeExitMessage(&app, allocator, "resize", err);
                 continue;

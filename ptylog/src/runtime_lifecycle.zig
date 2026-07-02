@@ -11,7 +11,7 @@ pub const Size = struct {
     cols: u16,
 };
 
-var active_lifecycle: ?*RuntimeLifecycle = null;
+var active_lifecycle = std.atomic.Value(?*RuntimeLifecycle).init(null);
 
 fn detectCurrentSize() Size {
     const fds = [_]c_int{ std.posix.STDIN_FILENO, std.posix.STDOUT_FILENO, std.posix.STDERR_FILENO };
@@ -23,16 +23,16 @@ fn detectCurrentSize() Size {
 }
 
 fn handleSigwinch(_: c_int) callconv(.c) void {
-    const lifecycle = active_lifecycle orelse return;
-    lifecycle.winch_changed = true;
+    const lifecycle = active_lifecycle.load(.seq_cst) orelse return;
+    lifecycle.winch_changed.store(true, .seq_cst);
     lifecycle.wake_pipe.notify();
 }
 
 fn handleTerminate(sig: c_int) callconv(.c) void {
-    const lifecycle = active_lifecycle orelse return;
-    lifecycle.terminate_requested = true;
-    lifecycle.terminate_sent = false;
-    lifecycle.terminate_signal = sig;
+    const lifecycle = active_lifecycle.load(.seq_cst) orelse return;
+    lifecycle.terminate_requested.store(true, .seq_cst);
+    lifecycle.terminate_sent.store(false, .seq_cst);
+    lifecycle.terminate_signal.store(sig, .seq_cst);
     lifecycle.wake_pipe.notify();
 }
 
@@ -43,7 +43,7 @@ pub const SignalHandlers = struct {
     lifecycle: *RuntimeLifecycle,
 
     pub fn restore(self: SignalHandlers) void {
-        active_lifecycle = null;
+        active_lifecycle.store(null, .seq_cst);
         self.lifecycle.wake_pipe.deinit();
         _ = c.signal(c.SIGWINCH, self.old_winch);
         _ = c.signal(c.SIGINT, self.old_int);
@@ -52,10 +52,10 @@ pub const SignalHandlers = struct {
 };
 
 pub const RuntimeLifecycle = struct {
-    winch_changed: bool = false,
-    terminate_requested: bool = false,
-    terminate_sent: bool = false,
-    terminate_signal: c_int = 0,
+    winch_changed: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    terminate_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    terminate_sent: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    terminate_signal: std.atomic.Value(c_int) = std.atomic.Value(c_int).init(0),
     wake_pipe: WakePipe = .{},
 
     pub fn install(self: *RuntimeLifecycle) !SignalHandlers {
@@ -63,7 +63,7 @@ pub const RuntimeLifecycle = struct {
         errdefer self.wake_pipe.deinit();
 
         self.resetForRun();
-        active_lifecycle = self;
+        active_lifecycle.store(self, .seq_cst);
 
         return .{
             .old_winch = c.signal(c.SIGWINCH, handleSigwinch),
@@ -74,10 +74,10 @@ pub const RuntimeLifecycle = struct {
     }
 
     pub fn resetForRun(self: *RuntimeLifecycle) void {
-        self.winch_changed = true;
-        self.terminate_requested = false;
-        self.terminate_sent = false;
-        self.terminate_signal = 0;
+        self.winch_changed.store(true, .seq_cst);
+        self.terminate_requested.store(false, .seq_cst);
+        self.terminate_sent.store(false, .seq_cst);
+        self.terminate_signal.store(0, .seq_cst);
     }
 
     pub fn currentSize(_: *const RuntimeLifecycle) Size {
@@ -93,11 +93,10 @@ pub const RuntimeLifecycle = struct {
     }
 
     pub fn takePendingResize(self: *RuntimeLifecycle) ?Size {
-        if (!self.winch_changed) return null;
+        if (!self.winch_changed.load(.seq_cst)) return null;
 
         var size = detectCurrentSize();
-        while (self.winch_changed) {
-            self.winch_changed = false;
+        while (self.winch_changed.swap(false, .seq_cst)) {
             size = detectCurrentSize();
         }
         return size;
@@ -111,9 +110,9 @@ pub const RuntimeLifecycle = struct {
     }
 
     pub fn takeTerminateSignalOnce(self: *RuntimeLifecycle) ?c_int {
-        if (!self.terminate_requested or self.terminate_sent) return null;
-        self.terminate_sent = true;
-        return self.terminate_signal;
+        if (!self.terminate_requested.load(.seq_cst) or self.terminate_sent.load(.seq_cst)) return null;
+        self.terminate_sent.store(true, .seq_cst);
+        return self.terminate_signal.load(.seq_cst);
     }
 
     pub fn issueTerminationIfNeeded(self: *RuntimeLifecycle, child: anytype) void {
