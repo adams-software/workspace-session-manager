@@ -332,8 +332,8 @@ pub const StreamLogger = struct {
         var out: std.ArrayList(u8) = .empty;
         defer out.deinit(self.allocator);
         var out_writer = writerFromList(self.allocator, &out);
-        defer out = out_writer.toArrayList();
         try self.builder.drainTo(&out_writer.writer);
+        out = out_writer.toArrayList();
         return try out.toOwnedSlice(self.allocator);
     }
 
@@ -777,6 +777,138 @@ test "stream logger live flush keeps multiple committed lines but defers final p
     try std.testing.expectEqualStrings("$ printf one\none\n$ printf two\ntwo\n$", out.items);
 }
 
+test "stream logger flushLive keeps full large single-burst transcript before final prompt" {
+    const allocator = std.testing.allocator;
+    var logger = try StreamLogger.init(allocator, .plain, 24, 80);
+    defer logger.deinit();
+
+    var input: std.ArrayList(u8) = .empty;
+    defer input.deinit(allocator);
+    var input_writer = writerFromList(allocator, &input);
+    defer input = input_writer.toArrayList();
+
+    for (0..40) |i| {
+        try input_writer.writer.print("line-{d:0>3}\r\n", .{i});
+    }
+    try input_writer.writer.writeAll("$ ");
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+    try logger.feed(input.items);
+    try flushLiveToList(allocator, &logger, &out);
+
+    var expected: std.ArrayList(u8) = .empty;
+    defer expected.deinit(allocator);
+    var expected_writer = writerFromList(allocator, &expected);
+    defer expected = expected_writer.toArrayList();
+
+    for (0..40) |i| {
+        try expected_writer.writer.print("line-{d:0>3}\n", .{i});
+    }
+
+    try std.testing.expectEqualStrings(expected.items, out.items);
+}
+
+test "stream logger ansi flushLive keeps full large single-burst transcript before final prompt" {
+    const allocator = std.testing.allocator;
+    var logger = try StreamLogger.init(allocator, .ansi, 24, 80);
+    defer logger.deinit();
+
+    var input: std.ArrayList(u8) = .empty;
+    defer input.deinit(allocator);
+    var input_writer = writerFromList(allocator, &input);
+    defer input = input_writer.toArrayList();
+
+    for (0..40) |i| {
+        try input_writer.writer.print("line-{d:0>3}\r\n", .{i});
+    }
+    try input_writer.writer.writeAll("$ ");
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+    try logger.feed(input.items);
+    try flushLiveToList(allocator, &logger, &out);
+
+    var expected: std.ArrayList(u8) = .empty;
+    defer expected.deinit(allocator);
+    var expected_writer = writerFromList(allocator, &expected);
+    defer expected = expected_writer.toArrayList();
+
+    for (0..40) |i| {
+        try expected_writer.writer.print("line-{d:0>3}\x1b[0m\n", .{i});
+    }
+
+    try std.testing.expectEqualStrings(expected.items, out.items);
+}
+
+test "stream logger ansi flushLive keeps full large burst when prompt arrives in later feed" {
+    const allocator = std.testing.allocator;
+    var logger = try StreamLogger.init(allocator, .ansi, 24, 80);
+    defer logger.deinit();
+
+    var lines_input: std.ArrayList(u8) = .empty;
+    defer lines_input.deinit(allocator);
+    var lines_writer = writerFromList(allocator, &lines_input);
+    defer lines_input = lines_writer.toArrayList();
+
+    for (0..40) |i| {
+        try lines_writer.writer.print("line-{d:0>3}\r\n", .{i});
+    }
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+    try logger.feed(lines_input.items);
+    try flushLiveToList(allocator, &logger, &out);
+
+    try logger.feed("$ ");
+    try flushLiveToList(allocator, &logger, &out);
+
+    var expected: std.ArrayList(u8) = .empty;
+    defer expected.deinit(allocator);
+    var expected_writer = writerFromList(allocator, &expected);
+    defer expected = expected_writer.toArrayList();
+
+    for (0..40) |i| {
+        try expected_writer.writer.print("line-{d:0>3}\x1b[0m\n", .{i});
+    }
+
+    try std.testing.expectEqualStrings(expected.items, out.items);
+}
+
+test "stream logger ansi flushLive keeps full pty-style large burst when prompt arrives later" {
+    const allocator = std.testing.allocator;
+    var logger = try StreamLogger.init(allocator, .ansi, 24, 80);
+    defer logger.deinit();
+
+    var lines_input: std.ArrayList(u8) = .empty;
+    defer lines_input.deinit(allocator);
+    var lines_writer = writerFromList(allocator, &lines_input);
+    defer lines_input = lines_writer.toArrayList();
+
+    for (0..40) |i| {
+        try lines_writer.writer.print("line-{d:0>3}\r\r\n", .{i});
+    }
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+    try logger.feed(lines_input.items);
+    try flushLiveToList(allocator, &logger, &out);
+
+    try logger.feed("$ ");
+    try flushLiveToList(allocator, &logger, &out);
+
+    var expected: std.ArrayList(u8) = .empty;
+    defer expected.deinit(allocator);
+    var expected_writer = writerFromList(allocator, &expected);
+    defer expected = expected_writer.toArrayList();
+
+    for (0..40) |i| {
+        try expected_writer.writer.print("line-{d:0>3}\x1b[0m\n", .{i});
+    }
+
+    try std.testing.expectEqualStrings(expected.items, out.items);
+}
+
 test "stream logger ansi detached edit path keeps edited command before later command" {
     const allocator = std.testing.allocator;
     var logger = try StreamLogger.init(allocator, .ansi, 24, 80);
@@ -858,6 +990,79 @@ test "stream logger ansi exact direct-ptylog read chunks still keep ordering" {
         "file.txt",
     });
     try std.testing.expect(std.mem.indexOf(u8, out.items, "lsx") == null);
+}
+
+test "stream logger ansi exact traced burst chunks keep full transcript" {
+    const allocator = std.testing.allocator;
+    var logger = try StreamLogger.init(allocator, .ansi, 24, 80);
+    defer logger.deinit();
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+
+    try logger.feed("line-000\r\r\nline-001\r\r\nline-002\r\r\n");
+    try flushLiveToList(allocator, &logger, &out);
+
+    var second: std.ArrayList(u8) = .empty;
+    defer second.deinit(allocator);
+    var second_writer = writerFromList(allocator, &second);
+    for (3..40) |i| {
+        try second_writer.writer.print("line-{d:0>3}\r\r\n", .{i});
+    }
+    try second_writer.writer.writeAll("$ ");
+    second = second_writer.toArrayList();
+
+    try logger.feed(second.items);
+    try flushLiveToList(allocator, &logger, &out);
+    try finishToList(allocator, &logger, &out);
+
+    var expected: std.ArrayList(u8) = .empty;
+    defer expected.deinit(allocator);
+    var expected_writer = writerFromList(allocator, &expected);
+    for (0..40) |i| {
+        try expected_writer.writer.print("line-{d:0>3}\x1b[0m\n", .{i});
+    }
+    try expected_writer.writer.writeAll("$\x1b[0m");
+    expected = expected_writer.toArrayList();
+
+    try std.testing.expectEqualStrings(expected.items, out.items);
+}
+
+test "stream logger ansi exact traced split-crlf burst keeps full transcript" {
+    const allocator = std.testing.allocator;
+    var logger = try StreamLogger.init(allocator, .ansi, 24, 80);
+    defer logger.deinit();
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+
+    try logger.feed("line-000\r\r\nline-001\r\r\nline-002\r");
+    try flushLiveToList(allocator, &logger, &out);
+
+    var second: std.ArrayList(u8) = .empty;
+    defer second.deinit(allocator);
+    var second_writer = writerFromList(allocator, &second);
+    try second_writer.writer.writeAll("\r\n");
+    for (3..40) |i| {
+        try second_writer.writer.print("line-{d:0>3}\r\r\n", .{i});
+    }
+    try second_writer.writer.writeAll("$ ");
+    second = second_writer.toArrayList();
+
+    try logger.feed(second.items);
+    try flushLiveToList(allocator, &logger, &out);
+    try finishToList(allocator, &logger, &out);
+
+    var expected: std.ArrayList(u8) = .empty;
+    defer expected.deinit(allocator);
+    var expected_writer = writerFromList(allocator, &expected);
+    for (0..40) |i| {
+        try expected_writer.writer.print("line-{d:0>3}\x1b[0m\n", .{i});
+    }
+    try expected_writer.writer.writeAll("$\x1b[0m");
+    expected = expected_writer.toArrayList();
+
+    try std.testing.expectEqualStrings(expected.items, out.items);
 }
 
 test "stream logger ansi interactive prompt-first chunks keep edited command" {
