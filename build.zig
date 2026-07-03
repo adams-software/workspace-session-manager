@@ -166,6 +166,29 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(host_exe);
 
+    const attach_root = b.createModule(.{
+        .root_source_file = b.path("attach/src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    attach_root.addImport("byte_queue", byte_queue_mod);
+    attach_root.addImport("fd_stream", fd_stream_mod);
+    attach_root.addImport("ptyio_raw_mode", raw_mode_mod);
+
+    const attach_exe = b.addExecutable(.{
+        .name = "attach",
+        .root_module = attach_root,
+    });
+
+    const build_attach_step = b.step("build-attach", "Build the standalone raw attach debug client");
+    build_attach_step.dependOn(&attach_exe.step);
+
+    const run_attach_cmd = b.addRunArtifact(attach_exe);
+    if (b.args) |args| run_attach_cmd.addArgs(args);
+    const run_attach_step = b.step("run-attach", "Run the standalone raw attach debug client");
+    run_attach_step.dependOn(&run_attach_cmd.step);
+
     const argv_parse_mod = b.addModule("argv_parse", .{
         .root_source_file = b.path("shared/src/cli/argv_parse.zig"),
         .target = target,
