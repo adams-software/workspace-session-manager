@@ -166,22 +166,6 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(host_exe);
 
-    const attach_root = b.createModule(.{
-        .root_source_file = b.path("attach/src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    attach_root.addImport("byte_queue", byte_queue_mod);
-    attach_root.addImport("fd_stream", fd_stream_mod);
-    attach_root.addImport("ptyio_raw_mode", raw_mode_mod);
-
-    const attach_exe = b.addExecutable(.{
-        .name = "attach",
-        .root_module = attach_root,
-    });
-    b.installArtifact(attach_exe);
-
     const argv_parse_mod = b.addModule("argv_parse", .{
         .root_source_file = b.path("shared/src/cli/argv_parse.zig"),
         .target = target,

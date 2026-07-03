@@ -79,7 +79,7 @@ The socket path is intentionally minimal:
 This path is for terminal attachment only.
 
 See also:
-- `../../attach/src/main.zig`
+- `../../wsm/src/session_link.zig`
 - `../src/server.zig`
 
 ## Host control integration
@@ -155,7 +155,8 @@ Do not assume a clean request/response stream with no interruptions.
 
 ## What the attach client is for
 
-`attach` and `attach/src/main.zig` demonstrate the raw attach pattern.
+`wsm/src/session_link.zig` demonstrates the raw attach pattern used by the
+live session client.
 
 This path is appropriate when you want a real terminal-facing client that:
 
@@ -280,7 +281,7 @@ Avoid these patterns:
 If you are integrating the host runtime into another library or app:
 
 1. start with `host_client.zig` for control
-2. start with `attach/src/main.zig` as the model for terminal attach
+2. start with `wsm/src/session_link.zig` as the model for terminal attach
 3. keep transports separate
 4. only add higher-level wrappers after the split feels correct in real use
 
@@ -290,4 +291,4 @@ That preserves the current architecture:
 - `host_control` owns typed control commands/results
 - `host_repl` is the stdin/stdout adapter
 - `host_client` is the transport-agnostic client-side control layer
-- `attach` is the raw child-terminal attach model
+- `wsm/session_link` is the raw child-terminal attach model
