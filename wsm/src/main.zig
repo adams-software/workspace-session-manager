@@ -542,10 +542,7 @@ fn runInteractive(allocator: std.mem.Allocator, mode: cli_main.Mode) !void {
                 std.debug.print("wsm attached data POLLNVAL fd={d}\n", .{pfds[1].fd});
                 return Error.Unexpected;
             }
-            if ((rev & (c.POLLHUP | c.POLLERR)) != 0) {
-                try pumpAttachedOutputOrExit(&app, allocator, &term);
-            }
-            if ((rev & c.POLLIN) != 0) {
+            if ((rev & (c.POLLHUP | c.POLLERR | c.POLLIN)) != 0) {
                 try pumpAttachedOutputOrExit(&app, allocator, &term);
             }
         }
