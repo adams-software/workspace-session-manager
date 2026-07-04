@@ -7,7 +7,6 @@ const getTtySize = @import("ptyio_tty_size").getTtySize;
 const c = @cImport({
     @cInclude("unistd.h");
     @cInclude("poll.h");
-    @cInclude("signal.h");
 });
 
 fn out(comptime fmt: []const u8, args: anytype) void {

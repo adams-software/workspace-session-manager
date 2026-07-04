@@ -48,12 +48,14 @@ pub const HostSession = struct {
             try repl.?.setup();
         }
 
-        return .{
+        var session: HostSession = .{
             .headless = options.headless,
             .child = child,
             .server = server,
             .repl = repl,
         };
+        session.server.session_host = &session.child;
+        return session;
     }
 
     pub fn deinit(self: *HostSession) void {
@@ -130,4 +132,23 @@ fn mapExitSignal(text: ?[]const u8) host_runtime.Signal {
         if (std.mem.eql(u8, t, "KILL")) return .kill;
     }
     return .term;
+}
+
+test "host session server points at owned child" {
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const socket_path = try std.fmt.bufPrint(&path_buf, "/tmp/host-session-test-{d}.sock", .{std.time.nanoTimestamp()});
+
+    var session = try HostSession.init(allocator, io, .{
+        .socket_path = socket_path,
+        .initial_size = .{ .cols = 80, .rows = 24 },
+        .headless = true,
+        .child_argv = &.{ "/bin/sh", "-c", "sleep 5" },
+        .event_sink = null,
+    });
+    defer session.deinit();
+
+    try std.testing.expectEqual(&session.child, session.server.session_host);
 }
