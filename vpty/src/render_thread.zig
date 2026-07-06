@@ -43,6 +43,8 @@ pub const SharedTerminalModel = struct {
 };
 
 pub const RenderThread = struct {
+    const MAX_BACKLOG_DEFERRALS: u8 = 8;
+
     const PendingBatch = struct {
         latest_model_changed: ?actor_mailboxes.ModelChanged = null,
         viewport_update: ?Viewport = null,
@@ -63,6 +65,7 @@ pub const RenderThread = struct {
     thread: ?std.Thread = null,
     stop_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     wake_pipe: WakePipe = .{},
+    backlog_deferrals: u8 = 0,
 
     pub fn init(allocator: std.mem.Allocator, shared_model: *SharedTerminalModel, stdout_thread: *StdoutThread, viewport: Viewport) RenderThread {
         return .{
@@ -165,7 +168,8 @@ pub const RenderThread = struct {
             self.applyPendingRequests();
 
             if (self.renderer.needsRender()) {
-                if (self.stdout_thread.pendingRenderBytes() > 0 and !self.renderer.shouldBypassBacklogCoalescing()) {
+                if (self.stdout_thread.pendingRenderBytes() > 0 and !self.renderer.shouldBypassBacklogCoalescing() and self.backlog_deferrals < MAX_BACKLOG_DEFERRALS) {
+                    self.backlog_deferrals += 1;
                     if (self.stop_requested.load(.seq_cst)) break;
 
                     var pfd_busy = c.struct_pollfd{
@@ -184,11 +188,14 @@ pub const RenderThread = struct {
                 const captured = self.renderer.takeSnapshot(&self.shared_model.model);
                 self.shared_model.unlock();
                 if (captured) |work| {
+                    self.backlog_deferrals = 0;
                     if (self.renderer.buildRenderProduct(work.version, work.snapshot)) |product| {
                         self.renderer.publishRenderProduct(product);
                     }
                     continue;
                 }
+            } else {
+                self.backlog_deferrals = 0;
             }
 
             if (self.stop_requested.load(.seq_cst)) break;
