@@ -185,10 +185,11 @@ pub const StdoutThread = struct {
     fn run(self: *StdoutThread) void {
         while (true) {
             self.drainInbound();
+            var stdout_blocked = false;
             while (self.buffer.hasPending()) {
                 const before_control = self.buffer.pendingControlBytes();
                 const before_render = self.buffer.pendingRenderBytes();
-                _ = self.buffer.flushSome(64 * 1024) catch break;
+                const status = self.buffer.flushSome(64 * 1024) catch break;
                 const after_control = self.buffer.pendingControlBytes();
                 const after_render = self.buffer.pendingRenderBytes();
                 if (before_control > after_control) {
@@ -202,17 +203,33 @@ pub const StdoutThread = struct {
                     self.shared.committed_render_version.store(notice.version, .seq_cst);
                     _ = self.shared.latest_commit_notice.swap(notice.version, .seq_cst);
                 }
+
+                switch (status) {
+                    .would_block => {
+                        stdout_blocked = true;
+                        break;
+                    },
+                    .done => break,
+                    .progress => {},
+                }
             }
 
             if (self.shutdown_requested.load(.seq_cst) and !self.hasPending()) break;
 
-            var pfd = c.struct_pollfd{
-                .fd = self.wake_pipe.readFd(),
-                .events = c.POLLIN,
-                .revents = 0,
+            var pfds = [2]c.struct_pollfd{
+                .{
+                    .fd = self.wake_pipe.readFd(),
+                    .events = c.POLLIN,
+                    .revents = 0,
+                },
+                .{
+                    .fd = if (stdout_blocked and self.hasPending()) std.posix.STDOUT_FILENO else -1,
+                    .events = if (stdout_blocked and self.hasPending()) c.POLLOUT else 0,
+                    .revents = 0,
+                },
             };
-            _ = c.poll(&pfd, 1, 50);
-            if ((pfd.revents & c.POLLIN) != 0) {
+            _ = c.poll(&pfds, pfds.len, 50);
+            if ((pfds[0].revents & c.POLLIN) != 0) {
                 self.drainWakePipe();
             }
         }
