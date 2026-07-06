@@ -139,13 +139,14 @@ fn runHost(allocator: std.mem.Allocator, io: std.Io, parsed: Parsed) !u8 {
         .child_argv = parsed.child_argv,
         .event_sink = event_sink,
     });
+    session.rebindChild();
     defer session.deinit();
 
     while (true) {
         if (try session.step()) |code| return code;
         var pfds = [_]c.struct_pollfd{
             .{ .fd = session.listenerFd(), .events = c.POLLIN, .revents = 0 },
-            .{ .fd = session.ownerFd(), .events = c.POLLIN, .revents = 0 },
+            .{ .fd = session.ownerFd(), .events = session.ownerPollEvents(), .revents = 0 },
             .{ .fd = session.masterFd(), .events = c.POLLIN, .revents = 0 },
             .{ .fd = std.posix.STDIN_FILENO, .events = if (session.stdinPollEnabled()) c.POLLIN else 0, .revents = 0 },
         };

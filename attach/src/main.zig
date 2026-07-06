@@ -93,13 +93,15 @@ fn runAttach(allocator: std.mem.Allocator, path: []const u8) !u8 {
     var stdout_tx = ByteQueue.init();
     defer stdout_tx.deinit(allocator);
 
+    var stdin_open = stdin_is_tty;
+
     while (true) {
-        if (stdin_is_tty) {
+        if (stdin_open) {
             const in_status = try fd_stream.readIntoQueue(allocator, c.STDIN_FILENO, &stdin_rx, 64 * 1024);
             switch (in_status) {
                 .progress => {},
                 .would_block => {},
-                .eof => return 0,
+                .eof => stdin_open = false,
             }
 
             if (!stdin_rx.isEmpty()) {
@@ -125,7 +127,7 @@ fn runAttach(allocator: std.mem.Allocator, path: []const u8) !u8 {
         _ = try fd_stream.writeFromQueue(c.STDOUT_FILENO, &stdout_tx, 64 * 1024);
 
         var pfds = [_]c.struct_pollfd{
-            .{ .fd = c.STDIN_FILENO, .events = if (stdin_is_tty) c.POLLIN else 0, .revents = 0 },
+            .{ .fd = c.STDIN_FILENO, .events = if (stdin_open) c.POLLIN else 0, .revents = 0 },
             .{ .fd = fd, .events = @as(c_short, c.POLLIN) | (if (!sock_tx.isEmpty()) @as(c_short, c.POLLOUT) else 0), .revents = 0 },
             .{ .fd = c.STDOUT_FILENO, .events = if (!stdout_tx.isEmpty()) c.POLLOUT else 0, .revents = 0 },
         };

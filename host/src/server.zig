@@ -130,6 +130,13 @@ pub const SessionServer = struct {
         return progressed;
     }
 
+    pub fn ownerPollEvents(self: *const SessionServer) c_short {
+        if (self.owner_fd == null) return 0;
+        var events: c_short = c.POLLIN;
+        if (!self.owner_tx.isEmpty()) events |= c.POLLOUT;
+        return events;
+    }
+
     fn validateSocketPath(path: []const u8) Error!void {
         if (path.len == 0) return Error.InvalidArgs;
         if (path.len >= 108) return Error.PathTooLong;
@@ -277,8 +284,16 @@ pub const SessionServer = struct {
 
     fn pumpPtyToOwner(self: *SessionServer) Error!bool {
         const master_fd = self.session_host.masterFd() orelse return false;
-        const owner_fd = self.owner_fd;
         var progressed = false;
+
+        if (self.owner_fd) |owner_fd| {
+            progressed = try self.flushOwnerWrites(owner_fd, progressed);
+            if (self.owner_fd == null) return progressed;
+            if (!self.owner_tx.isEmpty()) return progressed;
+        } else {
+            self.owner_tx.clear();
+            return false;
+        }
 
         const rd = fd_stream.readIntoQueue(self.allocator, master_fd, &self.owner_tx, io_chunk_size) catch {
             return false;
@@ -289,12 +304,10 @@ pub const SessionServer = struct {
             .eof => return false,
         }
 
-        if (owner_fd) |fd| {
+        if (self.owner_fd) |fd| {
             return try self.flushOwnerWrites(fd, progressed);
-        } else {
-            self.owner_tx.clear();
         }
-
+        self.owner_tx.clear();
         return progressed;
     }
 
@@ -326,8 +339,11 @@ pub const SessionServer = struct {
         var did_progress = progressed;
         if (!self.owner_tx.isEmpty()) {
             const wr = fd_stream.writeFromQueue(owner_fd, &self.owner_tx, io_chunk_size) catch {
-                self.dropOwner();
-                return true;
+                if (ownerSocketDisconnected(owner_fd)) {
+                    self.dropOwner();
+                    return true;
+                }
+                return did_progress;
             };
             switch (wr) {
                 .progress => |n| did_progress = did_progress or (n > 0),
@@ -335,5 +351,17 @@ pub const SessionServer = struct {
             }
         }
         return did_progress;
+    }
+
+    fn ownerSocketDisconnected(fd: c_int) bool {
+        var pfd = c.struct_pollfd{
+            .fd = fd,
+            .events = c.POLLIN | c.POLLOUT,
+            .revents = 0,
+        };
+
+        const pr = c.poll(&pfd, 1, 0);
+        if (pr < 0) return false;
+        return (pfd.revents & (c.POLLHUP | c.POLLERR | c.POLLNVAL)) != 0;
     }
 };

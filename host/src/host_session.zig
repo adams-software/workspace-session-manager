@@ -64,6 +64,10 @@ pub const HostSession = struct {
         self.child.deinit();
     }
 
+    pub fn rebindChild(self: *HostSession) void {
+        self.server.session_host = &self.child;
+    }
+
     pub fn step(self: *HostSession) !?u8 {
         _ = try self.server.step();
         try self.child.refresh();
@@ -82,6 +86,10 @@ pub const HostSession = struct {
 
     pub fn ownerFd(self: *const HostSession) c_int {
         return self.server.owner_fd orelse -1;
+    }
+
+    pub fn ownerPollEvents(self: *const HostSession) c_short {
+        return self.server.ownerPollEvents();
     }
 
     pub fn masterFd(self: *const HostSession) c_int {
@@ -149,6 +157,7 @@ test "host session server points at owned child" {
         .event_sink = null,
     });
     defer session.deinit();
+    session.rebindChild();
 
     try std.testing.expectEqual(&session.child, session.server.session_host);
 }
