@@ -61,6 +61,7 @@ pub const SessionLink = struct {
         self.data_fd = data_fd;
         self.control_fd = control_fd;
         self.pump.clear();
+        if (self.control_fd) |fd| drainControl(fd);
     }
 
     pub fn detach(self: *SessionLink) void {
@@ -96,18 +97,22 @@ pub const SessionLink = struct {
 
     pub fn resize(self: *SessionLink, cols: u16, rows: u16) !void {
         const fd = self.control_fd orelse return;
+        drainControl(fd);
         var buf: [64]u8 = undefined;
         const msg = try std.fmt.bufPrint(&buf, "resize {d} {d}\n", .{ cols, rows });
         try writeControl(fd, msg);
+        drainControl(fd);
     }
 
     pub fn signal(self: *SessionLink, sig: Signal) !void {
         const fd = self.control_fd orelse return error.NoControl;
+        drainControl(fd);
         const msg = switch (sig) {
             .term => "signal term\n",
             .kill => "signal kill\n",
         };
         try writeControl(fd, msg);
+        drainControl(fd);
     }
 };
 
@@ -123,6 +128,18 @@ fn writeControl(fd: c_int, msg: []const u8) !void {
         const e = std.posix.errno(-1);
         if (e == .INTR) continue;
         return error.WriteFailed;
+    }
+}
+
+fn drainControl(fd: c_int) void {
+    var buf: [1024]u8 = undefined;
+    while (true) {
+        const n = c.read(fd, &buf, buf.len);
+        if (n > 0) continue;
+        if (n == 0) return;
+        const e = std.posix.errno(-1);
+        if (e == .INTR) continue;
+        return;
     }
 }
 
