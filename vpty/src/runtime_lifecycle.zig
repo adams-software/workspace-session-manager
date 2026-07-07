@@ -8,7 +8,7 @@ const host = @import("session_host_vpty");
 const vpty_terminal = @import("vpty_terminal");
 const WakePipe = @import("wake_pipe").WakePipe;
 
-const RESIZE_SETTLE_NS: u64 = 35 * std.time.ns_per_ms;
+const DEFAULT_RESIZE_SETTLE_NS: u64 = 50 * std.time.ns_per_ms;
 
 const PendingResize = struct {
     size: vpty_terminal.Size,
@@ -21,6 +21,12 @@ fn monotonicTimeNs() u64 {
     var ts: c.timespec = undefined;
     if (c.clock_gettime(c.CLOCK_MONOTONIC, &ts) != 0) return 0;
     return @as(u64, @intCast(ts.tv_sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.tv_nsec));
+}
+
+fn resizeSettleNs() u64 {
+    const raw = std.c.getenv("VPTY_RESIZE_SETTLE_MS") orelse return DEFAULT_RESIZE_SETTLE_NS;
+    const parsed_ms = std.fmt.parseInt(u64, std.mem.span(raw), 10) catch return DEFAULT_RESIZE_SETTLE_NS;
+    return parsed_ms * std.time.ns_per_ms;
 }
 
 fn handleTerminationSignal(sig: c_int) callconv(.c) void {
@@ -115,7 +121,7 @@ pub const RuntimeLifecycle = struct {
     pub fn takeSettledResize(self: *RuntimeLifecycle) ?vpty_terminal.Size {
         const pending = self.pending_resize orelse return null;
         const now_ns = monotonicTimeNs();
-        if (now_ns - pending.observed_at_ns < RESIZE_SETTLE_NS) return null;
+        if (now_ns - pending.observed_at_ns < resizeSettleNs()) return null;
         self.pending_resize = null;
         return pending.size;
     }
