@@ -144,10 +144,12 @@ fn runHost(allocator: std.mem.Allocator, io: std.Io, parsed: Parsed) !u8 {
 
     while (true) {
         if (try session.step()) |code| return code;
+        const master_events = session.masterPollEvents();
         var pfds = [_]c.struct_pollfd{
             .{ .fd = session.listenerFd(), .events = c.POLLIN, .revents = 0 },
             .{ .fd = session.ownerFd(), .events = session.ownerPollEvents(), .revents = 0 },
-            .{ .fd = session.masterFd(), .events = c.POLLIN, .revents = 0 },
+            // A negative fd also suppresses unconditional POLLHUP/POLLERR.
+            .{ .fd = if (master_events != 0) session.masterFd() else -1, .events = master_events, .revents = 0 },
             .{ .fd = std.posix.STDIN_FILENO, .events = if (session.stdinPollEnabled()) c.POLLIN else 0, .revents = 0 },
         };
         _ = c.poll(&pfds, pfds.len, 25);

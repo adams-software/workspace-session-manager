@@ -96,6 +96,10 @@ pub const HostSession = struct {
         return self.child.masterFd() orelse -1;
     }
 
+    pub fn masterPollEvents(self: *const HostSession) c_short {
+        return self.server.masterPollEvents();
+    }
+
     pub fn stdinPollEnabled(self: *const HostSession) bool {
         return !self.headless;
     }
