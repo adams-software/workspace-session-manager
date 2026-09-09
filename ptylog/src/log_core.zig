@@ -275,6 +275,7 @@ pub const StreamLogger = struct {
     live_tail: std.ArrayList(u8) = .empty,
     live_emitted_prefix: std.ArrayList(u8) = .empty,
     emitted_tail_lines: usize = 0,
+    normalized: std.ArrayList(u8) = .empty,
     prev_byte: ?u8 = null,
 
     pub fn init(allocator: std.mem.Allocator, format: OutputFormat, rows: u16, cols: u16) !StreamLogger {
@@ -287,6 +288,7 @@ pub const StreamLogger = struct {
     }
 
     pub fn deinit(self: *StreamLogger) void {
+        self.normalized.deinit(self.allocator);
         self.live_tail.deinit(self.allocator);
         self.live_emitted_prefix.deinit(self.allocator);
         self.builder.deinit();
@@ -294,7 +296,7 @@ pub const StreamLogger = struct {
     }
 
     pub fn feed(self: *StreamLogger, bytes: []const u8) !void {
-        try feedReplayBytes(&self.engine, bytes, &self.prev_byte);
+        try feedReplayBytes(&self.engine, bytes, &self.prev_byte, &self.normalized);
         try processPendingEvents(self.allocator, &self.engine, &self.builder);
     }
 
@@ -511,17 +513,15 @@ fn expectOrderedSubstrings(haystack: []const u8, needles: []const []const u8) !v
     }
 }
 
-fn feedReplayBytes(engine: *term_engine.Engine, bytes: []const u8, prev_byte: *?u8) !void {
+fn feedReplayBytes(engine: *term_engine.Engine, bytes: []const u8, prev_byte: *?u8, normalized: *std.ArrayList(u8)) !void {
     if (!normalize_lf_for_replay) return engine.feed(bytes);
 
-    var normalized: std.ArrayList(u8) = .empty;
-    defer normalized.deinit(std.heap.smp_allocator);
-
+    normalized.clearRetainingCapacity();
+    // Reserve before changing prev_byte so allocation failure can be retried.
+    try normalized.ensureTotalCapacity(engine.allocator, try std.math.mul(usize, bytes.len, 2));
     for (bytes) |b| {
-        if (b == '\n' and prev_byte.* != '\r') {
-            try normalized.append(std.heap.smp_allocator, '\r');
-        }
-        try normalized.append(std.heap.smp_allocator, b);
+        if (b == '\n' and prev_byte.* != '\r') normalized.appendAssumeCapacity('\r');
+        normalized.appendAssumeCapacity(b);
         prev_byte.* = b;
     }
 
@@ -1114,4 +1114,31 @@ test "stream logger ansi interactive prompt-first chunks keep edited command" {
         "$ exit",
     });
     try std.testing.expect(std.mem.indexOf(u8, out.items, "lsx") == null);
+}
+
+test "stream logger reuses replay storage after warmup" {
+    var allocations = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var logger = try StreamLogger.init(allocations.allocator(), .plain, 2, 20);
+    defer logger.deinit();
+    // Rewrite a single row to isolate replay from history and rendering allocations.
+    try logger.feed("\rline");
+    const warm_allocations = allocations.alloc_index;
+    try std.testing.expect(warm_allocations > 0); // Replay uses the logger's allocator.
+    for (0..1000) |_| try logger.feed("\rline");
+    try std.testing.expectEqual(warm_allocations, allocations.alloc_index);
+}
+
+test "stream logger replay allocation failure leaves split newline state retryable" {
+    var allocations = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var logger = try StreamLogger.init(allocations.allocator(), .plain, 2, 20);
+    defer logger.deinit();
+    try std.testing.expectError(error.OutOfMemory, logger.feed("A\r"));
+    try std.testing.expectEqual(@as(?u8, null), logger.prev_byte);
+    allocations.fail_index = std.math.maxInt(usize);
+    try logger.feed("A\r");
+    try logger.feed("\nB");
+    var snapshot = try logger.engine.snapshot(std.testing.allocator);
+    defer term_engine.freeScreenSnapshot(std.testing.allocator, &snapshot);
+    try std.testing.expectEqual(@as(u32, 'A'), snapshot.lines[0].cells[0].chars[0]);
+    try std.testing.expectEqual(@as(u32, 'B'), snapshot.lines[1].cells[0].chars[0]);
 }
