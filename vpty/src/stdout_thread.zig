@@ -4,6 +4,8 @@ const StdoutBuffer = @import("stdout_actor").StdoutBuffer;
 const WakePipe = @import("wake_pipe").WakePipe;
 const c = @cImport({
     @cInclude("poll.h");
+    @cInclude("unistd.h");
+    @cInclude("time.h");
 });
 
 const SpinMutex = struct {
@@ -45,6 +47,7 @@ pub const StdoutThread = struct {
     pending_render_publish: ?OwnedRenderPublish = null,
     shared: SharedState = .{},
     thread: ?std.Thread = null,
+    output_failed: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     shutdown_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     wake_pipe: WakePipe = .{},
 
@@ -200,7 +203,8 @@ pub const StdoutThread = struct {
                 const before_render = self.buffer.pendingRenderBytes();
                 const status = self.buffer.flushSome(64 * 1024) catch {
                     self.render_mutex.unlock();
-                    break;
+                    self.output_failed.store(true, .seq_cst);
+                    return;
                 };
                 const after_control = self.buffer.pendingControlBytes();
                 const after_render = self.buffer.pendingRenderBytes();
@@ -362,4 +366,36 @@ test "control buffer allocation failure frees the rejected chunk once and preser
     try std.testing.expectEqual(@as(usize, 0), worker.control_queue.len());
     try std.testing.expectEqual(second.len, worker.pendingControlBytes());
     try std.testing.expectEqualStrings(&second, worker.buffer.control_queue.items);
+}
+
+test "permanent stdout failure stops the worker with pending controls" {
+    var fds: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.pipe(&fds));
+    defer _ = c.close(fds[0]);
+    defer _ = c.close(fds[1]);
+    const saved_stdout = c.dup(c.STDOUT_FILENO);
+    try std.testing.expect(saved_stdout >= 0);
+    defer _ = c.close(saved_stdout);
+    // A read-only pipe end reliably produces EBADF without delivering SIGPIPE.
+    try std.testing.expectEqual(@as(c_int, 1), c.dup2(fds[0], c.STDOUT_FILENO));
+    defer _ = c.dup2(saved_stdout, c.STDOUT_FILENO);
+    var worker = StdoutThread.init(std.testing.allocator, {});
+    defer worker.deinit();
+    var control = "queued control".*;
+    try worker.enqueueControl(.{ .bytes = &control });
+    try worker.start();
+    defer {
+        // Restore a writable sink before joining even if the assertion fails.
+        _ = c.dup2(fds[1], c.STDOUT_FILENO);
+        worker.stop();
+    }
+    var attempts: usize = 0;
+    const delay = c.timespec{ .tv_sec = 0, .tv_nsec = 1_000_000 };
+    while (!worker.output_failed.load(.seq_cst) and attempts < 2000) : (attempts += 1) {
+        _ = c.nanosleep(&delay, null);
+    }
+    try std.testing.expect(worker.output_failed.load(.seq_cst));
+    worker.stop(); // Must join despite the undeliverable bytes still being owned.
+    try std.testing.expect(worker.thread == null);
+    try std.testing.expectEqual(control.len, worker.pendingControlBytes());
 }

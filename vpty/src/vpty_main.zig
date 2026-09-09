@@ -343,6 +343,7 @@ fn pumpUntilExit(lifecycle: *RuntimeLifecycle, session_host: *host.SessionHost, 
     while (true) {
         handleResizeIfNeeded(lifecycle, session_host, shared_model, render_thread, stdout_actor, terminal, mode, viewport, viewport_intent);
         lifecycle.issueTerminationIfNeeded(session_host);
+        if (stdout_actor.output_failed.load(.seq_cst)) return error.OutputClosed;
 
         const pty_events = transport.ptyPollEvents(stdout_actor.pendingControlBytes());
         var pfds = [4]c.struct_pollfd{
@@ -470,7 +471,9 @@ const VptyRuntime = struct {
         if (self.mode == .fullscreen) try self.terminal.enterAltScreen();
         try self.terminal.enterRaw();
         try self.stdout_actor.start();
+        errdefer self.stdout_actor.stopDiscardPending();
         try self.render_thread.start();
+        errdefer self.render_thread.stop();
 
         self.primeRender();
 
@@ -489,6 +492,7 @@ const VptyRuntime = struct {
         }
         self.lifecycle.clearPendingResize();
         _ = self.session_host.close() catch {};
+        if (self.stdout_actor.output_failed.load(.seq_cst)) return error.OutputClosed;
         return childExitCode(status);
     }
 };
