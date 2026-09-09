@@ -528,7 +528,7 @@ pub fn build(b: *std.Build) void {
     session_link_test_root.addImport("fd_stream", fd_stream_mod);
     const session_link_tests = b.addTest(.{ .root_module = session_link_test_root });
     const run_session_link_tests = b.addRunArtifact(session_link_tests);
-    const test_session_link_step = b.step("test-session-link", "Run session output EOF tests");
+    const test_session_link_step = b.step("test-session-link", "Run session output flow-control tests");
     test_session_link_step.dependOn(&run_session_link_tests.step);
 
     const test_step = b.step("test", "Run workspace tests");

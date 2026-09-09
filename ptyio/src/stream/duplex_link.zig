@@ -9,6 +9,8 @@ pub const PumpResult = struct {
 };
 
 pub const DuplexLink = struct {
+    pub const output_queue_limit = 256 * 1024;
+
     allocator: std.mem.Allocator,
     left_to_right: ByteQueue,
     right_to_left: ByteQueue,
@@ -53,11 +55,15 @@ pub const DuplexLink = struct {
         return did_work;
     }
 
+    pub fn canReadRight(self: *const DuplexLink) bool {
+        return self.right_to_left.len() < output_queue_limit;
+    }
+
     pub fn readRight(self: *DuplexLink, right_fd: std.posix.fd_t) !struct { eof: bool, did_work: bool } {
         var did_work = false;
-        while (true) {
+        while (self.canReadRight()) {
             const before = self.right_to_left.readableSlice().len;
-            const status = try fd_stream.readIntoQueue(self.allocator, right_fd, &self.right_to_left, 64 * 1024);
+            const status = try fd_stream.readIntoQueue(self.allocator, right_fd, &self.right_to_left, @min(64 * 1024, output_queue_limit - self.right_to_left.len()));
             const after = self.right_to_left.readableSlice().len;
             if (after > before) did_work = true;
             switch (status) {
