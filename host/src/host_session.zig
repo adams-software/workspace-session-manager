@@ -101,7 +101,7 @@ pub const HostSession = struct {
     }
 
     pub fn stdinPollEnabled(self: *const HostSession) bool {
-        return !self.headless;
+        return if (self.repl) |repl| repl.stdin_open else false;
     }
 
     fn stepRepl(self: *HostSession) !void {
