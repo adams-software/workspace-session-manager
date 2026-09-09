@@ -221,25 +221,16 @@ pub fn build(b: *std.Build) void {
     run_host_step.dependOn(&run_host_cmd.step);
 
     const byte_queue_tests = b.addTest(.{ .root_module = b.createModule(.{
-        .root_source_file = b.path("ptyio/src/stream/byte_queue.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
+        .root_source_file = b.path("ptyio/src/stream/byte_queue.zig"), .target = target, .optimize = optimize, .link_libc = true,
     }) });
     const fd_stream_test_root = b.createModule(.{
-        .root_source_file = b.path("ptyio/src/stream/fd_stream.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
+        .root_source_file = b.path("ptyio/src/stream/fd_stream.zig"), .target = target, .optimize = optimize, .link_libc = true,
     });
     fd_stream_test_root.addImport("byte_queue", byte_queue_mod);
     const fd_stream_tests = b.addTest(.{ .root_module = fd_stream_test_root });
 
     const host_test_root = b.createModule(.{
-        .root_source_file = b.path("ptyio/src/pty/child_host.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
+        .root_source_file = b.path("ptyio/src/pty/child_host.zig"), .target = target, .optimize = optimize, .link_libc = true,
     });
     host_test_root.linkSystemLibrary("util", .{});
     const host_tests = b.addTest(.{ .root_module = host_test_root });
@@ -249,23 +240,14 @@ pub fn build(b: *std.Build) void {
     const host_client_tests = b.addTest(.{ .root_module = host_client_mod });
 
     const wsm_ui_state_mod = b.createModule(.{
-        .root_source_file = b.path("wsm/src/ui_state.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
+        .root_source_file = b.path("wsm/src/ui_state.zig"), .target = target, .optimize = optimize, .link_libc = true,
     });
     const wsm_bar_layout_mod = b.createModule(.{
-        .root_source_file = b.path("wsm/src/bar_layout.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
+        .root_source_file = b.path("wsm/src/bar_layout.zig"), .target = target, .optimize = optimize, .link_libc = true,
     });
     wsm_bar_layout_mod.addImport("ui_state", wsm_ui_state_mod);
     const wsm_bar_render_mod = b.createModule(.{
-        .root_source_file = b.path("wsm/src/bar_render.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
+        .root_source_file = b.path("wsm/src/bar_render.zig"), .target = target, .optimize = optimize, .link_libc = true,
     });
     wsm_bar_render_mod.addImport("ui_state", wsm_ui_state_mod);
     const wsm_ui_state_tests = b.addTest(.{ .root_module = wsm_ui_state_mod });
@@ -579,4 +561,5 @@ pub fn build(b: *std.Build) void {
     const smoke_wsm_logs_step = b.step("smoke-wsm-logs", "Run log-behavior smoke test for wsm");
     smoke_wsm_logs_step.dependOn(b.getInstallStep());
     smoke_wsm_logs_step.dependOn(&smoke_wsm_logs_cmd.step);
+
 }
