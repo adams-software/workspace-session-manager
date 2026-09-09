@@ -114,20 +114,50 @@ const LogState = struct {
 
     fn enforceBudget(self: *LogState) !void {
         if (self.budget_bytes == 0) return;
-        const total = try totalRetainedBytes(self.base_path);
-        if (total <= self.budget_bytes) return;
+        const Segment = struct {
+            name: []u8,
+            index: u32,
+            bytes: u64,
 
-        var retained = total;
-        var oldest: u32 = 1;
-        while (retained > self.budget_bytes and oldest < self.next_segment_index) : (oldest += 1) {
-            const segment_path = try self.segmentPath(oldest);
-            defer self.allocator.free(segment_path);
-            const size = fileSize(segment_path) catch |err| switch (err) {
-                error.FileNotFound => continue,
-                else => return err,
-            };
-            try std.Io.Dir.deleteFileAbsolute(std.Io.Threaded.global_single_threaded.io(), segment_path);
-            retained -|= size;
+            fn lessThan(_: void, left: @This(), right: @This()) bool {
+                return left.index < right.index;
+            }
+        };
+        const io = std.Io.Threaded.global_single_threaded.io();
+        const dir_name = std.fs.path.dirname(self.base_path) orelse ".";
+        const file_name = std.fs.path.basename(self.base_path);
+        var dir = try std.Io.Dir.openDirAbsolute(io, dir_name, .{ .iterate = true });
+        defer dir.close(io);
+        var segments: std.ArrayList(Segment) = .empty;
+        defer {
+            for (segments.items) |segment| self.allocator.free(segment.name);
+            segments.deinit(self.allocator);
+        }
+        var retained: u64 = if (dir.statFile(io, file_name, .{})) |stat| stat.size else |err| switch (err) {
+            error.FileNotFound => 0,
+            else => return err,
+        };
+        var iter = dir.iterate();
+        while (try iter.next(io)) |entry| {
+            if (entry.kind != .file or !std.mem.startsWith(u8, entry.name, file_name)) continue;
+            if (entry.name.len <= file_name.len + 1 or entry.name[file_name.len] != '.') continue;
+            const suffix = entry.name[file_name.len + 1 ..];
+            if (!isNumeric(suffix)) continue;
+            const index = try std.fmt.parseUnsigned(u32, suffix, 10);
+            const stat = try dir.statFile(io, entry.name, .{});
+            retained += stat.size;
+            if (index == 0 or index >= self.next_segment_index) continue;
+            const name = try self.allocator.dupe(u8, entry.name);
+            errdefer self.allocator.free(name);
+            try segments.append(self.allocator, .{ .name = name, .index = index, .bytes = stat.size });
+        }
+        // Cleanup work depends on existing files, not every index ever issued.
+        if (retained <= self.budget_bytes) return;
+        std.mem.sort(Segment, segments.items, {}, Segment.lessThan);
+        for (segments.items) |segment| {
+            if (retained <= self.budget_bytes) break;
+            try dir.deleteFile(io, segment.name);
+            retained -|= segment.bytes;
         }
     }
 
@@ -336,34 +366,6 @@ fn rollExistingBaseLog(io: std.Io, allocator: std.mem.Allocator, base_path: []co
     defer allocator.free(segment_path);
     try std.Io.Dir.renameAbsolute(base_path, segment_path, io);
     return next_segment_index + 1;
-}
-
-fn totalRetainedBytes(base_path: []const u8) !u64 {
-    const dir_name = std.fs.path.dirname(base_path) orelse ".";
-    const file_name = std.fs.path.basename(base_path);
-    const io = std.Io.Threaded.global_single_threaded.io();
-    var dir = try std.Io.Dir.openDirAbsolute(io, dir_name, .{ .iterate = true });
-    defer dir.close(io);
-
-    var total: u64 = 0;
-    if (dir.statFile(io, file_name, .{})) |stat| {
-        total += stat.size;
-    } else |err| switch (err) {
-        error.FileNotFound => {},
-        else => return err,
-    }
-
-    var iter = dir.iterate();
-    while (try iter.next(io)) |entry| {
-        if (entry.kind != .file) continue;
-        if (!std.mem.startsWith(u8, entry.name, file_name)) continue;
-        if (entry.name.len <= file_name.len + 1) continue;
-        if (entry.name[file_name.len] != '.') continue;
-        if (!isNumeric(entry.name[(file_name.len + 1)..])) continue;
-        const stat = try dir.statFile(io, entry.name, .{});
-        total += stat.size;
-    }
-    return total;
 }
 
 fn fileSize(path: []const u8) !u64 {
