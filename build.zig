@@ -474,7 +474,13 @@ pub fn build(b: *std.Build) void {
     const run_wsm_bar_render_tests = b.addRunArtifact(wsm_bar_render_tests);
     const run_ptylog_log_core_tests = b.addRunArtifact(ptylog_log_core_tests);
 
+    const wake_pipe_tests = b.addTest(.{ .root_module = wake_pipe_mod });
+    const run_wake_pipe_tests = b.addRunArtifact(wake_pipe_tests);
+    const test_wake_pipe_step = b.step("test-wake-pipe", "Run wake-pipe notification tests");
+    test_wake_pipe_step.dependOn(&run_wake_pipe_tests.step);
+
     const test_step = b.step("test", "Run workspace tests");
+    test_step.dependOn(&run_wake_pipe_tests.step);
     test_step.dependOn(&run_history_tests.step);
     test_step.dependOn(&run_byte_queue_tests.step);
     test_step.dependOn(&run_fd_stream_tests.step);
