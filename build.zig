@@ -479,7 +479,13 @@ pub fn build(b: *std.Build) void {
     const test_wake_pipe_step = b.step("test-wake-pipe", "Run wake-pipe notification tests");
     test_wake_pipe_step.dependOn(&run_wake_pipe_tests.step);
 
+    const stdout_actor_tests = b.addTest(.{ .root_module = stdout_actor_mod });
+    const run_stdout_actor_tests = b.addRunArtifact(stdout_actor_tests);
+    const test_stdout_actor_step = b.step("test-stdout-actor", "Run stdout buffer tests");
+    test_stdout_actor_step.dependOn(&run_stdout_actor_tests.step);
+
     const test_step = b.step("test", "Run workspace tests");
+    test_step.dependOn(&run_stdout_actor_tests.step);
     test_step.dependOn(&run_wake_pipe_tests.step);
     test_step.dependOn(&run_history_tests.step);
     test_step.dependOn(&run_byte_queue_tests.step);

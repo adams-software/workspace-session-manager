@@ -50,13 +50,24 @@ pub const StdoutBuffer = struct {
     }
 
     pub fn enqueueControl(self: *StdoutBuffer, chunk: actor_mailboxes.ControlChunk) !void {
+        self.compactControl();
         try self.control_queue.appendSlice(self.allocator, chunk.bytes);
     }
 
     pub fn enqueueOwnedControl(self: *StdoutBuffer, bytes: []u8) !void {
         errdefer self.allocator.free(bytes);
+        self.compactControl();
         try self.control_queue.appendSlice(self.allocator, bytes);
         self.allocator.free(bytes);
+    }
+
+    fn compactControl(self: *StdoutBuffer) void {
+        const remaining = self.control_queue.items[self.control_offset..];
+        // Reclaim consumed bytes without repeatedly copying a large live backlog.
+        if (self.control_offset == 0 or self.control_offset < remaining.len) return;
+        std.mem.copyForwards(u8, self.control_queue.items[0..remaining.len], remaining);
+        self.control_queue.items.len = remaining.len;
+        self.control_offset = 0;
     }
 
     pub fn publishRenderCandidate(self: *StdoutBuffer, publish: actor_mailboxes.RenderPublish) !void {
@@ -245,7 +256,8 @@ test "pending byte categories keep control separate from render backlog" {
     var buffer = StdoutBuffer.init(std.testing.allocator);
     defer buffer.deinit();
 
-    try buffer.enqueueControl(.{ .bytes = "osc52" });
+    var control = "osc52".*;
+    try buffer.enqueueControl(.{ .bytes = &control });
     buffer.publishOwnedRenderCandidate(1, try std.testing.allocator.dupe(u8, "frame"), .{
         .visible = true,
         .row = 0,
@@ -255,4 +267,46 @@ test "pending byte categories keep control separate from render backlog" {
     try std.testing.expectEqual(@as(usize, 5), buffer.pendingControlBytes());
     try std.testing.expectEqual(@as(usize, 5), buffer.pendingRenderBytes());
     try std.testing.expectEqual(@as(usize, 10), buffer.pendingBytes());
+}
+
+test "partial control flushes preserve byte order without retaining consumed history" {
+    var fds: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe2(&fds, .{ .NONBLOCK = true, .CLOEXEC = true }));
+    defer _ = c.close(fds[0]);
+    defer _ = c.close(fds[1]);
+    const saved_stdout = c.dup(c.STDOUT_FILENO);
+    try std.testing.expect(saved_stdout >= 0);
+    defer _ = c.close(saved_stdout);
+    try std.testing.expectEqual(@as(c_int, c.STDOUT_FILENO), c.dup2(fds[1], c.STDOUT_FILENO));
+    defer _ = c.dup2(saved_stdout, c.STDOUT_FILENO);
+
+    var buffer = StdoutBuffer.init(std.testing.allocator);
+    defer buffer.deinit();
+    var expected = "abcd".*;
+    try buffer.enqueueControl(.{ .bytes = &expected });
+    const initial_capacity = buffer.control_queue.capacity;
+    for (0..10000) |i| {
+        const count = 1 + i % 3;
+        const flushed = try buffer.flushSome(count);
+        try std.testing.expectEqual(count, flushed.progress);
+        var output: [3]u8 = undefined;
+        try std.testing.expectEqual(@as(isize, @intCast(count)), c.read(fds[0], &output, count));
+        try std.testing.expectEqualSlices(u8, expected[0..count], output[0..count]);
+        var next = [3]u8{ @truncate(i), @truncate(i + 1), @truncate(i + 2) };
+        std.mem.copyForwards(u8, expected[0 .. expected.len - count], expected[count..]);
+        @memcpy(expected[expected.len - count ..], next[0..count]);
+        if (i % 2 == 0) {
+            try buffer.enqueueControl(.{ .bytes = next[0..count] });
+        } else {
+            try buffer.enqueueOwnedControl(try std.testing.allocator.dupe(u8, next[0..count]));
+        }
+        try std.testing.expectEqual(@as(usize, 4), buffer.pendingControlBytes());
+        try std.testing.expect(buffer.control_queue.capacity <= initial_capacity * 2);
+    }
+    const flushed = try buffer.flushSome(4);
+    try std.testing.expectEqual(@as(usize, 4), flushed.progress);
+    var output: [4]u8 = undefined;
+    try std.testing.expectEqual(@as(isize, 4), c.read(fds[0], &output, output.len));
+    try std.testing.expectEqualSlices(u8, &expected, &output);
+    try std.testing.expect(!buffer.hasPending());
 }
