@@ -254,7 +254,7 @@ pub const StdoutThread = struct {
             self.buffer.enqueueOwnedControl(chunk.bytes) catch {
                 self.render_mutex.unlock();
                 _ = self.shared.pending_control_bytes.fetchSub(chunk.bytes.len, .seq_cst);
-                self.allocator.free(chunk.bytes);
+                // enqueueOwnedControl consumes ownership even when allocation fails.
                 break;
             };
             self.render_mutex.unlock();
@@ -337,4 +337,28 @@ test "failed control publication restores pending byte accounting" {
     try std.testing.expectError(error.Closed, worker.enqueueControl(.{ .bytes = &bytes }));
     try std.testing.expectEqual(bytes.len, worker.pendingControlBytes());
     try std.testing.expectEqual(@as(usize, 1), worker.control_queue.len());
+}
+
+test "control buffer allocation failure frees the rejected chunk once and preserves queued work" {
+    var allocations = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var worker = StdoutThread.init(allocations.allocator(), {});
+    defer worker.deinit();
+    var first = "first".*;
+    var second = "second".*;
+    try worker.enqueueControl(.{ .bytes = &first });
+    try worker.enqueueControl(.{ .bytes = &second });
+
+    // The next allocation grows the consumer's buffer after it pops the first chunk.
+    allocations.fail_index = allocations.alloc_index;
+    worker.drainInbound();
+    try std.testing.expect(allocations.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 1), worker.control_queue.len());
+    try std.testing.expectEqual(second.len, worker.pendingControlBytes());
+    try std.testing.expectEqual(@as(usize, 0), worker.buffer.pendingControlBytes());
+
+    allocations.fail_index = std.math.maxInt(usize);
+    worker.drainInbound();
+    try std.testing.expectEqual(@as(usize, 0), worker.control_queue.len());
+    try std.testing.expectEqual(second.len, worker.pendingControlBytes());
+    try std.testing.expectEqualStrings(&second, worker.buffer.control_queue.items);
 }
