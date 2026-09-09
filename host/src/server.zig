@@ -30,6 +30,7 @@ pub const ServerState = enum {
 
 pub const SessionServer = struct {
     const io_chunk_size = 64 * 1024;
+    const input_limit = 256 * 1024;
 
     allocator: std.mem.Allocator,
     session_host: *host.PtyChildHost,
@@ -132,7 +133,7 @@ pub const SessionServer = struct {
 
     pub fn ownerPollEvents(self: *const SessionServer) c_short {
         if (self.owner_fd == null) return 0;
-        var events: c_short = c.POLLIN;
+        var events: c_short = if (self.pty_tx.len() < input_limit) c.POLLIN else 0;
         if (!self.owner_tx.isEmpty()) events |= c.POLLOUT;
         return events;
     }
@@ -269,7 +270,9 @@ pub const SessionServer = struct {
         var progressed = false;
 
         if (self.owner_fd) |owner_fd| {
-            const rd = fd_stream.readIntoQueue(self.allocator, owner_fd, &self.owner_rx, io_chunk_size) catch {
+            const room = input_limit - self.pty_tx.len();
+            if (room == 0) return try self.flushPtyWrites(master_fd, progressed);
+            const rd = fd_stream.readIntoQueue(self.allocator, owner_fd, &self.owner_rx, @min(room, io_chunk_size)) catch {
                 try self.commitOwnerRx();
                 self.dropOwner();
                 progressed = true;
