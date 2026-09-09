@@ -43,6 +43,7 @@ typedef struct {
   msr_vterm_history_event *history_events;
   size_t history_events_len;
   size_t history_events_cap;
+  size_t history_events_head;
 } msr_vterm_handle;
 
 typedef struct {

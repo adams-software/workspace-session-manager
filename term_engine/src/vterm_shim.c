@@ -6,6 +6,12 @@
 enum { MSR_MAX_OSC8_BYTES = 8192 };
 
 static int ensure_history_event_cap(msr_vterm_handle *h, size_t additional) {
+  // Reclaim dequeued slots once when appending, rather than on every pop.
+  if (h->history_events_head) {
+    memmove(h->history_events, h->history_events + h->history_events_head,
+            h->history_events_len * sizeof(msr_vterm_history_event));
+    h->history_events_head = 0;
+  }
   size_t needed = h->history_events_len + additional;
   if (needed <= h->history_events_cap) return 1;
   size_t next_cap = h->history_events_cap ? h->history_events_cap * 2 : 16;
@@ -299,7 +305,7 @@ void msr_vterm_free(msr_vterm_handle *handle) {
     free(handle->hyperlinks[i].uri);
   }
   for (size_t i = 0; i < handle->history_events_len; i++) {
-    free(handle->history_events[i].cells);
+    free(handle->history_events[handle->history_events_head + i].cells);
   }
   free(handle->history_events);
   free(handle->hyperlinks);
@@ -398,11 +404,9 @@ void msr_vterm_enable_history_events(msr_vterm_handle *handle, int enable) {
 
 int msr_vterm_next_history_event(msr_vterm_handle *handle, msr_vterm_history_event *out) {
   if (!handle || !out || handle->history_events_len == 0) return 0;
-  *out = handle->history_events[0];
-  if (handle->history_events_len > 1) {
-    memmove(handle->history_events, handle->history_events + 1, (handle->history_events_len - 1) * sizeof(msr_vterm_history_event));
-  }
+  *out = handle->history_events[handle->history_events_head++];
   handle->history_events_len -= 1;
+  if (!handle->history_events_len) handle->history_events_head = 0;
   return 1;
 }
 

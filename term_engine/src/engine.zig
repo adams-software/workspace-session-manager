@@ -200,3 +200,32 @@ test "history ownership survives allocation failures while draining a batch" {
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Scenario.run, .{});
 }
+
+test "history ownership survives partial dequeue, append, and teardown" {
+    const Check = struct {
+        fn next(handle: *c.msr_vterm_handle, expected: u8) !void {
+            var event: c.msr_vterm_history_event = undefined;
+            try std.testing.expectEqual(@as(c_int, 1), c.msr_vterm_next_history_event(handle, &event));
+            defer c.msr_vterm_free_history_event(&event);
+            try std.testing.expectEqual(@as(c_int, c.MSR_VTERM_HISTORY_LINE_COMMITTED), event.kind);
+            try std.testing.expectEqual(@as(u32, expected), event.cells[0].chars[0]);
+        }
+    };
+    const handle: *c.msr_vterm_handle = c.msr_vterm_new(2, 10, 0) orelse return error.OutOfMemory;
+    defer c.msr_vterm_free(handle);
+    c.msr_vterm_enable_history_events(handle, 1);
+    const first = "A\r\nB\r\nC\r\nD\r\n";
+    c.msr_vterm_feed(handle, first.ptr, first.len);
+    try Check.next(handle, 'A');
+    const second = "E\r\nF\r\n";
+    c.msr_vterm_feed(handle, second.ptr, second.len);
+    for ("BCDE") |expected| try Check.next(handle, expected);
+    var event: c.msr_vterm_history_event = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.msr_vterm_next_history_event(handle, &event));
+
+    // Reuse an emptied queue, then leave unread events for teardown to free.
+    const third = "G\r\nH\r\nI\r\n";
+    c.msr_vterm_feed(handle, third.ptr, third.len);
+    try Check.next(handle, 'F');
+    try std.testing.expect(handle.history_events_len > 0);
+}
