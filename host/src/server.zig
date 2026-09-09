@@ -137,6 +137,15 @@ pub const SessionServer = struct {
         return events;
     }
 
+    pub fn masterPollEvents(self: *const SessionServer) c_short {
+        var events: c_short = 0;
+        // Match pumpPtyToOwner: unread output cannot make progress until
+        // an owner is attached and its pending output has drained.
+        if (self.owner_fd != null and self.owner_tx.isEmpty()) events |= c.POLLIN;
+        if (!self.pty_tx.isEmpty()) events |= c.POLLOUT;
+        return events;
+    }
+
     fn validateSocketPath(path: []const u8) Error!void {
         if (path.len == 0) return Error.InvalidArgs;
         if (path.len >= 108) return Error.PathTooLong;
