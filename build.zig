@@ -489,7 +489,13 @@ pub fn build(b: *std.Build) void {
     const test_stdout_thread_step = b.step("test-stdout-thread", "Run stdout thread accounting tests");
     test_stdout_thread_step.dependOn(&run_stdout_thread_tests.step);
 
+    const side_effect_tests = b.addTest(.{ .root_module = side_effects });
+    const run_side_effect_tests = b.addRunArtifact(side_effect_tests);
+    const test_side_effects_step = b.step("test-side-effects", "Run terminal control parser tests");
+    test_side_effects_step.dependOn(&run_side_effect_tests.step);
+
     const test_step = b.step("test", "Run workspace tests");
+    test_step.dependOn(&run_side_effect_tests.step);
     test_step.dependOn(&run_stdout_thread_tests.step);
     test_step.dependOn(&run_stdout_actor_tests.step);
     test_step.dependOn(&run_wake_pipe_tests.step);

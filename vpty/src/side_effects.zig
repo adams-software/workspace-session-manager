@@ -14,6 +14,7 @@ const State = enum {
     idle,
     esc,
     csi,
+    csi_discard,
     osc,
     osc_seen_5,
     osc_seen_52,
@@ -21,11 +22,12 @@ const State = enum {
     osc_other_body,
     osc_maybe_st_52,
     osc_maybe_st_other,
-    osc_discard_52,
-    osc_discard_maybe_st_52,
+    osc_discard,
+    osc_discard_maybe_st,
 };
 
-const max_osc_bytes = 1024 * 1024 * 1024;
+const max_osc_bytes = 1024 * 1024;
+const max_csi_bytes = 4096;
 
 pub const FeedResult = struct {
     emitted_osc52: bool = false,
@@ -148,9 +150,10 @@ pub const SideEffectForwarder = struct {
         self.state = .idle;
     }
 
-    fn discardOsc52(self: *SideEffectForwarder) void {
+    fn discardOscByte(self: *SideEffectForwarder, b: u8) void {
+        const terminated = b == 0x07 or (b == '\\' and (self.state == .osc_maybe_st_52 or self.state == .osc_maybe_st_other));
         self.osc_buf.clearRetainingCapacity();
-        self.state = .osc_discard_52;
+        self.state = if (terminated) .idle else if (b == 0x1b) .osc_discard_maybe_st else .osc_discard;
     }
 
     pub fn feed(self: *SideEffectForwarder, stdout_actor: anytype, bytes: []const u8) !FeedResult {
@@ -183,15 +186,24 @@ pub const SideEffectForwarder = struct {
                 },
 
                 .csi => {
+                    if (self.csi_buf.items.len >= max_csi_bytes) {
+                        self.csi_buf.clearRetainingCapacity();
+                        self.state = if (b >= 0x40 and b <= 0x7e) .idle else .csi_discard;
+                        continue;
+                    }
                     try self.appendCsi(b);
                     if (b >= 0x40 and b <= 0x7e) {
                         try self.flushCsi(stdout_actor);
                     }
                 },
 
+                .csi_discard => {
+                    if (b >= 0x40 and b <= 0x7e) self.state = .idle;
+                },
+
                 .osc => {
                     self.appendOsc(b) catch {
-                        self.discardOsc52();
+                        self.discardOscByte(b);
                         continue;
                     };
                     if (b == '5') {
@@ -203,7 +215,7 @@ pub const SideEffectForwarder = struct {
 
                 .osc_seen_5 => {
                     self.appendOsc(b) catch {
-                        self.discardOsc52();
+                        self.discardOscByte(b);
                         continue;
                     };
                     if (b == '2') {
@@ -215,7 +227,7 @@ pub const SideEffectForwarder = struct {
 
                 .osc_seen_52 => {
                     self.appendOsc(b) catch {
-                        self.discardOsc52();
+                        self.discardOscByte(b);
                         continue;
                     };
                     if (b == ';') {
@@ -227,7 +239,7 @@ pub const SideEffectForwarder = struct {
 
                 .osc_52_body => {
                     self.appendOsc(b) catch {
-                        self.discardOsc52();
+                        self.discardOscByte(b);
                         continue;
                     };
 
@@ -242,7 +254,7 @@ pub const SideEffectForwarder = struct {
 
                 .osc_other_body => {
                     self.appendOsc(b) catch {
-                        self.resetOsc();
+                        self.discardOscByte(b);
                         continue;
                     };
 
@@ -256,7 +268,7 @@ pub const SideEffectForwarder = struct {
 
                 .osc_maybe_st_52 => {
                     self.appendOsc(b) catch {
-                        self.discardOsc52();
+                        self.discardOscByte(b);
                         continue;
                     };
 
@@ -269,27 +281,27 @@ pub const SideEffectForwarder = struct {
                     }
                 },
 
-                .osc_discard_52 => {
+                .osc_discard => {
                     if (b == 0x07) {
                         self.resetOsc();
                     } else if (b == 0x1b) {
-                        self.state = .osc_discard_maybe_st_52;
+                        self.state = .osc_discard_maybe_st;
                     }
                 },
 
-                .osc_discard_maybe_st_52 => {
+                .osc_discard_maybe_st => {
                     if (b == '\\') {
                         self.resetOsc();
                     } else if (b == 0x07) {
                         self.resetOsc();
                     } else if (b != 0x1b) {
-                        self.state = .osc_discard_52;
+                        self.state = .osc_discard;
                     }
                 },
 
                 .osc_maybe_st_other => {
                     self.appendOsc(b) catch {
-                        self.resetOsc();
+                        self.discardOscByte(b);
                         continue;
                     };
 
@@ -499,7 +511,7 @@ test "oversized OSC 52 is discarded without leaking payload to screen" {
     var stdout_actor = TestStdoutActor.init(std.testing.allocator);
     defer stdout_actor.deinit();
 
-    var big = std.ArrayList(u8){};
+    var big: std.ArrayList(u8) = .empty;
     defer big.deinit(std.testing.allocator);
 
     try big.appendSlice(std.testing.allocator, "hello\x1b]52;c;");
@@ -521,7 +533,7 @@ test "oversized OSC 52 split across feeds is discarded without leaking payload" 
     var stdout_actor = TestStdoutActor.init(std.testing.allocator);
     defer stdout_actor.deinit();
 
-    var first = std.ArrayList(u8){};
+    var first: std.ArrayList(u8) = .empty;
     defer first.deinit(std.testing.allocator);
     try first.appendSlice(std.testing.allocator, "x\x1b]52;c;");
     try first.appendNTimes(std.testing.allocator, 'A', max_osc_bytes);
@@ -534,4 +546,80 @@ test "oversized OSC 52 split across feeds is discarded without leaking payload" 
     try std.testing.expectEqualStrings("y", r2.screen_bytes);
     try std.testing.expectEqual(@as(usize, 0), stdout_actor.controls.items.len);
     try std.testing.expect(!r2.emitted_osc52);
+}
+
+test "bounded CSI discards through its final byte and resumes normal routing" {
+    for ([_]usize{ 4094, 32768 }) |body_len| {
+        var forwarder = SideEffectForwarder.init(std.testing.allocator);
+        defer forwarder.deinit();
+        var actor = TestStdoutActor.init(std.testing.allocator);
+        defer actor.deinit();
+        _ = try forwarder.feed(&actor, "\x1b[");
+        const body = try std.testing.allocator.alloc(u8, body_len);
+        defer std.testing.allocator.free(body);
+        @memset(body, '1');
+        const pending = try forwarder.feed(&actor, body);
+        try std.testing.expectEqualStrings("", pending.screen_bytes);
+        try std.testing.expect(forwarder.csi_buf.items.len <= 4096);
+        try std.testing.expect(forwarder.csi_buf.capacity <= 8192);
+        const result = try forwarder.feed(&actor, "mOK\x1b[?2004h");
+        try std.testing.expectEqualStrings("OK", result.screen_bytes);
+        try std.testing.expectEqual(@as(usize, 1), actor.controls.items.len);
+        try std.testing.expectEqualStrings("\x1b[?2004h", actor.controls.items[0]);
+    }
+}
+
+test "bounded OSC discards oversized clipboard hyperlink and title sequences" {
+    const limit = 1024 * 1024;
+    for ([_][]const u8{ "\x1b]52;c;", "\x1b]8;;", "\x1b]0;" }) |prefix| {
+        for ([_][]const u8{ "\x07", "\x1b\\" }) |terminator| {
+            // Cross the limit on either terminator byte, or before the terminator.
+            for ([_]usize{ limit - prefix.len, limit - prefix.len + 1024, limit - prefix.len - terminator.len + 1 }) |body_len| {
+                var forwarder = SideEffectForwarder.init(std.testing.allocator);
+                defer forwarder.deinit();
+                var actor = TestStdoutActor.init(std.testing.allocator);
+                defer actor.deinit();
+                _ = try forwarder.feed(&actor, prefix);
+                const body = try std.testing.allocator.alloc(u8, body_len);
+                defer std.testing.allocator.free(body);
+                @memset(body, 'A');
+                const pending = try forwarder.feed(&actor, body);
+                try std.testing.expectEqualStrings("", pending.screen_bytes);
+                try std.testing.expect(forwarder.osc_buf.items.len <= limit);
+                try std.testing.expect(forwarder.osc_buf.capacity <= limit * 2);
+                // Feed terminators one byte at a time to cover split ESC-backslash.
+                for (terminator) |byte| {
+                    const part = try forwarder.feed(&actor, &.{byte});
+                    try std.testing.expectEqualStrings("", part.screen_bytes);
+                    try std.testing.expect(!part.emitted_osc52);
+                }
+                const result = try forwarder.feed(&actor, "OK\x1b[?1h");
+                try std.testing.expectEqualStrings("OK", result.screen_bytes);
+                try std.testing.expectEqual(@as(usize, 1), actor.controls.items.len);
+                try std.testing.expectEqualStrings("\x1b[?1h", actor.controls.items[0]);
+            }
+        }
+    }
+}
+
+test "bounded control limits include complete sequences exactly at the limit" {
+    var forwarder = SideEffectForwarder.init(std.testing.allocator);
+    defer forwarder.deinit();
+    var actor = TestStdoutActor.init(std.testing.allocator);
+    defer actor.deinit();
+    const osc = try std.testing.allocator.alloc(u8, 1024 * 1024);
+    defer std.testing.allocator.free(osc);
+    @memset(osc, 'A');
+    @memcpy(osc[0..7], "\x1b]52;c;");
+    osc[osc.len - 1] = 0x07;
+    const result = try forwarder.feed(&actor, osc);
+    try std.testing.expect(result.emitted_osc52);
+    try std.testing.expectEqual(@as(usize, 1), actor.controls.items.len);
+    try std.testing.expectEqualSlices(u8, osc, actor.controls.items[0]);
+
+    var csi: [4096]u8 = @splat('1');
+    @memcpy(csi[0..2], "\x1b[");
+    csi[csi.len - 1] = 'm';
+    const screen = try forwarder.feed(&actor, &csi);
+    try std.testing.expectEqualSlices(u8, &csi, screen.screen_bytes);
 }

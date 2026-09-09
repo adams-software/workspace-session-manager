@@ -173,6 +173,8 @@ Terminal integration and rendering layer.
 
 Holds the PTY / terminal-state / rendering work needed for interactive sessions.
 
+The terminal control parser limits complete OSC sequences to 1 MiB and CSI sequences to 4 KiB, including delimiters. Oversized sequences are discarded through their terminator so their payload does not appear as screen text. This includes OSC 52 clipboard transfers whose encoded sequence exceeds 1 MiB.
+
 ### `ptylog/`
 Readable session log capture.
 
