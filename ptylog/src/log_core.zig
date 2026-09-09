@@ -75,18 +75,20 @@ pub const Builder = struct {
     fn cloneHyperlinks(self: *Builder, snapshot: ?*const term_engine.HostScreenSnapshot) ![]term_engine.HostHyperlink {
         const src = if (snapshot) |snap| snap.hyperlinks else &.{};
         const links = try self.allocator.alloc(term_engine.HostHyperlink, src.len);
+        var initialized: usize = 0;
         errdefer {
-            for (links[0..src.len]) |link| {
-                if (link.params.len > 0) self.allocator.free(link.params);
-                if (link.uri.len > 0) self.allocator.free(link.uri);
+            for (links[0..initialized]) |link| {
+                self.allocator.free(link.params);
+                self.allocator.free(link.uri);
             }
             self.allocator.free(links);
         }
         for (src, 0..) |link, idx| {
-            links[idx] = .{
-                .params = try self.allocator.dupe(u8, link.params),
-                .uri = try self.allocator.dupe(u8, link.uri),
-            };
+            const params = try self.allocator.dupe(u8, link.params);
+            errdefer self.allocator.free(params);
+            const uri = try self.allocator.dupe(u8, link.uri);
+            links[idx] = .{ .params = params, .uri = uri };
+            initialized += 1;
         }
         return links;
     }
@@ -1141,4 +1143,39 @@ test "stream logger replay allocation failure leaves split newline state retryab
     defer term_engine.freeScreenSnapshot(std.testing.allocator, &snapshot);
     try std.testing.expectEqual(@as(u32, 'A'), snapshot.lines[0].cells[0].chars[0]);
     try std.testing.expectEqual(@as(u32, 'B'), snapshot.lines[1].cells[0].chars[0]);
+}
+
+test "hyperlink copies own their strings and clean up every partial allocation" {
+    const Scenario = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var uri = "https://one".*;
+            var links = [_]term_engine.HostHyperlink{
+                .{ .params = "id=one", .uri = &uri },
+                .{ .params = "id=two", .uri = "https://two" },
+                .{ .params = "", .uri = "https://three" },
+            };
+            const snapshot = term_engine.HostScreenSnapshot{
+                .rows = 0,
+                .cols = 0,
+                .cursor_row = 0,
+                .cursor_col = 0,
+                .cursor_visible = false,
+                .alt_screen = false,
+                .seq = 0,
+                .hyperlinks = &links,
+                .lines = &.{},
+            };
+            var builder = Builder.init(allocator, .ansi);
+            defer builder.deinit();
+            builder.pending_styled_hyperlinks = try builder.cloneHyperlinks(&snapshot);
+            try std.testing.expectEqual(links.len, builder.pending_styled_hyperlinks.len);
+            for (links, builder.pending_styled_hyperlinks) |source, copy| {
+                try std.testing.expectEqualStrings(source.params, copy.params);
+                try std.testing.expectEqualStrings(source.uri, copy.uri);
+            }
+            uri[0] = 'H';
+            try std.testing.expectEqualStrings("https://one", builder.pending_styled_hyperlinks[0].uri);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Scenario.run, .{});
 }
