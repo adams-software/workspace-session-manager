@@ -80,7 +80,7 @@ pub const SessionLink = struct {
     }
 
     pub fn dataPollFd(self: *const SessionLink) ?c_int {
-        return if (self.data_eof) null else self.data_fd;
+        return if (self.data_eof or !self.pump.canReadRight()) null else self.data_fd;
     }
 
     pub fn hasPendingOutput(self: *const SessionLink) bool {
@@ -227,4 +227,65 @@ test "session EOF without pending output reports stream loss immediately" {
     try std.testing.expect(result.stream_lost);
     try std.testing.expect(!result.did_work);
     try std.testing.expect(link.dataPollFd() == null);
+}
+
+test "session output backpressure bounds reads and preserves final bytes through EOF" {
+    var data: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(c.AF_UNIX, c.SOCK_STREAM | c.SOCK_NONBLOCK, 0, &data));
+    var link = SessionLink.init(std.testing.allocator);
+    defer link.deinit();
+    link.data_fd = data[1];
+    const tail = "0123456789";
+    const sent = c.write(data[0], tail.ptr, tail.len);
+    _ = c.close(data[0]);
+    try std.testing.expectEqual(@as(isize, tail.len), sent);
+
+    var output: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe2(&output, .{ .NONBLOCK = true, .CLOEXEC = true }));
+    defer _ = c.close(output[0]);
+    defer _ = c.close(output[1]);
+    const padding: [4096]u8 = @splat('x');
+    while (c.write(output[1], &padding, padding.len) > 0) {}
+    try std.testing.expectEqual(std.posix.E.AGAIN, std.posix.errno(-1));
+
+    // Leave less than one read chunk free; only three socket bytes may be read.
+    const prefix = try std.testing.allocator.alloc(u8, 256 * 1024 - 3);
+    defer std.testing.allocator.free(prefix);
+    @memset(prefix, 'a');
+    try link.pump.right_to_left.append(std.testing.allocator, prefix);
+    try std.testing.expectEqual(@as(?c_int, data[1]), link.dataPollFd());
+    const first = try link.pumpDataToOutput(output[1]);
+    try std.testing.expect(first.did_work and !first.stream_lost);
+    try std.testing.expectEqual(@as(usize, 256 * 1024), link.pump.right_to_left.len());
+    try std.testing.expectEqual(@as(usize, 256 * 1024), link.pump.right_to_left.capacity());
+    try std.testing.expectEqualStrings("012", link.pump.right_to_left.readableSlice()[prefix.len..]);
+    try std.testing.expect(link.dataPollFd() == null);
+    for (0..100) |_| {
+        const stalled = try link.pumpDataToOutput(output[1]);
+        try std.testing.expect(!stalled.did_work and !stalled.stream_lost);
+        try std.testing.expectEqual(@as(usize, 256 * 1024), link.pump.right_to_left.capacity());
+    }
+
+    var bytes: [4096]u8 = undefined;
+    while (c.read(output[0], &bytes, bytes.len) > 0) {} // Remove only the padding.
+    var received: std.ArrayList(u8) = .empty;
+    defer received.deinit(std.testing.allocator);
+    var lost = false;
+    var iterations: usize = 0;
+    while (!lost and iterations < 200) : (iterations += 1) {
+        const result = try link.pumpDataToOutput(output[1]);
+        if (iterations == 0) try std.testing.expectEqual(@as(?c_int, data[1]), link.dataPollFd());
+        lost = result.stream_lost;
+        while (true) {
+            const n = c.read(output[0], &bytes, bytes.len);
+            if (n <= 0) break;
+            try received.appendSlice(std.testing.allocator, bytes[0..@intCast(n)]);
+        }
+        try std.testing.expect(link.pump.right_to_left.capacity() <= 256 * 1024);
+    }
+    try std.testing.expect(lost);
+    try std.testing.expectEqual(prefix.len + tail.len, received.items.len);
+    try std.testing.expectEqualSlices(u8, prefix, received.items[0..prefix.len]);
+    try std.testing.expectEqualStrings(tail, received.items[prefix.len..]);
+    try std.testing.expect(!link.hasPendingOutput());
 }
