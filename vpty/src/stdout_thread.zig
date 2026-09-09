@@ -68,6 +68,7 @@ pub const StdoutThread = struct {
 
     pub fn start(self: *StdoutThread) !void {
         self.wake_pipe = try WakePipe.init();
+        errdefer self.wake_pipe.deinit();
         self.thread = try std.Thread.spawn(.{}, run, .{self});
     }
 

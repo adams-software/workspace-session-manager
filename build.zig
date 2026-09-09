@@ -504,7 +504,22 @@ pub fn build(b: *std.Build) void {
     const test_vpty_output_step = b.step("test-vpty-output", "Run vpty output backpressure tests");
     test_vpty_output_step.dependOn(&run_vpty_output_tests.step);
 
+    const worker_start_test_root = b.createModule(.{
+        .root_source_file = b.path("vpty/src/worker_start_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    worker_start_test_root.addImport("stdout_thread", stdout_thread_mod);
+    worker_start_test_root.addImport("render_thread", render_thread_mod);
+    worker_start_test_root.addImport("terminal_model", terminal_model_mod);
+    const worker_start_tests = b.addTest(.{ .root_module = worker_start_test_root });
+    const run_worker_start_tests = b.addRunArtifact(worker_start_tests);
+    const test_worker_start_step = b.step("test-worker-start", "Run worker startup failure tests");
+    test_worker_start_step.dependOn(&run_worker_start_tests.step);
+
     const test_step = b.step("test", "Run workspace tests");
+    test_step.dependOn(&run_worker_start_tests.step);
     test_step.dependOn(&run_vpty_output_tests.step);
     test_step.dependOn(&run_vpty_input_tests.step);
     test_step.dependOn(&run_side_effect_tests.step);
