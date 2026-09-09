@@ -151,7 +151,7 @@ fn runHost(allocator: std.mem.Allocator, io: std.Io, parsed: Parsed) !u8 {
             .{ .fd = if (owner_events != 0) session.ownerFd() else -1, .events = owner_events, .revents = 0 },
             // A negative fd also suppresses unconditional POLLHUP/POLLERR.
             .{ .fd = if (master_events != 0) session.masterFd() else -1, .events = master_events, .revents = 0 },
-            .{ .fd = std.posix.STDIN_FILENO, .events = if (session.stdinPollEnabled()) c.POLLIN else 0, .revents = 0 },
+            .{ .fd = if (session.stdinPollEnabled()) std.posix.STDIN_FILENO else -1, .events = c.POLLIN, .revents = 0 },
         };
         _ = c.poll(&pfds, pfds.len, 25);
     }

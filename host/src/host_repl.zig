@@ -9,6 +9,7 @@ pub const Repl = struct {
     io: std.Io,
     line_buf: std.ArrayList(u8),
     ready_emitted: bool,
+    stdin_open: bool = true,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io) Repl {
         return .{
@@ -39,6 +40,7 @@ pub const Repl = struct {
         runtime: *host_runtime.HostRuntime,
         applyResizeFn: ?*const fn (size: host_runtime.Size) anyerror!void,
     ) !void {
+        if (!self.stdin_open) return;
         var pending_resize: ?PendingResize = null;
         var byte_buf: [1]u8 = undefined;
         var stdout_buf: [1024]u8 = undefined;
@@ -54,6 +56,7 @@ pub const Repl = struct {
                 else => return err,
             };
             if (n == 0) {
+                self.stdin_open = false;
                 try flushPendingResize(&stdout.interface, runtime, applyResizeFn, &pending_resize);
                 try stdout.interface.flush();
                 return;

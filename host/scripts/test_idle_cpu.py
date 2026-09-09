@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Linux regression: idle host CPU with detached or stalled output.
+"""Linux regression: idle host CPU with stalled output or closed control input.
 
 Run from the repository root after `(cd host && zig build)`:
     python3 host/scripts/test_idle_cpu.py host/zig-out/bin/host
@@ -110,8 +110,40 @@ for line in sys.stdin:
         assert detached_ok and blocked_ok, "idle CPU exceeded 5% of one core"
 
 
+def host_eof_cases(host, tmp, cpu_limit):
+    child = """import os, sys
+for line in sys.stdin:
+    size = os.get_terminal_size(0)
+    print(f"size={size.columns}x{size.lines}", flush=True)
+"""
+    eof_ok = True
+    for headless in (False, True):
+        path = tmp / f"eof-{headless}.sock"
+        args = [str(host), str(path)] + (["--headless"] if headless else [])
+        with process(args + ["--", sys.executable, "-u", "-c", child]) as p:
+            wait_for(path.exists)
+            if not headless:
+                p.stdin.write(b"resize 90 30\nresize 103 37\n")
+                p.stdin.flush()
+            p.stdin.close()
+            eof_ok = (
+                idle_cpu(p, f"host stdin EOF (headless={headless})", cpu_limit)
+                and eof_ok
+            )
+            with socket.socket(socket.AF_UNIX) as owner:
+                owner.connect(str(path))
+                owner.sendall(b"size\n")
+                output = recv_until(owner, b"size=")
+                if not headless:
+                    if b"size=103x37" not in output:
+                        output += recv_until(owner, b"\n")
+                    assert b"size=103x37" in output, "pending resize lost at control EOF"
+    assert eof_ok, "closed stdin keeps waking the host"
+
+
 if __name__ == "__main__":
     if len(sys.argv) != 2:
         raise SystemExit("usage: test_idle_cpu.py /path/to/host")
     with tempfile.TemporaryDirectory(prefix="host-idle-") as tmp:
         host_cases(Path(sys.argv[1]).resolve(), Path(tmp), 5.0)
+        host_eof_cases(Path(sys.argv[1]).resolve(), Path(tmp), 5.0)
