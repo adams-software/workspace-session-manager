@@ -213,6 +213,7 @@ const LogState = struct {
         var flushed: std.ArrayList(u8) = .empty;
         defer flushed.deinit(self.allocator);
         var flushed_writer = writerFromList(self.allocator, &flushed);
+        defer flushed_writer.deinit();
         logger.flushLive(&flushed_writer.writer) catch |err| {
             self.disable(io, err);
             return;
@@ -228,6 +229,7 @@ const LogState = struct {
         var flushed: std.ArrayList(u8) = .empty;
         defer flushed.deinit(self.allocator);
         var flushed_writer = writerFromList(self.allocator, &flushed);
+        defer flushed_writer.deinit();
         logger.finish(&flushed_writer.writer) catch |err| {
             self.disable(io, err);
             return;

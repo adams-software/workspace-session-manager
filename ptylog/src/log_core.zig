@@ -57,6 +57,7 @@ pub const Builder = struct {
                 var buf: std.ArrayList(u8) = .empty;
                 defer buf.deinit(self.allocator);
                 var buf_writer = writerFromList(self.allocator, &buf);
+                defer buf_writer.deinit();
                 try style_state.renderLine(&buf_writer.writer, self.pending_styled_cells.items, self.pending_styled_hyperlinks);
                 buf = buf_writer.toArrayList();
                 try buf.appendSlice(self.allocator, "\x1b[0m\n");
@@ -337,6 +338,7 @@ pub const StreamLogger = struct {
         var out: std.ArrayList(u8) = .empty;
         defer out.deinit(self.allocator);
         var out_writer = writerFromList(self.allocator, &out);
+        defer out_writer.deinit();
         try self.builder.drainTo(&out_writer.writer);
         out = out_writer.toArrayList();
         return try out.toOwnedSlice(self.allocator);
@@ -488,6 +490,7 @@ fn renderVisibleTail(allocator: std.mem.Allocator, format: OutputFormat, engine:
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(allocator);
     var out_writer = writerFromList(allocator, &out);
+    defer out_writer.deinit();
     try builder.drainTo(&out_writer.writer);
     out = out_writer.toArrayList();
     if (out.items.len > 0 and out.items[out.items.len - 1] == '\n') {
@@ -1191,6 +1194,29 @@ test "plain visible tail releases copied lines on allocation failure" {
             defer builder.deinit();
             try builder.appendVisibleTail(&engine);
             try std.testing.expectEqualStrings("alpha\nbeta\n", builder.out.items);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Scenario.run, .{});
+}
+
+test "ANSI live-tail writers release buffers after allocation failure" {
+    const Scenario = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var logger = try StreamLogger.init(allocator, .ansi, 4, 30);
+            defer logger.deinit();
+            // A long URL forces the allocating writer to grow after writing a prefix.
+            const url = "https://example/" ++ "path/" ** 128;
+            try logger.feed("\x1b]8;id=a;" ++ url ++ "\x1b\\link\x1b]8;;\x1b\\\r\n");
+            var output: [8192]u8 = undefined;
+            var writer = std.Io.Writer.fixed(&output);
+            logger.finish(&writer) catch |err| switch (err) {
+                // This fixed destination has ample space; the allocating writers
+                // report their allocation failures through WriteFailed.
+                error.WriteFailed => return error.OutOfMemory,
+                else => return err,
+            };
+            try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), url) != null);
+            try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "link") != null);
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Scenario.run, .{});
