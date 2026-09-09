@@ -26,6 +26,7 @@ const ModelSize = terminal_model_mod.ModelSize;
 const GraphemeMode = terminal_model_mod.GraphemeMode;
 
 const INPUT_READ_CHUNK = 4096;
+const INPUT_QUEUE_LIMIT = 256 * 1024;
 const OUTPUT_READ_CHUNK = 4096;
 const IO_SPIN_LIMIT = 16;
 
@@ -80,12 +81,17 @@ const TransportState = struct {
         return events;
     }
 
+    fn stdinPollFd(self: *const TransportState, stdin_fd: c_int) c_int {
+        // A negative fd also suppresses POLLHUP while the queue is full.
+        return if (self.stdin_open and self.input_tx.len() < INPUT_QUEUE_LIMIT) stdin_fd else -1;
+    }
+
     fn ingestStdin(self: *TransportState, stdin_fd: c_int) !void {
         if (!self.stdin_open) return;
 
         var spins: usize = 0;
-        while (self.stdin_open and spins < IO_SPIN_LIMIT) : (spins += 1) {
-            const status = try fd_stream.readIntoQueue(std.heap.page_allocator, stdin_fd, &self.input_tx, INPUT_READ_CHUNK);
+        while (self.stdin_open and self.input_tx.len() < INPUT_QUEUE_LIMIT and spins < IO_SPIN_LIMIT) : (spins += 1) {
+            const status = try fd_stream.readIntoQueue(std.heap.page_allocator, stdin_fd, &self.input_tx, @min(INPUT_READ_CHUNK, INPUT_QUEUE_LIMIT - self.input_tx.len()));
             switch (status) {
                 .progress => |n| {
                     if (n < INPUT_READ_CHUNK) break;
@@ -287,7 +293,7 @@ fn stepStdoutCommitted(stdout_actor: *StdoutThread, shared_model: *SharedTermina
 }
 
 fn stepInput(transport: *TransportState, session_host: *host.SessionHost, terminal: *vpty_terminal.TerminalMode, pfds: []const c.struct_pollfd) !void {
-    if (transport.stdin_open and (pfds[0].revents & c.POLLIN) != 0) {
+    if (transport.stdin_open and (pfds[0].revents & (c.POLLIN | c.POLLHUP)) != 0) {
         try transport.ingestStdin(terminal.stdin_fd);
     }
 
@@ -338,7 +344,7 @@ fn pumpUntilExit(lifecycle: *RuntimeLifecycle, session_host: *host.SessionHost, 
         lifecycle.issueTerminationIfNeeded(session_host);
 
         var pfds = [4]c.struct_pollfd{
-            .{ .fd = if (transport.stdin_open) terminal.stdin_fd else -1, .events = if (transport.stdin_open) c.POLLIN else 0, .revents = 0 },
+            .{ .fd = transport.stdinPollFd(terminal.stdin_fd), .events = c.POLLIN, .revents = 0 },
             .{ .fd = session_host.getMasterFd() orelse -1, .events = transport.ptyPollEvents(), .revents = 0 },
             .{ .fd = lifecycle.readFd(), .events = c.POLLIN, .revents = 0 },
             .{ .fd = -1, .events = 0, .revents = 0 },
@@ -639,4 +645,55 @@ test "parseArgs treats origin-only viewport flags as bounded mode" {
     try std.testing.expectEqual(@as(u16, 0), parsed.viewport.cols);
     try std.testing.expect(!parsed.viewport_intent.rows_explicit);
     try std.testing.expect(!parsed.viewport_intent.cols_explicit);
+}
+
+test "vpty input pauses at its limit and resumes without losing bytes" {
+    var fds: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.pipe(&fds));
+    defer _ = c.close(fds[0]);
+    defer _ = c.close(fds[1]);
+    try fd_stream.setNonBlocking(fds[0]);
+
+    var transport = TransportState{};
+    defer transport.deinit(std.heap.page_allocator);
+    // Leave less than one read chunk free to exercise the exact boundary.
+    const prefix = try std.testing.allocator.alloc(u8, 256 * 1024 - 3);
+    defer std.testing.allocator.free(prefix);
+    @memset(prefix, 'a');
+    try transport.input_tx.append(std.heap.page_allocator, prefix);
+    const input = "0123456789";
+    try std.testing.expectEqual(@as(isize, input.len), c.write(fds[1], input.ptr, input.len));
+    try transport.ingestStdin(fds[0]);
+    try std.testing.expectEqual(@as(usize, 256 * 1024), transport.input_tx.len());
+    try std.testing.expectEqual(@as(usize, 256 * 1024), transport.input_tx.capacity());
+    try std.testing.expectEqualStrings("012", transport.input_tx.readableSlice()[prefix.len..]);
+    try std.testing.expectEqual(@as(c_int, -1), transport.stdinPollFd(fds[0]));
+
+    // Readable stdin must not grow the queue or wake poll while the child stalls.
+    for (0..100) |_| try transport.ingestStdin(fds[0]);
+    var pollfds = [_]std.c.pollfd{.{ .fd = transport.stdinPollFd(fds[0]), .events = c.POLLIN, .revents = 0 }};
+    try std.testing.expectEqual(@as(c_int, 0), std.c.poll(&pollfds, 1, 0));
+    try std.testing.expectEqual(@as(usize, 256 * 1024), transport.input_tx.len());
+    try std.testing.expectEqual(@as(usize, 256 * 1024), transport.input_tx.capacity());
+
+    // Simulate delivery of the prefix; the remaining bytes must stay in order.
+    transport.input_tx.discard(prefix.len);
+    try std.testing.expectEqual(fds[0], transport.stdinPollFd(fds[0]));
+    try transport.ingestStdin(fds[0]);
+    try std.testing.expectEqualStrings(input, transport.input_tx.readableSlice());
+    try std.testing.expectEqual(@as(usize, 256 * 1024), transport.input_tx.capacity());
+}
+
+test "vpty input EOF disables stdin polling without discarding queued bytes" {
+    var fds: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.pipe(&fds));
+    defer _ = c.close(fds[0]);
+    _ = c.close(fds[1]);
+    var transport = TransportState{};
+    defer transport.deinit(std.heap.page_allocator);
+    try transport.input_tx.append(std.heap.page_allocator, "pending");
+    try transport.ingestStdin(fds[0]);
+    try std.testing.expectEqual(@as(c_int, -1), transport.stdinPollFd(fds[0]));
+    try std.testing.expectEqualStrings("pending", transport.input_tx.readableSlice());
+    try std.testing.expect((transport.ptyPollEvents() & c.POLLOUT) != 0);
 }
