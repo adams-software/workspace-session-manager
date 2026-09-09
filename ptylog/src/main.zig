@@ -449,14 +449,15 @@ fn run(io: std.Io, allocator: std.mem.Allocator, config: Config, lifecycle: *Run
     var stdout_tx = ByteQueue.init();
     defer stdout_tx.deinit(allocator);
 
+    const queue_limit = 256 * 1024;
     var stdin_open = true;
     var pty_open = true;
     while (true) {
         lifecycle.applyPendingResizeIfNeeded(&child, &log_state);
         lifecycle.issueTerminationIfNeeded(&child);
 
-        if (stdin_open) {
-            const stdin_status = try fd_stream.readIntoQueue(allocator, std.posix.STDIN_FILENO, &stdin_rx, io_chunk_size);
+        if (stdin_open and pty_tx.len() < queue_limit) {
+            const stdin_status = try fd_stream.readIntoQueue(allocator, std.posix.STDIN_FILENO, &stdin_rx, @min(io_chunk_size, queue_limit - pty_tx.len()));
             switch (stdin_status) {
                 .progress => {},
                 .would_block => {},
@@ -470,8 +471,8 @@ fn run(io: std.Io, allocator: std.mem.Allocator, config: Config, lifecycle: *Run
 
         _ = try fd_stream.writeFromQueue(pty_fd, &pty_tx, io_chunk_size);
 
-        if (pty_open) {
-            const pty_status = try readIntoQueuePty(allocator, pty_fd, &pty_rx, io_chunk_size);
+        if (pty_open and stdout_tx.len() < queue_limit) {
+            const pty_status = try readIntoQueuePty(allocator, pty_fd, &pty_rx, @min(io_chunk_size, queue_limit - stdout_tx.len()));
             switch (pty_status) {
                 .progress => {},
                 .would_block => {},
@@ -490,10 +491,14 @@ fn run(io: std.Io, allocator: std.mem.Allocator, config: Config, lifecycle: *Run
 
         if (!pty_open and stdout_tx.isEmpty()) break;
 
+        const read_stdin = stdin_open and pty_tx.len() < queue_limit;
+        const pty_events: c_short = @as(c_short, if (pty_open and stdout_tx.len() < queue_limit) c.POLLIN else 0) |
+            @as(c_short, if (!pty_tx.isEmpty()) c.POLLOUT else 0);
         var pfds = [_]c.struct_pollfd{
-            .{ .fd = std.posix.STDIN_FILENO, .events = if (stdin_open) c.POLLIN else 0, .revents = 0 },
-            .{ .fd = pty_fd, .events = @as(c_short, if (pty_open) c.POLLIN else 0) | (if (!pty_tx.isEmpty()) @as(c_short, c.POLLOUT) else 0), .revents = 0 },
-            .{ .fd = std.posix.STDOUT_FILENO, .events = if (!stdout_tx.isEmpty()) c.POLLOUT else 0, .revents = 0 },
+            // Negative descriptors suppress HUP/ERR wakeups while reads are paused.
+            .{ .fd = if (read_stdin) std.posix.STDIN_FILENO else -1, .events = c.POLLIN, .revents = 0 },
+            .{ .fd = if (pty_events != 0) pty_fd else -1, .events = pty_events, .revents = 0 },
+            .{ .fd = if (!stdout_tx.isEmpty()) std.posix.STDOUT_FILENO else -1, .events = c.POLLOUT, .revents = 0 },
             .{ .fd = lifecycle.readFd(), .events = c.POLLIN, .revents = 0 },
         };
         _ = c.poll(&pfds, pfds.len, 25);
