@@ -28,6 +28,7 @@ const GraphemeMode = terminal_model_mod.GraphemeMode;
 const INPUT_READ_CHUNK = 4096;
 const INPUT_QUEUE_LIMIT = 256 * 1024;
 const OUTPUT_READ_CHUNK = 4096;
+const CONTROL_HIGH_WATER = 2 * 1024 * 1024;
 const IO_SPIN_LIMIT = 16;
 
 fn parseU16Flag(flag: []const u8, value: []const u8) !u16 {
@@ -75,8 +76,8 @@ const TransportState = struct {
         if (session_host.getMasterFd()) |fd| try fd_stream.setNonBlocking(fd);
     }
 
-    fn ptyPollEvents(self: *const TransportState) c_short {
-        var events: c_short = c.POLLIN;
+    fn ptyPollEvents(self: *const TransportState, pending_controls: usize) c_short {
+        var events: c_short = if (self.output_rx.isEmpty() and pending_controls < CONTROL_HIGH_WATER) c.POLLIN else 0;
         if (!self.input_tx.isEmpty()) events |= c.POLLOUT;
         return events;
     }
@@ -131,7 +132,7 @@ const TransportState = struct {
 
     fn processOutput(self: *TransportState, shared_model: *SharedTerminalModel, render_thread: *RenderThread, forwarder: *side_effects.SideEffectForwarder, stdout_actor: *StdoutThread) !void {
         var spins: usize = 0;
-        while (!self.output_rx.isEmpty() and spins < IO_SPIN_LIMIT) : (spins += 1) {
+        while (!self.output_rx.isEmpty() and stdout_actor.pendingControlBytes() < CONTROL_HIGH_WATER and spins < IO_SPIN_LIMIT) : (spins += 1) {
             const readable = self.output_rx.readableSlice();
             const chunk_len = @min(readable.len, OUTPUT_READ_CHUNK);
             const chunk = readable[0..chunk_len];
@@ -343,9 +344,10 @@ fn pumpUntilExit(lifecycle: *RuntimeLifecycle, session_host: *host.SessionHost, 
         handleResizeIfNeeded(lifecycle, session_host, shared_model, render_thread, stdout_actor, terminal, mode, viewport, viewport_intent);
         lifecycle.issueTerminationIfNeeded(session_host);
 
+        const pty_events = transport.ptyPollEvents(stdout_actor.pendingControlBytes());
         var pfds = [4]c.struct_pollfd{
             .{ .fd = transport.stdinPollFd(terminal.stdin_fd), .events = c.POLLIN, .revents = 0 },
-            .{ .fd = session_host.getMasterFd() orelse -1, .events = transport.ptyPollEvents(), .revents = 0 },
+            .{ .fd = if (pty_events != 0) session_host.getMasterFd() orelse -1 else -1, .events = pty_events, .revents = 0 },
             .{ .fd = lifecycle.readFd(), .events = c.POLLIN, .revents = 0 },
             .{ .fd = -1, .events = 0, .revents = 0 },
         };
@@ -695,5 +697,67 @@ test "vpty input EOF disables stdin polling without discarding queued bytes" {
     try transport.ingestStdin(fds[0]);
     try std.testing.expectEqual(@as(c_int, -1), transport.stdinPollFd(fds[0]));
     try std.testing.expectEqualStrings("pending", transport.input_tx.readableSlice());
-    try std.testing.expect((transport.ptyPollEvents() & c.POLLOUT) != 0);
+    try std.testing.expect((transport.ptyPollEvents(0) & c.POLLOUT) != 0);
+}
+
+test "vpty output backpressure preserves input polling and drains buffered output first" {
+    var transport = TransportState{};
+    defer transport.deinit(std.heap.page_allocator);
+    try std.testing.expect((transport.ptyPollEvents(0) & c.POLLIN) != 0);
+    try std.testing.expectEqual(@as(c_short, 0), transport.ptyPollEvents(2 * 1024 * 1024));
+    try transport.input_tx.append(std.heap.page_allocator, "input");
+    try std.testing.expectEqual(@as(c_short, c.POLLOUT), transport.ptyPollEvents(2 * 1024 * 1024));
+    try transport.output_rx.append(std.heap.page_allocator, "output");
+    try std.testing.expectEqual(@as(c_short, c.POLLOUT), transport.ptyPollEvents(0));
+    transport.output_rx.clear();
+    try std.testing.expectEqual(@as(c_short, c.POLLIN | c.POLLOUT), transport.ptyPollEvents(0));
+}
+
+test "vpty output parsing pauses at control high water and resumes in order" {
+    var transport = TransportState{};
+    defer transport.deinit(std.heap.page_allocator);
+    var stdout_actor = StdoutThread.init(std.testing.allocator, {});
+    defer stdout_actor.deinit();
+    var shared_model = SharedTerminalModel.init({}, try TerminalModel.init(24, 80));
+    defer shared_model.model.deinit();
+    var render_thread = RenderThread.init(std.testing.allocator, &shared_model, &stdout_actor, .{ .origin_row = 1, .origin_col = 1, .rows = 24, .cols = 80 });
+    defer render_thread.deinit();
+    var forwarder = side_effects.SideEffectForwarder.init(std.testing.allocator);
+    defer forwarder.deinit();
+
+    // One parsed chunk crosses the threshold; all later chunks must wait.
+    const queued = try std.testing.allocator.alloc(u8, 2 * 1024 * 1024 - 1);
+    defer std.testing.allocator.free(queued);
+    @memset(queued, 'x');
+    try stdout_actor.enqueueControl(.{ .bytes = queued });
+    const control = "\x1b[?2004h";
+    for (0..1024) |_| try transport.output_rx.append(std.heap.page_allocator, control);
+    try transport.processOutput(&shared_model, &render_thread, &forwarder, &stdout_actor);
+    try std.testing.expectEqual(@as(usize, 4096), transport.output_rx.len());
+    try std.testing.expectEqual(queued.len + 4096, stdout_actor.pendingControlBytes());
+    for (0..100) |_| try transport.processOutput(&shared_model, &render_thread, &forwarder, &stdout_actor);
+    try std.testing.expectEqual(@as(usize, 4096), transport.output_rx.len());
+    try std.testing.expectEqual(queued.len + 4096, stdout_actor.pendingControlBytes());
+
+    // Consume the mailbox as stdout would, then let the remaining chunk parse.
+    var count: usize = 0;
+    while (stdout_actor.control_queue.pop()) |chunk| {
+        defer std.testing.allocator.free(chunk.bytes);
+        try std.testing.expectEqualStrings(if (count == 0) queued else control, chunk.bytes);
+        _ = stdout_actor.shared.pending_control_bytes.fetchSub(chunk.bytes.len, .seq_cst);
+        count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 513), count);
+    try transport.processOutput(&shared_model, &render_thread, &forwarder, &stdout_actor);
+    try std.testing.expect(transport.output_rx.isEmpty());
+    try std.testing.expectEqual(@as(usize, 4096), stdout_actor.pendingControlBytes());
+    count = 0;
+    while (stdout_actor.control_queue.pop()) |chunk| {
+        defer std.testing.allocator.free(chunk.bytes);
+        try std.testing.expectEqualStrings(control, chunk.bytes);
+        _ = stdout_actor.shared.pending_control_bytes.fetchSub(chunk.bytes.len, .seq_cst);
+        count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 512), count);
+    try std.testing.expectEqual(@as(usize, 0), stdout_actor.pendingControlBytes());
 }

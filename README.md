@@ -173,6 +173,8 @@ Terminal integration and rendering layer.
 
 Holds the PTY / terminal-state / rendering work needed for interactive sessions. Pending input is capped at 256 KiB; vpty pauses reading stdin until the child accepts queued bytes, preserving input order without dropping data.
 
+When pending terminal controls reach 2 MiB, vpty pauses PTY reads and parsing until stdout drains below that threshold. The current parser chunk can cross the threshold, including completion of a buffered OSC sequence.
+
 The terminal control parser limits complete OSC sequences to 1 MiB and CSI sequences to 4 KiB, including delimiters. Oversized sequences are discarded through their terminator so their payload does not appear as screen text. This includes OSC 52 clipboard transfers whose encoded sequence exceeds 1 MiB.
 
 ### `ptylog/`
