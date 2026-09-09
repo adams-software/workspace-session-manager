@@ -110,8 +110,10 @@ pub const StdoutThread = struct {
     pub fn enqueueControl(self: *StdoutThread, chunk: actor_mailboxes.ControlChunk) !void {
         const owned = try self.allocator.dupe(u8, chunk.bytes);
         errdefer self.allocator.free(owned);
-        try self.control_queue.push(.{ .bytes = owned });
+        // Account before publication: the consumer may immediately drain the chunk.
         _ = self.shared.pending_control_bytes.fetchAdd(owned.len, .seq_cst);
+        errdefer _ = self.shared.pending_control_bytes.fetchSub(owned.len, .seq_cst);
+        try self.control_queue.push(.{ .bytes = owned });
         self.wake();
     }
 
@@ -275,3 +277,64 @@ pub const StdoutThread = struct {
         self.render_mutex.unlock();
     }
 };
+
+test "control byte accounting precedes mailbox publication" {
+    const ObservingAllocator = struct {
+        owner: *StdoutThread,
+        observed: ?usize = null,
+
+        fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            // Mailbox growth happens inside push, before the item becomes visible.
+            self.observed = self.owner.pendingControlBytes();
+            return std.testing.allocator.rawAlloc(len, alignment, ret_addr);
+        }
+
+        fn free(_: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+            std.testing.allocator.rawFree(bytes, alignment, ret_addr);
+        }
+    };
+    var worker = StdoutThread.init(std.testing.allocator, {});
+    defer worker.deinit();
+    var observer = ObservingAllocator{ .owner = &worker };
+    worker.control_queue.allocator = .{ .ptr = &observer, .vtable = &.{
+        .alloc = ObservingAllocator.alloc,
+        .resize = std.mem.Allocator.noResize,
+        .remap = std.mem.Allocator.noRemap,
+        .free = ObservingAllocator.free,
+    } };
+    var bytes = "control".*;
+    try worker.enqueueControl(.{ .bytes = &bytes });
+    try std.testing.expectEqual(@as(?usize, bytes.len), observer.observed);
+    const chunk = worker.control_queue.pop().?;
+    defer std.testing.allocator.free(chunk.bytes);
+    const before = worker.shared.pending_control_bytes.fetchSub(chunk.bytes.len, .seq_cst);
+    try std.testing.expectEqual(bytes.len, before);
+    try std.testing.expectEqual(@as(usize, 0), worker.pendingControlBytes());
+}
+
+test "failed control publication restores pending byte accounting" {
+    const Scenario = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var worker = StdoutThread.init(allocator, {});
+            defer worker.deinit();
+            var bytes = "control".*;
+            worker.enqueueControl(.{ .bytes = &bytes }) catch |err| {
+                try std.testing.expectEqual(@as(usize, 0), worker.pendingControlBytes());
+                try std.testing.expectEqual(@as(usize, 0), worker.control_queue.len());
+                return err;
+            };
+            try std.testing.expectEqual(bytes.len, worker.pendingControlBytes());
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Scenario.run, .{});
+
+    var worker = StdoutThread.init(std.testing.allocator, {});
+    defer worker.deinit();
+    var bytes = "queued".*;
+    try worker.enqueueControl(.{ .bytes = &bytes });
+    worker.control_queue.close();
+    try std.testing.expectError(error.Closed, worker.enqueueControl(.{ .bytes = &bytes }));
+    try std.testing.expectEqual(bytes.len, worker.pendingControlBytes());
+    try std.testing.expectEqual(@as(usize, 1), worker.control_queue.len());
+}
