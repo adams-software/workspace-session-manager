@@ -28,6 +28,7 @@ pub const SessionLink = struct {
     pump: DuplexLink,
     data_fd: ?c_int,
     control_fd: ?c_int,
+    data_eof: bool = false,
 
     pub fn init(allocator: std.mem.Allocator) SessionLink {
         return .{
@@ -59,12 +60,14 @@ pub const SessionLink = struct {
         }
 
         self.data_fd = data_fd;
+        self.data_eof = false;
         self.control_fd = control_fd;
         self.pump.clear();
         if (self.control_fd) |fd| drainControl(fd);
     }
 
     pub fn detach(self: *SessionLink) void {
+        self.data_eof = false;
         if (self.data_fd) |fd| {
             _ = c.close(fd);
             self.data_fd = null;
@@ -77,7 +80,7 @@ pub const SessionLink = struct {
     }
 
     pub fn dataPollFd(self: *const SessionLink) ?c_int {
-        return self.data_fd;
+        return if (self.data_eof) null else self.data_fd;
     }
 
     pub fn hasPendingOutput(self: *const SessionLink) bool {
@@ -91,8 +94,13 @@ pub const SessionLink = struct {
 
     pub fn pumpDataToOutput(self: *SessionLink, output_fd: c_int) !PumpResult {
         const data_fd = self.data_fd orelse return .{ .stream_lost = false, .did_work = false };
+        if (self.data_eof) {
+            const did_work = try self.pump.flushRightToLeft(output_fd);
+            return .{ .stream_lost = !self.hasPendingOutput(), .did_work = did_work };
+        }
         const result = try self.pump.pump(output_fd, data_fd);
-        return .{ .stream_lost = result.right_eof, .did_work = result.did_work };
+        self.data_eof = result.right_eof;
+        return .{ .stream_lost = self.data_eof and !self.hasPendingOutput(), .did_work = result.did_work };
     }
 
     pub fn resize(self: *SessionLink, cols: u16, rows: u16) !void {
@@ -164,4 +172,59 @@ fn connectUnix(path: []const u8) !c_int {
 
     try fd_stream.setNonBlocking(fd);
     return fd;
+}
+
+test "session EOF waits for blocked terminal output to drain" {
+    var data: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(c.AF_UNIX, c.SOCK_STREAM | c.SOCK_NONBLOCK, 0, &data));
+    var link = SessionLink.init(std.testing.allocator);
+    defer link.deinit();
+    link.data_fd = data[1];
+    const final_output = "final session output";
+    const sent = c.write(data[0], final_output.ptr, final_output.len);
+    _ = c.close(data[0]);
+    try std.testing.expectEqual(@as(isize, final_output.len), sent);
+
+    var output: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe2(&output, .{ .NONBLOCK = true, .CLOEXEC = true }));
+    defer _ = c.close(output[0]);
+    defer _ = c.close(output[1]);
+    const padding: [4096]u8 = @splat('x');
+    while (c.write(output[1], &padding, padding.len) > 0) {}
+    try std.testing.expectEqual(std.posix.E.AGAIN, std.posix.errno(-1));
+
+    const first = try link.pumpDataToOutput(output[1]);
+    try std.testing.expect(first.did_work);
+    try std.testing.expect(!first.stream_lost);
+    try std.testing.expect(link.hasPendingOutput());
+    try std.testing.expect(link.dataPollFd() == null);
+    // Repeated pumping must retain bytes without repeatedly reading the EOF fd.
+    for (0..10) |_| {
+        const stalled = try link.pumpDataToOutput(output[1]);
+        try std.testing.expect(!stalled.stream_lost and !stalled.did_work);
+        try std.testing.expectEqualStrings(final_output, link.pump.right_to_left.readableSlice());
+    }
+    var drain: [4096]u8 = undefined;
+    while (c.read(output[0], &drain, drain.len) > 0) {}
+    const last = try link.pumpDataToOutput(output[1]);
+    try std.testing.expect(last.did_work and last.stream_lost);
+    try std.testing.expect(!link.hasPendingOutput());
+    var received: [final_output.len]u8 = undefined;
+    try std.testing.expectEqual(@as(isize, received.len), c.read(output[0], &received, received.len));
+    try std.testing.expectEqualStrings(final_output, &received);
+    link.detach();
+    try std.testing.expect(!link.data_eof);
+}
+
+test "session EOF without pending output reports stream loss immediately" {
+    var data: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(c.AF_UNIX, c.SOCK_STREAM | c.SOCK_NONBLOCK, 0, &data));
+    var link = SessionLink.init(std.testing.allocator);
+    defer link.deinit();
+    link.data_fd = data[1];
+    _ = c.close(data[0]);
+    const result = try link.pumpDataToOutput(-1); // No output write is needed.
+    try std.testing.expect(result.stream_lost);
+    try std.testing.expect(!result.did_work);
+    try std.testing.expect(link.dataPollFd() == null);
 }

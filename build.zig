@@ -518,7 +518,21 @@ pub fn build(b: *std.Build) void {
     const test_worker_start_step = b.step("test-worker-start", "Run worker startup failure tests");
     test_worker_start_step.dependOn(&run_worker_start_tests.step);
 
+    const session_link_test_root = b.createModule(.{
+        .root_source_file = b.path("wsm/src/session_link.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    session_link_test_root.addImport("duplex_link", duplex_link_mod);
+    session_link_test_root.addImport("fd_stream", fd_stream_mod);
+    const session_link_tests = b.addTest(.{ .root_module = session_link_test_root });
+    const run_session_link_tests = b.addRunArtifact(session_link_tests);
+    const test_session_link_step = b.step("test-session-link", "Run session output EOF tests");
+    test_session_link_step.dependOn(&run_session_link_tests.step);
+
     const test_step = b.step("test", "Run workspace tests");
+    test_step.dependOn(&run_session_link_tests.step);
     test_step.dependOn(&run_worker_start_tests.step);
     test_step.dependOn(&run_vpty_output_tests.step);
     test_step.dependOn(&run_vpty_input_tests.step);
