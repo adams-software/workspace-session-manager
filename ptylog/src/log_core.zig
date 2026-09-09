@@ -142,6 +142,7 @@ pub const Builder = struct {
 
                 for (snapshot.lines) |line| {
                     const text = try cellSliceToUtf8(self.allocator, line.cells);
+                    errdefer self.allocator.free(text);
                     try tail_lines.append(self.allocator, text);
                 }
 
@@ -1175,6 +1176,21 @@ test "hyperlink copies own their strings and clean up every partial allocation" 
             }
             uri[0] = 'H';
             try std.testing.expectEqualStrings("https://one", builder.pending_styled_hyperlinks[0].uri);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Scenario.run, .{});
+}
+
+test "plain visible tail releases copied lines on allocation failure" {
+    const Scenario = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var engine = try term_engine.Engine.init(allocator, 4, 16);
+            defer engine.deinit();
+            try engine.feed("alpha\r\nbeta");
+            var builder = Builder.init(allocator, .plain);
+            defer builder.deinit();
+            try builder.appendVisibleTail(&engine);
+            try std.testing.expectEqualStrings("alpha\nbeta\n", builder.out.items);
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Scenario.run, .{});
