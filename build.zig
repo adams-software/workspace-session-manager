@@ -499,7 +499,13 @@ pub fn build(b: *std.Build) void {
     const test_vpty_input_step = b.step("test-vpty-input", "Run vpty input backpressure tests");
     test_vpty_input_step.dependOn(&run_vpty_input_tests.step);
 
+    const vpty_output_tests = b.addTest(.{ .root_module = vpty_root, .filters = &.{"vpty output"} });
+    const run_vpty_output_tests = b.addRunArtifact(vpty_output_tests);
+    const test_vpty_output_step = b.step("test-vpty-output", "Run vpty output backpressure tests");
+    test_vpty_output_step.dependOn(&run_vpty_output_tests.step);
+
     const test_step = b.step("test", "Run workspace tests");
+    test_step.dependOn(&run_vpty_output_tests.step);
     test_step.dependOn(&run_vpty_input_tests.step);
     test_step.dependOn(&run_side_effect_tests.step);
     test_step.dependOn(&run_stdout_thread_tests.step);
