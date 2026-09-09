@@ -82,10 +82,12 @@ pub const Engine = struct {
         while (true) {
             var raw: c.msr_vterm_history_event = undefined;
             if (c.msr_vterm_next_history_event(handle, &raw) == 0) break;
+            defer c.msr_vterm_free_history_event(&raw);
             switch (raw.kind) {
                 c.MSR_VTERM_HISTORY_LINE_COMMITTED => {
                     const cols: usize = @intCast(raw.cols);
                     const cells = try self.allocator.alloc(screen_types.HostScreenCell, cols);
+                    errdefer self.allocator.free(cells);
                     for (0..cols) |i| {
                         const src = raw.cells[i];
                         var chars: [6]u32 = [_]u32{0} ** 6;
@@ -170,4 +172,31 @@ test "engine committed-line events preserve bold promoted ansi provenance" {
     try std.testing.expectEqual(@as(u8, 12), fg.palette_index);
     try std.testing.expectEqual(screen_types.HostAnsiClass.classic_low, fg.ansi_class);
     try std.testing.expect(fg.promoted_by_bold);
+}
+
+test "history ownership preserves copied cells across repeated scroll batches" {
+    var engine = try Engine.init(std.testing.allocator, 2, 10);
+    defer engine.deinit();
+    for (0..64) |_| {
+        try engine.feed("line\r\n" ** 16);
+        try std.testing.expect(engine.event_queue.items.len > 0);
+        for (engine.event_queue.items) |event| {
+            const line = event.line_committed.line;
+            try std.testing.expectEqual(@as(u32, 'l'), line.cells[0].chars[0]);
+            try std.testing.expectEqual(@as(u32, 'e'), line.cells[3].chars[0]);
+        }
+        engine.clearEvents();
+    }
+}
+
+test "history ownership survives allocation failures while draining a batch" {
+    const Scenario = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var engine = try Engine.init(allocator, 2, 10);
+            defer engine.deinit();
+            try engine.feed("line\r\n" ** 16);
+            engine.clearEvents();
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Scenario.run, .{});
 }

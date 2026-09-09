@@ -105,7 +105,9 @@ int msr_vterm_row_is_eol(msr_vterm_handle *handle, int row);
 const char *msr_vterm_get_hyperlink_uri(msr_vterm_handle *handle, uint32_t hyperlink_handle, size_t *len);
 const char *msr_vterm_get_hyperlink_params(msr_vterm_handle *handle, uint32_t hyperlink_handle, size_t *len);
 void msr_vterm_enable_history_events(msr_vterm_handle *handle, int enable);
+/* On success, transfers ownership of out->cells to the caller. */
 int msr_vterm_next_history_event(msr_vterm_handle *handle, msr_vterm_history_event *out);
+void msr_vterm_free_history_event(msr_vterm_history_event *event);
 
 #ifdef __cplusplus
 }
