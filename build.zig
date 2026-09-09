@@ -484,7 +484,13 @@ pub fn build(b: *std.Build) void {
     const test_stdout_actor_step = b.step("test-stdout-actor", "Run stdout buffer tests");
     test_stdout_actor_step.dependOn(&run_stdout_actor_tests.step);
 
+    const stdout_thread_tests = b.addTest(.{ .root_module = stdout_thread_mod });
+    const run_stdout_thread_tests = b.addRunArtifact(stdout_thread_tests);
+    const test_stdout_thread_step = b.step("test-stdout-thread", "Run stdout thread accounting tests");
+    test_stdout_thread_step.dependOn(&run_stdout_thread_tests.step);
+
     const test_step = b.step("test", "Run workspace tests");
+    test_step.dependOn(&run_stdout_thread_tests.step);
     test_step.dependOn(&run_stdout_actor_tests.step);
     test_step.dependOn(&run_wake_pipe_tests.step);
     test_step.dependOn(&run_history_tests.step);
