@@ -451,6 +451,16 @@ pub fn build(b: *std.Build) void {
 
     const terminal_state_vterm_tests = b.addTest(.{ .root_module = term_engine_mod });
 
+    const history_test_root = b.createModule(.{
+        .root_source_file = b.path("term_engine/src/engine.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    addVendoredLibvterm(history_test_root, b);
+    const history_tests = b.addTest(.{ .root_module = history_test_root, .filters = &.{"history ownership"} });
+    const run_history_tests = b.addRunArtifact(history_tests);
+
     // Test runners and aliases
     const run_terminal_state_vterm_tests = b.addRunArtifact(terminal_state_vterm_tests);
     const run_byte_queue_tests = b.addRunArtifact(byte_queue_tests);
@@ -465,6 +475,7 @@ pub fn build(b: *std.Build) void {
     const run_ptylog_log_core_tests = b.addRunArtifact(ptylog_log_core_tests);
 
     const test_step = b.step("test", "Run workspace tests");
+    test_step.dependOn(&run_history_tests.step);
     test_step.dependOn(&run_byte_queue_tests.step);
     test_step.dependOn(&run_fd_stream_tests.step);
     test_step.dependOn(&run_host_tests.step);
@@ -478,6 +489,12 @@ pub fn build(b: *std.Build) void {
 
     const test_terminal_state_vterm_step = b.step("test-vterm", "Run libvterm adapter tests");
     test_terminal_state_vterm_step.dependOn(&run_terminal_state_vterm_tests.step);
+
+    // Zig's testing allocator cannot detect leaked C history-event buffers.
+    const history_leaks = b.addSystemCommand(&.{ "valgrind", "--leak-check=full", "--show-leak-kinds=all", "--errors-for-leak-kinds=all", "--error-exitcode=1" });
+    history_leaks.addArtifactArg(history_tests);
+    const history_leaks_step = b.step("test-history-leaks", "Run history ownership tests under Valgrind (use -Doptimize=ReleaseSafe)");
+    history_leaks_step.dependOn(&history_leaks.step);
 
     const test_host_step = b.step("test-host", "Run host module tests");
     test_host_step.dependOn(&run_host_tests.step);

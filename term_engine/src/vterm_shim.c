@@ -405,3 +405,9 @@ int msr_vterm_next_history_event(msr_vterm_handle *handle, msr_vterm_history_eve
   handle->history_events_len -= 1;
   return 1;
 }
+
+void msr_vterm_free_history_event(msr_vterm_history_event *event) {
+  if (!event) return;
+  free(event->cells);
+  event->cells = NULL;
+}
