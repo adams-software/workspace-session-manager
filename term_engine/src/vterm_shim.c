@@ -83,43 +83,78 @@ static msr_vterm_color convert_color(VTermColor color, uint8_t ansi_class, uint8
   return out;
 }
 
-// Hyperlink records are currently interned for the lifetime of the adapter.
-// This is acceptable for now, but a long-lived session with many unique URLs
-// will grow the table until teardown.
+// Bounded, generation-checked metadata cache. Expired cells lose their link,
+// never acquire another cell's URL. Snapshot metadata owns separate copies.
+static uint32_t hyperlink_hash(const char *params, size_t params_len, const char *uri, size_t uri_len) {
+  uint32_t hash = 2166136261u;
+  for (size_t i = 0; i < params_len; i++) hash = (hash ^ (unsigned char)params[i]) * 16777619u;
+  hash = (hash ^ 0xffu) * 16777619u;
+  for (size_t i = 0; i < uri_len; i++) hash = (hash ^ (unsigned char)uri[i]) * 16777619u;
+  return hash;
+}
+
+static msr_vterm_hyperlink_record *find_hyperlink(msr_vterm_handle *h, uint32_t id) {
+  if (!h || !h->hyperlinks || !id) return NULL;
+  msr_vterm_hyperlink_record *link = &h->hyperlinks[(id - 1) % MSR_HYPERLINK_SLOTS];
+  return link->id == id ? link : NULL;
+}
+
+static void evict_hyperlink(msr_vterm_handle *h, uint32_t id) {
+  msr_vterm_hyperlink_record *link = find_hyperlink(h, id);
+  if (!link) return;
+  uint32_t *entry = &h->hyperlink_buckets[link->hash % MSR_HYPERLINK_BUCKETS];
+  while (*entry && *entry != id) {
+    msr_vterm_hyperlink_record *prev = find_hyperlink(h, *entry);
+    if (!prev) break;
+    entry = &prev->next;
+  }
+  if (*entry == id) *entry = link->next;
+  h->hyperlink_bytes -= link->params_len + link->uri_len + 2;
+  free(link->params);
+  free(link->uri);
+  memset(link, 0, sizeof(*link));
+}
+
 static uint32_t intern_hyperlink(msr_vterm_handle *h, const char *params, size_t params_len, const char *uri, size_t uri_len) {
   if (!h || !uri || uri_len == 0) return 0;
-
-  for (size_t i = 0; i < h->hyperlinks_len; i++) {
-    if (h->hyperlinks[i].params_len == params_len && h->hyperlinks[i].uri_len == uri_len &&
-        memcmp(h->hyperlinks[i].params, params, params_len) == 0 &&
-        memcmp(h->hyperlinks[i].uri, uri, uri_len) == 0) {
-      return (uint32_t)(i + 1);
-    }
+  if (params_len > MSR_HYPERLINK_BYTES - 2 || uri_len > MSR_HYPERLINK_BYTES - 2 - params_len) return 0;
+  uint32_t hash = hyperlink_hash(params, params_len, uri, uri_len);
+  size_t bucket = hash % MSR_HYPERLINK_BUCKETS;
+  for (uint32_t id = h->hyperlink_buckets[bucket]; id;) {
+    msr_vterm_hyperlink_record *link = find_hyperlink(h, id);
+    if (!link) break;
+    if (link->hash == hash && link->params_len == params_len && link->uri_len == uri_len &&
+        memcmp(link->params, params, params_len) == 0 && memcmp(link->uri, uri, uri_len) == 0) return id;
+    id = link->next;
   }
 
-  if (h->hyperlinks_len == h->hyperlinks_cap) {
-    size_t next_cap = h->hyperlinks_cap ? h->hyperlinks_cap * 2 : 8;
-    msr_vterm_hyperlink_record *next = (msr_vterm_hyperlink_record *)realloc(
-        h->hyperlinks, next_cap * sizeof(msr_vterm_hyperlink_record));
-    if (!next) return 0;
-    h->hyperlinks = next;
-    h->hyperlinks_cap = next_cap;
+  // libvterm stores URI handles in a signed int. Never wrap/reuse an ID.
+  if (h->next_hyperlink_id >= INT32_MAX) return 0;
+  if (!h->hyperlinks) {
+    h->hyperlinks = calloc(MSR_HYPERLINK_SLOTS, sizeof(*h->hyperlinks));
+    if (!h->hyperlinks) return 0;
+    h->hyperlinks_len = h->hyperlinks_cap = MSR_HYPERLINK_SLOTS;
+    h->oldest_hyperlink_id = 1;
   }
-
   char *params_copy = dup_bytes(params, params_len);
   if (!params_copy) return 0;
   char *uri_copy = dup_bytes(uri, uri_len);
-  if (!uri_copy) {
-    free(params_copy);
-    return 0;
-  }
+  if (!uri_copy) { free(params_copy); return 0; }
 
-  h->hyperlinks[h->hyperlinks_len].params = params_copy;
-  h->hyperlinks[h->hyperlinks_len].params_len = params_len;
-  h->hyperlinks[h->hyperlinks_len].uri = uri_copy;
-  h->hyperlinks[h->hyperlinks_len].uri_len = uri_len;
-  h->hyperlinks_len += 1;
-  return (uint32_t)h->hyperlinks_len;
+  uint32_t id = ++h->next_hyperlink_id;
+  while (h->oldest_hyperlink_id < id &&
+         (id - h->oldest_hyperlink_id >= MSR_HYPERLINK_SLOTS ||
+          h->hyperlink_bytes + params_len + uri_len + 2 > MSR_HYPERLINK_BYTES)) {
+    evict_hyperlink(h, h->oldest_hyperlink_id++);
+  }
+  msr_vterm_hyperlink_record *link = &h->hyperlinks[(id - 1) % MSR_HYPERLINK_SLOTS];
+  *link = (msr_vterm_hyperlink_record){
+    .id = id, .next = h->hyperlink_buckets[bucket], .hash = hash,
+    .params = params_copy, .params_len = params_len, .uri = uri_copy, .uri_len = uri_len,
+  };
+  h->hyperlink_buckets[bucket] = id;
+  h->hyperlink_bytes += params_len + uri_len + 2;
+  return id;
 }
 
 static void apply_osc8(msr_vterm_handle *h) {
@@ -140,7 +175,6 @@ static void apply_osc8(msr_vterm_handle *h) {
     value.number = 0;
   } else {
     uint32_t handle = intern_hyperlink(h, params, params_len, uri, uri_len);
-    if (handle == 0) return;
     value.number = (int)handle;
   }
 
@@ -379,22 +413,20 @@ int msr_vterm_row_is_eol(msr_vterm_handle *handle, int row) {
   return vterm_screen_is_eol(handle->screen, pos);
 }
 
-const char *msr_vterm_get_hyperlink_uri(msr_vterm_handle *handle, uint32_t hyperlink_handle, size_t *len) {
+const char *msr_vterm_get_hyperlink_uri(msr_vterm_handle *handle, uint32_t id, size_t *len) {
   if (len) *len = 0;
-  if (!handle || hyperlink_handle == 0) return NULL;
-  size_t idx = (size_t)hyperlink_handle - 1;
-  if (idx >= handle->hyperlinks_len) return NULL;
-  if (len) *len = handle->hyperlinks[idx].uri_len;
-  return handle->hyperlinks[idx].uri;
+  msr_vterm_hyperlink_record *link = find_hyperlink(handle, id);
+  if (!link) return NULL;
+  if (len) *len = link->uri_len;
+  return link->uri;
 }
 
-const char *msr_vterm_get_hyperlink_params(msr_vterm_handle *handle, uint32_t hyperlink_handle, size_t *len) {
+const char *msr_vterm_get_hyperlink_params(msr_vterm_handle *handle, uint32_t id, size_t *len) {
   if (len) *len = 0;
-  if (!handle || hyperlink_handle == 0) return NULL;
-  size_t idx = (size_t)hyperlink_handle - 1;
-  if (idx >= handle->hyperlinks_len) return NULL;
-  if (len) *len = handle->hyperlinks[idx].params_len;
-  return handle->hyperlinks[idx].params;
+  msr_vterm_hyperlink_record *link = find_hyperlink(handle, id);
+  if (!link) return NULL;
+  if (len) *len = link->params_len;
+  return link->params;
 }
 
 void msr_vterm_enable_history_events(msr_vterm_handle *handle, int enable) {
