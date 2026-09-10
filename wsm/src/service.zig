@@ -46,6 +46,14 @@ pub const AttachedSession = struct {
         return self.link.dataPollFd();
     }
 
+    pub fn dataPollEvents(self: *const AttachedSession) c_short {
+        return self.link.dataPollEvents();
+    }
+
+    pub fn canAcceptInput(self: *const AttachedSession, byte_count: usize) bool {
+        return self.link.canAcceptInput(byte_count);
+    }
+
     pub fn writeInput(self: *AttachedSession, bytes: []const u8) !void {
         try self.link.writeInput(bytes);
     }

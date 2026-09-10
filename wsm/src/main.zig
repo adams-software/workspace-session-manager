@@ -495,16 +495,17 @@ fn runInteractive(allocator: std.mem.Allocator, mode: cli_main.Mode) !void {
             };
         }
 
-        var tty_events: c_short = c.POLLIN;
+        const read_tty = app.bar_state.mode != .passive or app.executor.canAcceptAttachedInput(tty_buf.len);
+        var tty_events: c_short = if (read_tty) c.POLLIN else 0;
         if (app.executor.hasPendingAttachedOutput()) tty_events |= c.POLLOUT;
 
         var pfds: [2]c.struct_pollfd = .{
-            .{ .fd = term.tty_fd, .events = tty_events, .revents = 0 },
+            .{ .fd = if (tty_events != 0) term.tty_fd else -1, .events = tty_events, .revents = 0 },
             .{ .fd = -1, .events = 0, .revents = 0 },
         };
         var nfds: c.nfds_t = 1;
         if (app.executor.attachedDataFd()) |data_fd| {
-            pfds[1] = .{ .fd = data_fd, .events = c.POLLIN, .revents = 0 };
+            pfds[1] = .{ .fd = data_fd, .events = app.executor.attachedPollEvents(), .revents = 0 };
             nfds = 2;
         }
 
@@ -542,7 +543,7 @@ fn runInteractive(allocator: std.mem.Allocator, mode: cli_main.Mode) !void {
                 std.debug.print("wsm attached data POLLNVAL fd={d}\n", .{pfds[1].fd});
                 return Error.Unexpected;
             }
-            if ((rev & (c.POLLHUP | c.POLLERR | c.POLLIN)) != 0) {
+            if ((rev & (c.POLLHUP | c.POLLERR | c.POLLIN | c.POLLOUT)) != 0) {
                 try pumpAttachedOutputOrExit(&app, allocator, &term);
             }
         }

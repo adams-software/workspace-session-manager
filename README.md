@@ -161,7 +161,7 @@ If you want the lower-level tools directly, they still exist in the repo and bui
 ### `wsm/`
 Workspace session manager.
 
-The main user-facing entrypoint for workspace-wide naming, lookup, and navigation. While attached, WSM queues at most 256 KiB of session output and pauses socket reads until the terminal drains that queue.
+The main user-facing entrypoint for workspace-wide naming, lookup, and navigation. While attached, WSM queues at most 256 KiB in each direction. It pauses socket reads when session output fills its queue and pauses terminal input reads when pending input fills its queue. Reads resume as the receiving side accepts data.
 
 ### `host/`
 Generic session host runtime package (exports the internal `host` helper).

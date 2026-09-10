@@ -114,6 +114,14 @@ pub const Executor = struct {
         return null;
     }
 
+    pub fn attachedPollEvents(self: *const Executor) c_short {
+        return if (self.link) |*link| link.dataPollEvents() else 0;
+    }
+
+    pub fn canAcceptAttachedInput(self: *const Executor, byte_count: usize) bool {
+        return if (self.link) |*link| link.canAcceptInput(byte_count) else true;
+    }
+
     pub fn hasPendingAttachedOutput(self: *const Executor) bool {
         if (self.link) |*link| return link.hasPendingOutput();
         return false;
