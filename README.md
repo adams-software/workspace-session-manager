@@ -177,6 +177,8 @@ At shutdown, vpty gives stdout a 250 ms window to drain pending output before ab
 
 When pending terminal controls reach 2 MiB, vpty pauses PTY reads and parsing until stdout drains below that threshold. The current parser chunk can cross the threshold, including completion of a buffered OSC sequence.
 
+Hyperlink metadata is cached up to 1,024 records and 1 MiB of URL/parameter text. Older entries expire when either limit is reached, so older text can lose clickability; expired link IDs never resolve to a different URL. Existing snapshots retain their own metadata copies.
+
 The terminal control parser limits complete OSC sequences to 1 MiB and CSI sequences to 4 KiB, including delimiters. Oversized sequences are discarded through their terminator so their payload does not appear as screen text. This includes OSC 52 clipboard transfers whose encoded sequence exceeds 1 MiB.
 
 ### `ptylog/`

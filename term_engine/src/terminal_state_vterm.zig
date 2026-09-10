@@ -314,3 +314,62 @@ test "snapshot preserves bold promoted classic-low provenance" {
     try std.testing.expectEqual(screen_types.HostAnsiClass.classic_low, fg.ansi_class);
     try std.testing.expect(fg.promoted_by_bold);
 }
+
+test "hyperlink cache expires stale handles without aliasing and snapshots keep ownership" {
+    var adapter = try VTermAdapter.init(2, 20);
+    defer adapter.deinit();
+    adapter.feed("\x1b]8;;https://old.example\x1b\\old\x1b]8;;\x1b\\");
+    var old = try adapter.snapshot(std.testing.allocator);
+    defer screen_types.freeScreenSnapshot(std.testing.allocator, &old);
+    for (0..c.MSR_HYPERLINK_SLOTS + 10) |i| {
+        var buf: [128]u8 = undefined;
+        adapter.feed(try std.fmt.bufPrint(&buf, "\x1b[2;1H\x1b]8;;https://new/{d}\x1b\\new\x1b]8;;\x1b\\", .{i}));
+    }
+    var current = try adapter.snapshot(std.testing.allocator);
+    defer screen_types.freeScreenSnapshot(std.testing.allocator, &current);
+    try std.testing.expectEqual(@as(u32, 0), current.lines[0].cells[0].hyperlink);
+    try std.testing.expectEqual(@as(usize, 1), current.hyperlinks.len);
+    try std.testing.expectEqualStrings("https://old.example", old.hyperlinks[0].uri);
+    try std.testing.expect(adapter.handle.?.hyperlink_bytes <= c.MSR_HYPERLINK_BYTES);
+    try std.testing.expectEqual(@as(usize, c.MSR_HYPERLINK_SLOTS), adapter.handle.?.hyperlinks_len);
+}
+
+test "hyperlink byte budget bounds long URLs independently of entry count" {
+    var adapter = try VTermAdapter.init(2, 20);
+    defer adapter.deinit();
+    var buf: [7000]u8 = undefined;
+    for (0..400) |i| {
+        const prefix = try std.fmt.bufPrint(&buf, "\x1b]8;;https://example/{d}/", .{i});
+        @memset(buf[prefix.len .. buf.len - 5], 'a');
+        @memcpy(buf[buf.len - 5 ..], "\x1b\\x\r\n");
+        adapter.feed(&buf);
+        try std.testing.expect(adapter.handle.?.hyperlink_bytes <= c.MSR_HYPERLINK_BYTES);
+    }
+    var uri_len: usize = 0;
+    try std.testing.expect(c.msr_vterm_get_hyperlink_uri(adapter.handle.?, 1, &uri_len) == null);
+}
+
+test "hyperlink cache deduplicates metadata and never reuses exhausted IDs" {
+    var adapter = try VTermAdapter.init(2, 20);
+    defer adapter.deinit();
+    adapter.feed("\x1b]8;id=a;https://example\x1b\\a");
+    adapter.feed("\x1b]8;id=b;https://example\x1b\\b");
+    const bytes = adapter.handle.?.hyperlink_bytes;
+    adapter.feed("\x1b]8;id=a;https://example\x1b\\c");
+    try std.testing.expectEqual(@as(u32, 2), adapter.handle.?.next_hyperlink_id);
+    try std.testing.expectEqual(bytes, adapter.handle.?.hyperlink_bytes);
+    var snapshot = try adapter.snapshot(std.testing.allocator);
+    defer screen_types.freeScreenSnapshot(std.testing.allocator, &snapshot);
+    try std.testing.expectEqual(@as(usize, 2), snapshot.hyperlinks.len);
+    try std.testing.expectEqual(snapshot.lines[0].cells[0].hyperlink, snapshot.lines[0].cells[2].hyperlink);
+    try std.testing.expect(snapshot.lines[0].cells[0].hyperlink != snapshot.lines[0].cells[1].hyperlink);
+
+    // A rejected new link must clear the previous pen URL, not mislabel text.
+    adapter.handle.?.next_hyperlink_id = std.math.maxInt(i32);
+    adapter.feed("\x1b]8;;https://new.example\x1b\\d");
+    var exhausted = try adapter.snapshot(std.testing.allocator);
+    defer screen_types.freeScreenSnapshot(std.testing.allocator, &exhausted);
+    try std.testing.expectEqual(@as(u32, 0), exhausted.lines[0].cells[3].hyperlink);
+    try std.testing.expectEqual(bytes, adapter.handle.?.hyperlink_bytes);
+    try std.testing.expectEqual(@as(u32, std.math.maxInt(i32)), adapter.handle.?.next_hyperlink_id);
+}

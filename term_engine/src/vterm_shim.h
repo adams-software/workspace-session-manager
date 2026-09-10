@@ -9,7 +9,12 @@
 extern "C" {
 #endif
 
+enum { MSR_HYPERLINK_SLOTS = 1024, MSR_HYPERLINK_BUCKETS = 2048, MSR_HYPERLINK_BYTES = 1024 * 1024 };
+
 typedef struct msr_vterm_hyperlink_record {
+  uint32_t id;
+  uint32_t next;
+  uint32_t hash;
   char *params;
   size_t params_len;
   char *uri;
@@ -39,6 +44,10 @@ typedef struct {
   msr_vterm_hyperlink_record *hyperlinks;
   size_t hyperlinks_len;
   size_t hyperlinks_cap;
+  size_t hyperlink_bytes;
+  uint32_t next_hyperlink_id;
+  uint32_t oldest_hyperlink_id;
+  uint32_t hyperlink_buckets[MSR_HYPERLINK_BUCKETS];
   int history_events_enabled;
   msr_vterm_history_event *history_events;
   size_t history_events_len;
