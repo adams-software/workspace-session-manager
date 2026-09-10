@@ -4,6 +4,7 @@ const fd_stream = @import("fd_stream");
 
 const c = @cImport({
     @cInclude("sys/socket.h");
+    @cInclude("poll.h");
     @cInclude("sys/un.h");
     @cInclude("unistd.h");
 });
@@ -80,7 +81,18 @@ pub const SessionLink = struct {
     }
 
     pub fn dataPollFd(self: *const SessionLink) ?c_int {
-        return if (self.data_eof or !self.pump.canReadRight()) null else self.data_fd;
+        return if (self.dataPollEvents() != 0) self.data_fd else null;
+    }
+
+    pub fn dataPollEvents(self: *const SessionLink) c_short {
+        if (self.data_eof) return 0;
+        var events: c_short = if (self.pump.canReadRight()) c.POLLIN else 0;
+        if (!self.pump.left_to_right.isEmpty()) events |= c.POLLOUT;
+        return events;
+    }
+
+    pub fn canAcceptInput(self: *const SessionLink, byte_count: usize) bool {
+        return !self.data_eof and byte_count <= DuplexLink.input_queue_limit - self.pump.left_to_right.len();
     }
 
     pub fn hasPendingOutput(self: *const SessionLink) bool {
@@ -288,4 +300,63 @@ test "session output backpressure bounds reads and preserves final bytes through
     try std.testing.expectEqualSlices(u8, prefix, received.items[0..prefix.len]);
     try std.testing.expectEqualStrings(tail, received.items[prefix.len..]);
     try std.testing.expect(!link.hasPendingOutput());
+}
+
+test "session input is bounded and resumes on socket write readiness" {
+    var data: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(c.AF_UNIX, c.SOCK_STREAM | c.SOCK_NONBLOCK, 0, &data));
+    defer _ = c.close(data[0]);
+    var link = SessionLink.init(std.testing.allocator);
+    defer link.deinit();
+    link.data_fd = data[1];
+    const padding: [4096]u8 = @splat('x');
+    while (c.write(data[1], &padding, padding.len) > 0) {}
+    try std.testing.expectEqual(std.posix.E.AGAIN, std.posix.errno(-1));
+
+    const prefix = try std.testing.allocator.alloc(u8, 256 * 1024 - 1);
+    defer std.testing.allocator.free(prefix);
+    @memset(prefix, 'a');
+    try std.testing.expect(link.canAcceptInput(256));
+    try link.writeInput(prefix);
+    try std.testing.expect(!link.canAcceptInput(256));
+    try std.testing.expect(link.canAcceptInput(1));
+    try link.writeInput("z");
+    try std.testing.expect(!link.canAcceptInput(1));
+    try std.testing.expectError(error.InputQueueFull, link.writeInput("overflow"));
+    try std.testing.expectEqual(@as(usize, 256 * 1024), link.pump.left_to_right.len());
+    try std.testing.expectEqual(@as(usize, 256 * 1024), link.pump.left_to_right.capacity());
+    try std.testing.expect((link.dataPollEvents() & c.POLLOUT) != 0);
+
+    // A full output queue must not suppress socket writes needed for recovery.
+    try link.pump.right_to_left.append(std.testing.allocator, prefix);
+    try link.pump.right_to_left.appendByte(std.testing.allocator, 'x');
+    try std.testing.expectEqual(@as(c_short, c.POLLOUT), link.dataPollEvents());
+    try std.testing.expectEqual(@as(?c_int, data[1]), link.dataPollFd());
+    link.pump.right_to_left.clear();
+    var bytes: [4096]u8 = undefined;
+    while (c.read(data[0], &bytes, bytes.len) > 0) {} // Remove the socket padding.
+    var ready = [_]std.c.pollfd{.{ .fd = link.dataPollFd().?, .events = link.dataPollEvents(), .revents = 0 }};
+    try std.testing.expectEqual(@as(c_int, 1), std.c.poll(&ready, 1, 0));
+    try std.testing.expect((ready[0].revents & c.POLLOUT) != 0);
+
+    var received: std.ArrayList(u8) = .empty;
+    defer received.deinit(std.testing.allocator);
+    var iterations: usize = 0;
+    while (received.items.len < prefix.len + 1 and iterations < 100) : (iterations += 1) {
+        // The peer sends no output: socket write readiness alone must recover.
+        const result = try link.pumpDataToOutput(-1);
+        try std.testing.expect(!result.stream_lost);
+        while (true) {
+            const n = c.read(data[0], &bytes, bytes.len);
+            if (n <= 0) break;
+            try received.appendSlice(std.testing.allocator, bytes[0..@intCast(n)]);
+        }
+    }
+    try std.testing.expectEqual(prefix.len + 1, received.items.len);
+    try std.testing.expectEqualSlices(u8, prefix, received.items[0..prefix.len]);
+    try std.testing.expectEqual(@as(u8, 'z'), received.items[prefix.len]);
+    try std.testing.expect(link.canAcceptInput(256));
+    try std.testing.expectEqual(@as(usize, 0), link.pump.left_to_right.len());
+    try std.testing.expectEqual(@as(usize, 256 * 1024), link.pump.left_to_right.capacity());
+    try std.testing.expectEqual(@as(c_short, c.POLLIN), link.dataPollEvents());
 }

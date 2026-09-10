@@ -9,6 +9,7 @@ pub const PumpResult = struct {
 };
 
 pub const DuplexLink = struct {
+    pub const input_queue_limit = 256 * 1024;
     pub const output_queue_limit = 256 * 1024;
 
     allocator: std.mem.Allocator,
@@ -35,6 +36,7 @@ pub const DuplexLink = struct {
 
     pub fn pushLeft(self: *DuplexLink, bytes: []const u8) !void {
         if (bytes.len == 0) return;
+        if (bytes.len > input_queue_limit - self.left_to_right.len()) return error.InputQueueFull;
         try self.left_to_right.append(self.allocator, bytes);
     }
 
