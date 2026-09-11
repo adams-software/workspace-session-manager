@@ -500,7 +500,7 @@ fn runInteractive(allocator: std.mem.Allocator, mode: cli_main.Mode) !void {
         if (app.executor.hasPendingAttachedOutput()) tty_events |= c.POLLOUT;
 
         var pfds: [2]c.struct_pollfd = .{
-            .{ .fd = if (tty_events != 0) term.tty_fd else -1, .events = tty_events, .revents = 0 },
+            .{ .fd = term.tty_fd, .events = tty_events, .revents = 0 },
             .{ .fd = -1, .events = 0, .revents = 0 },
         };
         var nfds: c.nfds_t = 1;
@@ -517,6 +517,12 @@ fn runInteractive(allocator: std.mem.Allocator, mode: cli_main.Mode) !void {
         }
         if (pr == 0) continue;
 
+        // Hangup/error events are reported even while input reads are paused.
+        if ((pfds[0].revents & (c.POLLHUP | c.POLLERR | c.POLLNVAL)) != 0) {
+            app.should_exit = true;
+            continue;
+        }
+
         if ((pfds[0].revents & c.POLLIN) != 0) {
             const n = c.read(term.tty_fd, &tty_buf, tty_buf.len);
             if (n > 0) {
@@ -525,6 +531,9 @@ fn runInteractive(allocator: std.mem.Allocator, mode: cli_main.Mode) !void {
                     try setRuntimeExitMessage(&app, allocator, "tty input", err);
                     continue;
                 };
+            } else if (n == 0) {
+                app.should_exit = true;
+                continue;
             } else if (n < 0) {
                 const err = std.posix.errno(-1);
                 if (err != .AGAIN and err != .INTR) return Error.Unexpected;
