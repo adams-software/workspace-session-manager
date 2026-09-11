@@ -30,6 +30,7 @@ const INPUT_QUEUE_LIMIT = 256 * 1024;
 const OUTPUT_READ_CHUNK = 4096;
 const CONTROL_HIGH_WATER = 2 * 1024 * 1024;
 const IO_SPIN_LIMIT = 16;
+const EXIT_DRAIN_MS = 250;
 
 fn parseU16Flag(flag: []const u8, value: []const u8) !u16 {
     return std.fmt.parseInt(u16, value, 10) catch {
@@ -61,6 +62,7 @@ const ParsedArgs = struct {
 
 const TransportState = struct {
     stdin_open: bool = true,
+    pty_read_open: bool = true,
     input_tx: ByteQueue = ByteQueue.init(),
     output_rx: ByteQueue = ByteQueue.init(),
 
@@ -77,7 +79,7 @@ const TransportState = struct {
     }
 
     fn ptyPollEvents(self: *const TransportState, pending_controls: usize) c_short {
-        var events: c_short = if (self.output_rx.isEmpty() and pending_controls < CONTROL_HIGH_WATER) c.POLLIN else 0;
+        var events: c_short = if (self.pty_read_open and self.output_rx.isEmpty() and pending_controls < CONTROL_HIGH_WATER) c.POLLIN else 0;
         if (!self.input_tx.isEmpty()) events |= c.POLLOUT;
         return events;
     }
@@ -119,13 +121,23 @@ const TransportState = struct {
     fn ingestPtyOutput(self: *TransportState, session_host: *host.SessionHost) !void {
         var spins: usize = 0;
         while (spins < IO_SPIN_LIMIT) : (spins += 1) {
-            const status = try fd_stream.readIntoQueue(std.heap.page_allocator, session_host.getMasterFd() orelse return error.InvalidState, &self.output_rx, OUTPUT_READ_CHUNK);
+            const status = fd_stream.readIntoQueue(std.heap.page_allocator, session_host.getMasterFd() orelse return error.InvalidState, &self.output_rx, OUTPUT_READ_CHUNK) catch |read_error| {
+                // Linux PTYs report EIO once the slave closes and buffered bytes drain.
+                if (read_error == error.IoError and std.posix.errno(-1) == .IO) {
+                    self.pty_read_open = false;
+                    break;
+                }
+                return read_error;
+            };
             switch (status) {
                 .progress => |n| {
                     if (n < OUTPUT_READ_CHUNK) break;
                 },
                 .would_block => break,
-                .eof => break,
+                .eof => {
+                    self.pty_read_open = false;
+                    break;
+                },
             }
         }
     }
@@ -312,7 +324,7 @@ fn stepPtyOutput(
     stdout_actor: *StdoutThread,
     pfds: []const c.struct_pollfd,
 ) !void {
-    if ((pfds[1].revents & c.POLLIN) != 0) {
+    if (transport.pty_read_open and transport.output_rx.isEmpty() and stdout_actor.pendingControlBytes() < CONTROL_HIGH_WATER and (pfds[1].revents & (c.POLLIN | c.POLLHUP)) != 0) {
         try transport.ingestPtyOutput(session_host);
     }
 
@@ -334,9 +346,17 @@ fn refreshAndMaybeExit(session_host: *host.SessionHost) !?host.ExitStatus {
     return null;
 }
 
+fn monotonicMs() !u64 {
+    var now: c.timespec = undefined;
+    if (c.clock_gettime(c.CLOCK_MONOTONIC, &now) != 0) return error.IoError;
+    return @as(u64, @intCast(now.tv_sec)) * 1000 + @as(u64, @intCast(now.tv_nsec)) / std.time.ns_per_ms;
+}
+
 fn pumpUntilExit(lifecycle: *RuntimeLifecycle, session_host: *host.SessionHost, shared_model: *SharedTerminalModel, render_thread: *RenderThread, terminal: *vpty_terminal.TerminalMode, mode: RunMode, viewport: Viewport, viewport_intent: ViewportIntent, forwarder: *side_effects.SideEffectForwarder, stdout_actor: *StdoutThread) !host.ExitStatus {
     var transport = TransportState{};
     defer transport.deinit(std.heap.page_allocator);
+    var exit_status: ?host.ExitStatus = null;
+    var drain_deadline: u64 = 0;
 
     try transport.configureNonBlocking(session_host, terminal.stdin_fd, terminal.stdout_fd);
 
@@ -344,6 +364,9 @@ fn pumpUntilExit(lifecycle: *RuntimeLifecycle, session_host: *host.SessionHost, 
         handleResizeIfNeeded(lifecycle, session_host, shared_model, render_thread, stdout_actor, terminal, mode, viewport, viewport_intent);
         lifecycle.issueTerminationIfNeeded(session_host);
         if (stdout_actor.output_failed.load(.seq_cst)) return error.OutputClosed;
+        if (exit_status) |status| {
+            if ((!transport.pty_read_open and transport.output_rx.isEmpty()) or try monotonicMs() >= drain_deadline) return status;
+        }
 
         const pty_events = transport.ptyPollEvents(stdout_actor.pendingControlBytes());
         var pfds = [4]c.struct_pollfd{
@@ -366,7 +389,14 @@ fn pumpUntilExit(lifecycle: *RuntimeLifecycle, session_host: *host.SessionHost, 
         try stepPtyOutput(&transport, session_host, shared_model, render_thread, forwarder, stdout_actor, &pfds);
         try stepStdoutCommitted(stdout_actor, shared_model);
 
-        if (try refreshAndMaybeExit(session_host)) |status| return status;
+        if (exit_status == null) {
+            if (try refreshAndMaybeExit(session_host)) |status| {
+                exit_status = status;
+                drain_deadline = (try monotonicMs()) +| EXIT_DRAIN_MS;
+                transport.stdin_open = false;
+                transport.input_tx.clear();
+            }
+        }
     }
 }
 

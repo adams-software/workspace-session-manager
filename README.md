@@ -175,7 +175,7 @@ Terminal integration and rendering layer.
 
 Holds the PTY / terminal-state / rendering work needed for interactive sessions. Pending input is capped at 256 KiB; vpty pauses reading stdin until the child accepts queued bytes, preserving input order without dropping data.
 
-At shutdown, vpty gives stdout a 250 ms window to drain pending output before abandoning any remainder, so a stalled terminal cannot keep an exited session alive.
+After child exit, vpty gives remaining PTY output a 250 ms drain window, including when descendants retain the PTY. At shutdown, vpty then gives stdout a 250 ms window to drain pending output before abandoning any remainder, so a stalled terminal cannot keep an exited session alive.
 
 When pending terminal controls reach 2 MiB, vpty pauses PTY reads and parsing until stdout drains below that threshold. The current parser chunk can cross the threshold, including completion of a buffered OSC sequence.
 
