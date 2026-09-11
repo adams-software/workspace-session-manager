@@ -178,7 +178,7 @@ pub const RenderThread = struct {
                         .events = c.POLLIN,
                         .revents = 0,
                     };
-                    _ = c.poll(&pfd_busy, 1, 10);
+                    _ = std.c.poll(@ptrCast(&pfd_busy), 1, 10);
                     if ((pfd_busy.revents & c.POLLIN) != 0) {
                         self.drainWakePipe();
                     }
@@ -206,7 +206,7 @@ pub const RenderThread = struct {
                 .events = c.POLLIN,
                 .revents = 0,
             };
-            _ = c.poll(&pfd, 1, 50);
+            _ = std.c.poll(@ptrCast(&pfd), 1, 50);
             if ((pfd.revents & c.POLLIN) != 0) {
                 self.drainWakePipe();
             }

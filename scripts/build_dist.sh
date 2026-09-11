@@ -26,7 +26,7 @@ mkdir -p "$BIN_DIR" "$LIBEXEC_DIR" "$COMPLETIONS_DIR"
 
 (
   cd "$REPO_ROOT"
-  zig build -Dtarget="$ZIG_TARGET"
+  zig build -Dtarget="$ZIG_TARGET" -Doptimize=ReleaseSafe
 )
 
 install -m 0755 "$REPO_ROOT/zig-out/bin/wsm" "$BIN_DIR/wsm"

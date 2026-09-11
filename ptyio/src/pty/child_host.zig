@@ -279,7 +279,7 @@ pub const PtyChildHost = struct {
             .running => blk: {
                 const fd = self.master_fd orelse return Error.InvalidState;
                 var pfd = c.struct_pollfd{ .fd = fd, .events = c.POLLIN, .revents = 0 };
-                const pr = c.poll(&pfd, 1, timeout_ms);
+                const pr = std.c.poll(@ptrCast(&pfd), 1, timeout_ms);
                 if (pr < 0) return Error.IoError;
                 if (pr == 0) return allocator.alloc(u8, 0) catch Error.OutOfMemory;
                 if ((pfd.revents & c.POLLIN) == 0) return allocator.alloc(u8, 0) catch Error.OutOfMemory;

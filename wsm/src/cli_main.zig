@@ -27,7 +27,7 @@ pub const ToolPaths = struct {
 pub fn resolveToolPaths(allocator: std.mem.Allocator) !ToolPaths {
     const exe_path = try allocator.alloc(u8, std.fs.max_path_bytes);
     defer allocator.free(exe_path);
-    const exe_len = c.readlink("/proc/self/exe", exe_path.ptr, exe_path.len);
+    const exe_len = std.c.readlink("/proc/self/exe", exe_path.ptr, exe_path.len);
     if (exe_len < 0) return error.FileNotFound;
     const exe_path_slice = exe_path[0..@intCast(exe_len)];
     const exe_dir_owned = try allocator.dupe(u8, std.fs.path.dirname(exe_path_slice) orelse ".");

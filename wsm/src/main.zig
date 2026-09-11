@@ -10,7 +10,6 @@ const enterRawMode = @import("ptyio_raw_mode").enterRawMode;
 const getTtySize = @import("ptyio_tty_size").getTtySize;
 
 const c = @cImport({
-    @cInclude("fcntl.h");
     @cInclude("poll.h");
     @cInclude("signal.h");
     @cInclude("unistd.h");
@@ -47,7 +46,7 @@ const TerminalState = struct {
     raw_mode: @import("ptyio_raw_mode").RawModeGuard,
 
     fn init() !TerminalState {
-        const tty_fd = c.open("/dev/tty", c.O_RDWR);
+        const tty_fd = std.c.open("/dev/tty", .{ .ACCMODE = .RDWR });
         if (tty_fd < 0) return Error.TerminalUnavailable;
         errdefer _ = c.close(tty_fd);
 
@@ -509,7 +508,7 @@ fn runInteractive(allocator: std.mem.Allocator, mode: cli_main.Mode) !void {
             nfds = 2;
         }
 
-        const pr = c.poll(&pfds, nfds, 25);
+        const pr = std.c.poll(@ptrCast(&pfds), nfds, 25);
         if (pr < 0) {
             const err = std.posix.errno(-1);
             if (err == .INTR) continue;

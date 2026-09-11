@@ -2,7 +2,6 @@ const std = @import("std");
 const ByteQueue = @import("byte_queue").ByteQueue;
 
 const c = @cImport({
-    @cInclude("fcntl.h");
     @cInclude("unistd.h");
 });
 
@@ -22,11 +21,12 @@ pub const WriteStatus = union(enum) {
 };
 
 pub fn setNonBlocking(fd: c_int) Error!void {
-    const flags = c.fcntl(fd, c.F_GETFL, @as(c_int, 0));
+    const flags = std.c.fcntl(fd, std.c.F.GETFL);
     if (flags < 0) return error.IoError;
-    if ((flags & c.O_NONBLOCK) != 0) return;
+    const nonblock: c_int = @bitCast(std.c.O{ .NONBLOCK = true });
+    if ((flags & nonblock) != 0) return;
 
-    if (c.fcntl(fd, c.F_SETFL, flags | c.O_NONBLOCK) != 0) {
+    if (std.c.fcntl(fd, std.c.F.SETFL, flags | nonblock) != 0) {
         return error.IoError;
     }
 }

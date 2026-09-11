@@ -247,7 +247,7 @@ pub const SessionServer = struct {
 
         while (true) {
             var pfd = c.struct_pollfd{ .fd = listener_fd, .events = c.POLLIN, .revents = 0 };
-            const pr = c.poll(&pfd, 1, 0);
+            const pr = std.c.poll(@ptrCast(&pfd), 1, 0);
             if (pr < 0) return Error.IoError;
             if (pr == 0) break;
 
@@ -380,7 +380,7 @@ pub const SessionServer = struct {
             .revents = 0,
         };
 
-        const pr = c.poll(&pfd, 1, 0);
+        const pr = std.c.poll(@ptrCast(&pfd), 1, 0);
         if (pr < 0) return false;
         return (pfd.revents & (c.POLLHUP | c.POLLERR | c.POLLNVAL)) != 0;
     }
