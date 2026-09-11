@@ -353,7 +353,7 @@ fn pumpUntilExit(lifecycle: *RuntimeLifecycle, session_host: *host.SessionHost, 
             .{ .fd = -1, .events = 0, .revents = 0 },
         };
 
-        const pr = c.poll(&pfds, 4, 10);
+        const pr = std.c.poll(@ptrCast(&pfds), 4, 10);
         if (pr < 0) {
             const e = std.posix.errno(-1);
             if (e == .INTR) continue;

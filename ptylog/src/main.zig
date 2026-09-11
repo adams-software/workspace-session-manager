@@ -503,7 +503,7 @@ fn run(io: std.Io, allocator: std.mem.Allocator, config: Config, lifecycle: *Run
             .{ .fd = if (!stdout_tx.isEmpty()) std.posix.STDOUT_FILENO else -1, .events = c.POLLOUT, .revents = 0 },
             .{ .fd = lifecycle.readFd(), .events = c.POLLIN, .revents = 0 },
         };
-        _ = c.poll(&pfds, pfds.len, 25);
+        _ = std.c.poll(@ptrCast(&pfds), pfds.len, 25);
         lifecycle.consumeWakeRevents(pfds[3].revents);
     }
 

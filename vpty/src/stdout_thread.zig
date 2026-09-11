@@ -258,7 +258,7 @@ pub const StdoutThread = struct {
                     .revents = 0,
                 },
             };
-            _ = c.poll(&pfds, pfds.len, 50);
+            _ = std.c.poll(@ptrCast(&pfds), pfds.len, 50);
             if ((pfds[0].revents & c.POLLIN) != 0) {
                 self.drainWakePipe();
             }

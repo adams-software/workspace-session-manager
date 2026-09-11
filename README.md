@@ -44,6 +44,8 @@ By default this installs:
 
 So `wsm` is the only public command added to `PATH` by the standard install.
 
+Release bundles use `ReleaseSafe` optimization, retaining runtime safety checks. Local `zig build` still defaults to Debug.
+
 Release bundles for `linux-x86_64` are now built with an explicit portable target instead of inheriting CPU features from the release machine. That avoids `Illegal instruction` failures on older x86_64 hosts.
 
 ## Troubleshooting
