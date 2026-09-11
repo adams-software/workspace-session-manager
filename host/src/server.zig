@@ -9,6 +9,7 @@ const c = @cImport({
     @cInclude("sys/un.h");
     @cInclude("unistd.h");
     @cInclude("poll.h");
+    @cInclude("pty.h");
 });
 
 pub const Error = error{
@@ -43,6 +44,7 @@ pub const SessionServer = struct {
     owner_tx: ByteQueue = ByteQueue.init(),
     pty_tx: ByteQueue = ByteQueue.init(),
     pty_nonblocking_configured: bool = false,
+    pty_read_open: bool = true,
 
     pub fn init(allocator: std.mem.Allocator, session_host: *host.PtyChildHost) SessionServer {
         return .{
@@ -142,7 +144,7 @@ pub const SessionServer = struct {
         var events: c_short = 0;
         // Match pumpPtyToOwner: unread output cannot make progress until
         // an owner is attached and its pending output has drained.
-        if (self.owner_fd != null and self.owner_tx.isEmpty()) events |= c.POLLIN;
+        if (self.pty_read_open and self.owner_fd != null and self.owner_tx.isEmpty()) events |= c.POLLIN;
         if (!self.pty_tx.isEmpty()) events |= c.POLLOUT;
         return events;
     }
@@ -307,13 +309,19 @@ pub const SessionServer = struct {
             return false;
         }
 
-        const rd = fd_stream.readIntoQueue(self.allocator, master_fd, &self.owner_tx, io_chunk_size) catch {
-            return false;
+        if (!self.pty_read_open) return progressed;
+        const rd = fd_stream.readIntoQueue(self.allocator, master_fd, &self.owner_tx, io_chunk_size) catch |err| {
+            if (err == error.OutOfMemory) return err;
+            self.pty_read_open = false;
+            return progressed;
         };
         switch (rd) {
             .progress => |n| progressed = progressed or (n > 0),
             .would_block => {},
-            .eof => return false,
+            .eof => {
+                self.pty_read_open = false;
+                return progressed;
+            },
         }
 
         if (self.owner_fd) |fd| {
@@ -377,3 +385,60 @@ pub const SessionServer = struct {
         return (pfd.revents & (c.POLLHUP | c.POLLERR | c.POLLNVAL)) != 0;
     }
 };
+
+test "PTY EOF disables reads after pending owner output drains" {
+    var fds: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe2(&fds, .{ .NONBLOCK = true, .CLOEXEC = true }));
+    var child = try host.PtyChildHost.init(std.testing.allocator, .{ .argv = &.{"unused"} });
+    child.master_fd = fds[0];
+    defer child.deinit();
+    var writer_open = true;
+    defer if (writer_open) {
+        _ = c.close(fds[1]);
+    };
+    var owner: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(c.AF_UNIX, c.SOCK_STREAM | c.SOCK_NONBLOCK, 0, &owner));
+    defer _ = c.close(owner[1]);
+    var allocations = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var server = SessionServer.init(allocations.allocator(), &child);
+    defer server.deinit();
+    server.owner_fd = owner[0];
+
+    allocations.fail_index = allocations.alloc_index;
+    try std.testing.expectError(error.OutOfMemory, server.pumpPtyToOwner());
+    try std.testing.expect(server.pty_read_open);
+    allocations.fail_index = std.math.maxInt(usize);
+    try std.testing.expect(!try server.pumpPtyToOwner()); // EAGAIN is not EOF.
+    try std.testing.expect((server.masterPollEvents() & c.POLLIN) != 0);
+    try server.owner_tx.append(allocations.allocator(), "tail");
+    _ = c.close(fds[1]);
+    writer_open = false;
+    try std.testing.expect(try server.pumpPtyToOwner());
+    var tail: [4]u8 = undefined;
+    try std.testing.expectEqual(@as(isize, 4), c.read(owner[1], &tail, tail.len));
+    try std.testing.expectEqualStrings("tail", &tail);
+    try std.testing.expect(!server.pty_read_open);
+    try std.testing.expectEqual(@as(c_short, 0), server.masterPollEvents());
+    for (0..100) |_| try std.testing.expect(!try server.pumpPtyToOwner());
+}
+
+test "closed PTY slave read error disables further read polling" {
+    var master: c_int = -1;
+    var slave: c_int = -1;
+    try std.testing.expectEqual(@as(c_int, 0), c.openpty(&master, &slave, null, null, null));
+    _ = c.close(slave);
+    var child = try host.PtyChildHost.init(std.testing.allocator, .{ .argv = &.{"unused"} });
+    child.master_fd = master;
+    defer child.deinit();
+    try fd_stream.setNonBlocking(master);
+    var owner: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(c.AF_UNIX, c.SOCK_STREAM | c.SOCK_NONBLOCK, 0, &owner));
+    defer _ = c.close(owner[1]);
+    var server = SessionServer.init(std.testing.allocator, &child);
+    defer server.deinit();
+    server.owner_fd = owner[0];
+    try std.testing.expect(!try server.pumpPtyToOwner());
+    try std.testing.expect(!server.pty_read_open);
+    try std.testing.expectEqual(@as(c_short, 0), server.masterPollEvents());
+    for (0..100) |_| try std.testing.expect(!try server.pumpPtyToOwner());
+}
