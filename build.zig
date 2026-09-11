@@ -542,7 +542,13 @@ pub fn build(b: *std.Build) void {
     const test_session_link_step = b.step("test-session-link", "Run session output flow-control tests");
     test_session_link_step.dependOn(&run_session_link_tests.step);
 
+    const server_tests = b.addTest(.{ .root_module = server_mod });
+    const run_server_tests = b.addRunArtifact(server_tests);
+    const test_server_step = b.step("test-server", "Run host PTY EOF tests");
+    test_server_step.dependOn(&run_server_tests.step);
+
     const test_step = b.step("test", "Run workspace tests");
+    test_step.dependOn(&run_server_tests.step);
     test_step.dependOn(&run_hyperlink_tests.step);
     test_step.dependOn(&run_session_link_tests.step);
     test_step.dependOn(&run_worker_start_tests.step);
