@@ -52,3 +52,37 @@ so the collector itself has a cost on machines with many processes.
 
 This is an opt-in diagnostic tool, separate from CI's `test-c-leaks` ownership
 checks. It does not add background monitoring to WSM.
+
+## Repeated-workload regression
+
+CI also keeps one optimized `ptylog` process alive through 32 batches of 4,000
+lines, alternating plain scrolling text and unique hyperlinks. Each batch waits
+for its completion marker to reach the log before sampling the helper's RSS.
+The fixture rotates logs with a 256 KiB budget and discards terminal output;
+the Python producer's memory is not included in the helper's measurements.
+
+After four warm-up batches, RSS must remain within 12 MiB of the baseline. Once
+output stops, CPU must stay below 5% of one core over a 1.5-second sample. These
+are deliberately generous regression limits for this workload, not guarantees
+about every application or proof that smaller leaks are absent. CI preserves
+JSONL measurements as the `ptylog-resources` artifact, including on failure.
+
+Run the same check locally on Linux (Python 3.9+ and kernel 5.3+):
+
+```bash
+zig build -Dtarget=x86_64-linux-gnu -Doptimize=ReleaseSafe
+python3 ptylog/test_resources.py zig-out/bin/ptylog
+```
+
+For a longer manual run, repeat batches in the same process for an hour:
+
+```bash
+python3 ptylog/test_resources.py zig-out/bin/ptylog \
+  --soak-seconds 3600 > ptylog-soak.jsonl
+```
+
+The soak option accepts up to 24 hours and always runs at least 32 batches.
+Each batch has a 30-second progress timeout. The fixture uses a temporary
+directory and cleans up its helper and child on success or failure. This check
+covers logger scrolling, hyperlink churn, and idle CPU after output; it does not
+exercise the full attached WSM session tree or stalled output readers.
