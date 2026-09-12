@@ -232,6 +232,17 @@ zig build
 zig build test
 ```
 
+On Linux with Valgrind installed, check libvterm's C allocations as well:
+
+```bash
+zig build test-c-leaks -Dtarget=x86_64-linux-gnu -Doptimize=ReleaseSafe
+```
+
+CI runs this check for adapter and history ownership tests, including hyperlink
+cache eviction. It fails on memory errors or leaks that Zig's testing allocator
+cannot detect. It covers these test workloads; it does not measure long-running
+session CPU usage or overall memory growth.
+
 Artifacts are emitted to:
 
 ```text

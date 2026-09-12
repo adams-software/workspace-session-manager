@@ -579,6 +579,12 @@ pub fn build(b: *std.Build) void {
     const history_leaks_step = b.step("test-history-leaks", "Run history ownership tests under Valgrind (use -Doptimize=ReleaseSafe)");
     history_leaks_step.dependOn(&history_leaks.step);
 
+    const adapter_leaks = b.addSystemCommand(&.{ "valgrind", "--leak-check=full", "--show-leak-kinds=all", "--errors-for-leak-kinds=all", "--error-exitcode=1" });
+    adapter_leaks.addArtifactArg(terminal_state_vterm_tests);
+    const c_leaks_step = b.step("test-c-leaks", "Run libvterm adapter and history tests under Valgrind (use -Doptimize=ReleaseSafe)");
+    c_leaks_step.dependOn(&history_leaks.step);
+    c_leaks_step.dependOn(&adapter_leaks.step);
+
     const test_host_step = b.step("test-host", "Run host module tests");
     test_host_step.dependOn(&run_host_tests.step);
 
