@@ -26,3 +26,21 @@ jobs:
         run: |
           find wsm/scripts scripts -type f \( -name '*.sh' -o -name 'wsm' -o -name 'wsm_menu' \) -print0 | \
             xargs -0 -n1 bash -n
+
+  c-memory-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Install Valgrind
+        run: sudo apt-get update && sudo apt-get install -y valgrind
+
+      - name: Check libvterm memory ownership
+        run: zig build test-c-leaks -Dtarget=x86_64-linux-gnu -Doptimize=ReleaseSafe
