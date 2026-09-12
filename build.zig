@@ -449,18 +449,18 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(ptylog_exe);
 
-    const hyperlink_test_root = b.createModule(.{
+    const adapter_test_root = b.createModule(.{
         .root_source_file = b.path("term_engine/src/terminal_state_vterm.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
-    addVendoredLibvterm(hyperlink_test_root, b);
-    const hyperlink_tests = b.addTest(.{ .root_module = hyperlink_test_root, .filters = &.{ "OSC 8", "hyperlink" } });
+    addVendoredLibvterm(adapter_test_root, b);
+    const hyperlink_tests = b.addTest(.{ .root_module = adapter_test_root, .filters = &.{ "OSC 8", "hyperlink" } });
     const run_hyperlink_tests = b.addRunArtifact(hyperlink_tests);
     const test_hyperlinks_step = b.step("test-hyperlinks", "Run hyperlink cache and snapshot tests");
     test_hyperlinks_step.dependOn(&run_hyperlink_tests.step);
-    const terminal_state_vterm_tests = b.addTest(.{ .root_module = term_engine_mod });
+    const terminal_state_vterm_tests = b.addTest(.{ .root_module = adapter_test_root });
 
     const history_test_root = b.createModule(.{
         .root_source_file = b.path("term_engine/src/engine.zig"),
@@ -549,7 +549,7 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run workspace tests");
     test_step.dependOn(&run_server_tests.step);
-    test_step.dependOn(&run_hyperlink_tests.step);
+    test_step.dependOn(&run_terminal_state_vterm_tests.step);
     test_step.dependOn(&run_session_link_tests.step);
     test_step.dependOn(&run_worker_start_tests.step);
     test_step.dependOn(&run_vpty_output_tests.step);
