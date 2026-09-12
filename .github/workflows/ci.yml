@@ -47,3 +47,29 @@ jobs:
 
       - name: Check libvterm memory ownership
         run: zig build test-c-leaks -Dtarget=x86_64-linux-gnu -Doptimize=ReleaseSafe
+
+  resource-regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Build optimized helpers
+        run: zig build -Dtarget=x86_64-linux-gnu -Doptimize=ReleaseSafe
+
+      - name: Check ptylog resource use
+        run: python3 ptylog/test_resources.py zig-out/bin/ptylog > ptylog-resources.jsonl
+
+      - name: Upload resource measurements
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ptylog-resources
+          path: ptylog-resources.jsonl
+          retention-days: 7
