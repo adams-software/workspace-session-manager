@@ -300,10 +300,26 @@ test "snapshot preserves ansi provenance for classic, bright, and extended index
     try std.testing.expectEqual(screen_types.HostColor{ .kind = .indexed, .palette_index = 27, .ansi_class = .indexed_extended, .promoted_by_bold = false }, c_fg);
 }
 
+test "snapshot keeps bold classic-low colors unpromoted by default" {
+    var adapter = try VTermAdapter.init(2, 16);
+    defer adapter.deinit();
+
+    adapter.feed("\x1b[1;34mA\x1b[0m");
+
+    var snapshot = try adapter.snapshot(std.testing.allocator);
+    defer screen_types.freeScreenSnapshot(std.testing.allocator, &snapshot);
+
+    const cell = snapshot.lines[0].cells[0];
+    try std.testing.expectEqual(screen_types.HostColor{ .kind = .indexed, .palette_index = 4, .ansi_class = .classic_low, .promoted_by_bold = false }, cell.fg);
+    try std.testing.expect(cell.attrs.bold);
+}
+
 test "snapshot preserves bold promoted classic-low provenance" {
     var adapter = try VTermAdapter.init(2, 16);
     defer adapter.deinit();
 
+    // Promotion is opt-in; the runtime leaves libvterm's default disabled.
+    c.vterm_state_set_bold_highbright(adapter.handle.?.state, 1);
     adapter.feed("\x1b[1;34mA\x1b[0m");
 
     var snapshot = try adapter.snapshot(std.testing.allocator);
