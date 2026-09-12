@@ -243,6 +243,9 @@ cache eviction. It fails on memory errors or leaks that Zig's testing allocator
 cannot detect. It covers these test workloads; it does not measure long-running
 session CPU usage or overall memory growth.
 
+To record CPU, memory, and descriptor counts for an existing session, see
+[resource diagnostics](docs/resource-diagnostics.md).
+
 Artifacts are emitted to:
 
 ```text
