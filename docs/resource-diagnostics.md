@@ -86,3 +86,22 @@ Each batch has a 30-second progress timeout. The fixture uses a temporary
 directory and cleans up its helper and child on success or failure. This check
 covers logger scrolling, hyperlink churn, and idle CPU after output; it does not
 exercise the full attached WSM session tree or stalled output readers.
+
+## Scheduled soak
+
+The `resource-soak` GitHub Actions workflow runs this same fixture for three
+hours, scheduled daily at 03:23 UTC on the default branch. GitHub may delay
+scheduled runs. It uses ReleaseSafe binaries and the same RSS and idle-CPU
+thresholds as the short CI check; normal pull-request checks remain short.
+
+To start an additional run, open **Actions → resource-soak → Run workflow** and
+select the branch to test. Runs for the same branch do not execute concurrently,
+and starting another run does not cancel an active soak.
+
+Download the `ptylog-soak` artifact from the workflow run for per-batch RSS,
+elapsed time, and the final idle-CPU measurement and result. Measurements are
+uploaded on success or failure and retained for 14 days. A failed or interrupted
+run may only contain partial measurements; a successful result record confirms
+completion. The soak step has a 190-minute timeout inside a 210-minute job limit
+to leave time for building and uploading results. A cancelled job or runner
+failure can prevent artifact upload.
