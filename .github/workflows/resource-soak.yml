@@ -1,0 +1,41 @@
+name: resource-soak
+
+on:
+  schedule:
+    - cron: '23 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: resource-soak-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  ptylog-soak:
+    runs-on: ubuntu-latest
+    timeout-minutes: 210
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Build optimized helpers
+        run: zig build -Dtarget=x86_64-linux-gnu -Doptimize=ReleaseSafe
+
+      - name: Soak ptylog for three hours
+        timeout-minutes: 190
+        run: python3 ptylog/test_resources.py zig-out/bin/ptylog --soak-seconds 10800 > ptylog-soak.jsonl
+
+      - name: Upload soak measurements
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ptylog-soak
+          path: ptylog-soak.jsonl
+          retention-days: 14
