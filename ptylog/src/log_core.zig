@@ -300,8 +300,24 @@ pub const StreamLogger = struct {
     }
 
     pub fn feed(self: *StreamLogger, bytes: []const u8) !void {
-        try feedReplayBytes(&self.engine, bytes, &self.prev_byte, &self.normalized);
-        try processPendingEvents(self.allocator, &self.engine, &self.builder);
+        // Each committed line temporarily owns a full row of copied cells.
+        // Drain history between bounded feeds so a large PTY read cannot build
+        // thousands of those rows at once. Parser and newline state span feeds.
+        var offset: usize = 0;
+        while (true) {
+            var end = offset + @min(bytes.len - offset, 4096);
+            // Do not introduce a split inside an existing UTF-8 code point.
+            // Invalid input still advances and is left for the parser to handle.
+            if (end < bytes.len) {
+                var boundary = end;
+                while (boundary > offset and end - boundary < 3 and bytes[boundary] & 0xc0 == 0x80) boundary -= 1;
+                if (bytes[boundary] & 0xc0 != 0x80) end = boundary;
+            }
+            try feedReplayBytes(&self.engine, bytes[offset..end], &self.prev_byte, &self.normalized);
+            try processPendingEvents(self.allocator, &self.engine, &self.builder);
+            if (end == bytes.len) break;
+            offset = end;
+        }
     }
 
     pub fn resize(self: *StreamLogger, rows: u16, cols: u16) !void {
@@ -1220,4 +1236,76 @@ test "ANSI live-tail writers release buffers after allocation failure" {
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Scenario.run, .{});
+}
+
+const PeakTestAllocator = struct {
+    backing: std.mem.Allocator,
+    live: usize = 0,
+    peak: usize = 0,
+
+    fn allocator(self: *@This()) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = std.mem.Allocator.noResize, .remap = std.mem.Allocator.noRemap, .free = free } };
+    }
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        const ptr = self.backing.rawAlloc(len, alignment, ra) orelse return null;
+        self.live += len;
+        self.peak = @max(self.peak, self.live);
+        return ptr;
+    }
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ra: usize) void {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        self.live -= memory.len;
+        self.backing.rawFree(memory, alignment, ra);
+    }
+};
+
+test "large scrolling feed bounds live history allocations and preserves output" {
+    const input = "scrolling line\r\n" ** 4000;
+    for ([_]usize{ 4096, 65536 }) |chunk_size| {
+        var meter = PeakTestAllocator{ .backing = std.testing.allocator };
+        {
+            var logger = try StreamLogger.init(meter.allocator(), .plain, 24, 80);
+            defer logger.deinit();
+            var offset: usize = 0;
+            while (offset < input.len) {
+                const end = @min(input.len, offset + chunk_size);
+                try logger.feed(input[offset..end]);
+                offset = end;
+            }
+            var output: [128 * 1024]u8 = undefined;
+            var writer = std.Io.Writer.fixed(&output);
+            try logger.finish(&writer);
+            try std.testing.expectEqualStrings("scrolling line\n" ** 3999 ++ "scrolling line", writer.buffered());
+        }
+        try std.testing.expectEqual(@as(usize, 0), meter.live);
+        try std.testing.expect(meter.peak < 2 * 1024 * 1024);
+    }
+}
+
+test "large feed matches split feeds across styled Unicode and hyperlink sequences" {
+    const line = ("\x1b[31mred\x1b[0m e\xcc\x81 \xf0\x9f\x98\x80 " ++
+        "\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\\r\n");
+    const input = line ** 800;
+    for ([_]OutputFormat{ .plain, .ansi }) |format| {
+        var whole = try StreamLogger.init(std.testing.allocator, format, 24, 80);
+        defer whole.deinit();
+        var split = try StreamLogger.init(std.testing.allocator, format, 24, 80);
+        defer split.deinit();
+        try whole.feed(input);
+        var offset: usize = 0;
+        while (offset < input.len) {
+            const end = @min(input.len, offset + line.len);
+            try split.feed(input[offset..end]);
+            offset = end;
+        }
+        var whole_bytes: [128 * 1024]u8 = undefined;
+        var split_bytes: [128 * 1024]u8 = undefined;
+        var whole_writer = std.Io.Writer.fixed(&whole_bytes);
+        var split_writer = std.Io.Writer.fixed(&split_bytes);
+        try whole.finish(&whole_writer);
+        try split.finish(&split_writer);
+        try std.testing.expect(whole_writer.buffered().len > 0);
+        try std.testing.expectEqualStrings(split_writer.buffered(), whole_writer.buffered());
+    }
 }
