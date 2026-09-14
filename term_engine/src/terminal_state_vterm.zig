@@ -389,3 +389,70 @@ test "hyperlink cache deduplicates metadata and never reuses exhausted IDs" {
     try std.testing.expectEqual(bytes, adapter.handle.?.hyperlink_bytes);
     try std.testing.expectEqual(@as(u32, std.math.maxInt(i32)), adapter.handle.?.next_hyperlink_id);
 }
+
+fn expectSameTextSnapshot(expected: screen_types.HostScreenSnapshot, actual: screen_types.HostScreenSnapshot) !void {
+    try std.testing.expectEqual(expected.cursor_row, actual.cursor_row);
+    try std.testing.expectEqual(expected.cursor_col, actual.cursor_col);
+    for (expected.lines, actual.lines) |left, right| {
+        try std.testing.expectEqualDeep(left.cells, right.cells);
+    }
+}
+
+test "UTF-8 text survives every two-part read boundary and bytewise feeds" {
+    const samples = [_][]const u8{
+        "ordinary ASCII text",
+        "prefix \xc2\xa3 \xe2\x82\xac \xf0\x9f\x98\x80 suffix",
+        "e\xcc\x81 A\xcc\x88 end",
+        "\xc2\xa3\xe2\x82\xac\xf0\x9f\x98\x80 ASCII",
+        "prefix \xe2X end",
+    };
+    for ([_]VTermAdapter.GraphemeMode{ .legacy, .unicode }) |mode| {
+        for (samples) |input| {
+            var reference = try VTermAdapter.initWithMode(3, 40, mode);
+            defer reference.deinit();
+            reference.feed(input);
+            var expected = try reference.snapshot(std.testing.allocator);
+            defer screen_types.freeScreenSnapshot(std.testing.allocator, &expected);
+            for (0..input.len + 1) |boundary| {
+                var adapter = try VTermAdapter.initWithMode(3, 40, mode);
+                defer adapter.deinit();
+                adapter.feed(input[0..boundary]);
+                adapter.feed(input[boundary..]);
+                var actual = try adapter.snapshot(std.testing.allocator);
+                defer screen_types.freeScreenSnapshot(std.testing.allocator, &actual);
+                try expectSameTextSnapshot(expected, actual);
+            }
+            var bytewise = try VTermAdapter.initWithMode(3, 40, mode);
+            defer bytewise.deinit();
+            for (0..input.len) |i| bytewise.feed(input[i .. i + 1]);
+            var actual = try bytewise.snapshot(std.testing.allocator);
+            defer screen_types.freeScreenSnapshot(std.testing.allocator, &actual);
+            try expectSameTextSnapshot(expected, actual);
+        }
+    }
+}
+
+test "UTF-8 reset discards an incomplete character" {
+    for ([_][]const u8{ "\xe2", "A\xe2" }) |prefix| {
+        var adapter = try VTermAdapter.init(2, 16);
+        defer adapter.deinit();
+        adapter.feed(prefix);
+        adapter.feed("\x1bcZ");
+        var snapshot = try adapter.snapshot(std.testing.allocator);
+        defer screen_types.freeScreenSnapshot(std.testing.allocator, &snapshot);
+        try std.testing.expectEqual(@as(u32, 'Z'), snapshot.lines[0].cells[0].chars[0]);
+        try std.testing.expectEqual(@as(u16, 1), snapshot.cursor_col);
+    }
+}
+
+test "UTF-8 shared decoder preserves designated ASCII character sets" {
+    var adapter = try VTermAdapter.init(2, 16);
+    defer adapter.deinit();
+    adapter.feed("\x1b(0q\x1b(B A\xc2");
+    adapter.feed("\xa3");
+    var snapshot = try adapter.snapshot(std.testing.allocator);
+    defer screen_types.freeScreenSnapshot(std.testing.allocator, &snapshot);
+    try std.testing.expectEqual(@as(u32, 0x2500), snapshot.lines[0].cells[0].chars[0]);
+    try std.testing.expectEqual(@as(u32, 'A'), snapshot.lines[0].cells[2].chars[0]);
+    try std.testing.expectEqual(@as(u32, 0xa3), snapshot.lines[0].cells[3].chars[0]);
+}
