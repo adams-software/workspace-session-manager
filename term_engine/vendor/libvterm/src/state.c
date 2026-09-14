@@ -251,9 +251,6 @@ static VTermState *vterm_state_new(VTerm *vt)
 
   state->bold_is_highbright = 0;
 
-  state->combine_chars_size = 16;
-  state->combine_chars = vterm_allocator_malloc(state->vt, state->combine_chars_size * sizeof(state->combine_chars[0]));
-
   state->tabstops = vterm_allocator_malloc(state->vt, (state->cols + 7) / 8);
 
   state->lineinfos[BUFIDX_PRIMARY]   = vterm_allocator_malloc(state->vt, state->rows * sizeof(VTermLineInfo));
@@ -274,7 +271,6 @@ INTERNAL void vterm_state_free(VTermState *state)
   vterm_allocator_free(state->vt, state->lineinfos[BUFIDX_PRIMARY]);
   if(state->lineinfos[BUFIDX_ALTSCREEN])
     vterm_allocator_free(state->vt, state->lineinfos[BUFIDX_ALTSCREEN]);
-  vterm_allocator_free(state->vt, state->combine_chars);
   vterm_allocator_free(state->vt, state);
 }
 
@@ -365,19 +361,6 @@ static void linefeed(VTermState *state)
   }
   else if(state->pos.row < state->rows-1)
     state->pos.row++;
-}
-
-static void grow_combine_buffer(VTermState *state)
-{
-  size_t    new_size = state->combine_chars_size * 2;
-  uint32_t *new_chars = vterm_allocator_malloc(state->vt, new_size * sizeof(new_chars[0]));
-
-  memcpy(new_chars, state->combine_chars, state->combine_chars_size * sizeof(new_chars[0]));
-
-  vterm_allocator_free(state->vt, state->combine_chars);
-
-  state->combine_chars = new_chars;
-  state->combine_chars_size = new_size;
 }
 
 static void set_col_tabstop(VTermState *state, int col)
@@ -523,14 +506,13 @@ static int on_text(const char bytes[], size_t len, void *user)
       while(state->combine_chars[saved_i])
         saved_i++;
 
-      /* Add extra ones */
+      /* Retain only what a screen cell can display, but consume all marks.
+       * This bounds both storage and the scan above across text callbacks. */
       while(i < npoints && vterm_unicode_is_combining(codepoints[i])) {
-        if(saved_i >= state->combine_chars_size)
-          grow_combine_buffer(state);
-        state->combine_chars[saved_i++] = codepoints[i++];
+        if(saved_i < VTERM_MAX_CHARS_PER_CELL)
+          state->combine_chars[saved_i++] = codepoints[i];
+        i++;
       }
-      if(saved_i >= state->combine_chars_size)
-        grow_combine_buffer(state);
       state->combine_chars[saved_i] = 0;
 
 #ifdef DEBUG_GLYPH_COMBINE
@@ -621,12 +603,8 @@ static int on_text(const char bytes[], size_t len, void *user)
        * more on the next call */
       int save_i;
       for(save_i = 0; chars[save_i]; save_i++) {
-        if(save_i >= state->combine_chars_size)
-          grow_combine_buffer(state);
         state->combine_chars[save_i] = chars[save_i];
       }
-      if(save_i >= state->combine_chars_size)
-        grow_combine_buffer(state);
       state->combine_chars[save_i] = 0;
       state->combine_width = width;
       state->combine_pos = state->pos;

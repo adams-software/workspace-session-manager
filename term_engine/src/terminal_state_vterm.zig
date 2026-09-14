@@ -456,3 +456,47 @@ test "UTF-8 shared decoder preserves designated ASCII character sets" {
     try std.testing.expectEqual(@as(u32, 'A'), snapshot.lines[0].cells[2].chars[0]);
     try std.testing.expectEqual(@as(u32, 0xa3), snapshot.lines[0].cells[3].chars[0]);
 }
+
+const CountingVTermAllocator = struct {
+    allocations: usize = 0,
+
+    fn alloc(size: usize, data: ?*anyopaque) callconv(.c) ?*anyopaque {
+        const self: *@This() = @ptrCast(@alignCast(data.?));
+        self.allocations += 1;
+        return c.calloc(1, size);
+    }
+
+    fn free(ptr: ?*anyopaque, _: ?*anyopaque) callconv(.c) void {
+        c.free(ptr);
+    }
+};
+
+test "repeated split combining marks retain bounded memory and preserve following text" {
+    for ([_]c.VTermGraphemeMode{ c.VTERM_GRAPHEME_MODE_LEGACY, c.VTERM_GRAPHEME_MODE_UNICODE }) |mode| {
+        var counter: CountingVTermAllocator = .{};
+        var allocator: c.VTermAllocatorFunctions = .{
+            .malloc = CountingVTermAllocator.alloc,
+            .free = CountingVTermAllocator.free,
+        };
+        const vt = c.vterm_new_with_allocator(2, 40, &allocator, &counter) orelse return error.OutOfMemory;
+        defer c.vterm_free(vt);
+        c.vterm_set_utf8(vt, 1);
+        c.vterm_set_grapheme_mode(vt, mode);
+        const screen = c.vterm_obtain_screen(vt);
+        c.vterm_screen_reset(screen, 1);
+        _ = c.vterm_input_write(vt, "e", 1);
+        const baseline = counter.allocations;
+        for (0..4096) |_| {
+            _ = c.vterm_input_write(vt, "\xcc", 1);
+            _ = c.vterm_input_write(vt, "\x81", 1);
+        }
+        try std.testing.expectEqual(baseline, counter.allocations);
+        // Excess marks in one callback must also be consumed before Z.
+        const tail = "\xcc\x81" ** 64 ++ "Z";
+        _ = c.vterm_input_write(vt, tail, tail.len);
+        try std.testing.expectEqual(baseline, counter.allocations);
+        var text: [64]u8 = undefined;
+        const len = c.vterm_screen_get_text(screen, &text, text.len, .{ .start_row = 0, .end_row = 1, .start_col = 0, .end_col = 2 });
+        try std.testing.expectEqualStrings("e" ++ "\xcc\x81" ** (c.VTERM_MAX_CHARS_PER_CELL - 1) ++ "Z", text[0..len]);
+    }
+}

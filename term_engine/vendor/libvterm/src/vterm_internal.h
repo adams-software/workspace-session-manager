@@ -106,8 +106,7 @@ struct VTermState
   enum { MOUSE_X10, MOUSE_UTF8, MOUSE_SGR, MOUSE_RXVT } mouse_protocol;
 
   /* Last glyph output, for Unicode recombining purposes */
-  uint32_t *combine_chars;
-  size_t combine_chars_size; // Number of ELEMENTS in the above
+  uint32_t combine_chars[VTERM_MAX_CHARS_PER_CELL + 1];
   int combine_width; // The width of the glyph above
   VTermPos combine_pos;   // Position before movement
 
