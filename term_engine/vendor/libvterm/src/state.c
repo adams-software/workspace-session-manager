@@ -483,6 +483,12 @@ static int on_text(const char bytes[], size_t len, void *user)
     state->vt->mode.utf8   ? &state->encoding_utf8 :
                              &state->encoding[state->gr_set];
 
+  /* UTF-8 may start in a text callback beginning with ASCII and finish in
+   * one beginning with a continuation byte. Both must use the same decoder
+   * state, rather than separate GL and high-byte instances. */
+  if(encoding->enc == state->encoding_utf8.enc)
+    encoding = &state->encoding_utf8;
+
   (*encoding->enc->decode)(encoding->enc, encoding->data,
       codepoints, &npoints, state->gsingle_set ? 1 : maxpoints,
       bytes, &eaten, len);
@@ -501,7 +507,7 @@ static int on_text(const char bytes[], size_t len, void *user)
 
   /* This is a combining char. that needs to be merged with the previous
    * glyph output */
-  if(vterm_get_grapheme_mode(state->vt) == VTERM_GRAPHEME_MODE_LEGACY && vterm_unicode_is_combining(codepoints[i])) {
+  if(vterm_unicode_is_combining(codepoints[i])) {
     /* See if the cursor has moved since */
     if(state->pos.row == state->combine_pos.row && state->pos.col == state->combine_pos.col + state->combine_width) {
 #ifdef DEBUG_GLYPH_COMBINE
@@ -2319,6 +2325,7 @@ void vterm_state_reset(VTermState *state, int hard)
     if(default_enc->init)
       (*default_enc->init)(default_enc, state->encoding[i].data);
   }
+  (*state->encoding_utf8.enc->init)(state->encoding_utf8.enc, state->encoding_utf8.data);
 
   state->gl_set = 0;
   state->gr_set = 1;

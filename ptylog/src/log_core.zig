@@ -1295,7 +1295,8 @@ test "large feed matches split feeds across styled Unicode and hyperlink sequenc
         try whole.feed(input);
         var offset: usize = 0;
         while (offset < input.len) {
-            const end = @min(input.len, offset + line.len);
+            // Deliberately split UTF-8 and terminal escape sequences.
+            const end = @min(input.len, offset + 7);
             try split.feed(input[offset..end]);
             offset = end;
         }
