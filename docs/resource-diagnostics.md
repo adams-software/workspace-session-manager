@@ -90,7 +90,8 @@ exercise the full attached WSM session tree or stalled output readers.
 ## Scheduled soak
 
 The `resource-soak` GitHub Actions workflow runs this same fixture for three
-hours, scheduled daily at 03:23 UTC on the default branch. GitHub may delay
+hours, scheduled daily at 02:00 UTC on the default branch (9 PM EST the previous
+evening, or 10 PM EDT). GitHub may delay
 scheduled runs. It uses ReleaseSafe binaries and the same RSS and idle-CPU
 thresholds as the short CI check; normal pull-request checks remain short.
 
@@ -105,3 +106,9 @@ run may only contain partial measurements; a successful result record confirms
 completion. The soak step has a 190-minute timeout inside a 210-minute job limit
 to leave time for building and uploading results. A cancelled job or runner
 failure can prevent artifact upload.
+
+For a separate scheduled analysis prompt, use 10:00 UTC (5 AM EST / 6 AM EDT).
+This leaves eight hours between scheduled starts for the soak, build, upload,
+and runner delays. Configure that review in Codex WebUI; the workflow does not
+schedule the analysis. The reviewer should still report an unfinished run as
+incomplete rather than substituting an older result.
