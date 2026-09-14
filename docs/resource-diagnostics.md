@@ -55,14 +55,21 @@ checks. It does not add background monitoring to WSM.
 
 ## Repeated-workload regression
 
-CI also keeps one optimized `ptylog` process alive through 32 batches of 4,000
-lines, alternating plain scrolling text and unique hyperlinks. Each batch waits
-for its completion marker to reach the log before sampling the helper's RSS.
+CI also keeps one optimized `ptylog` process alive through at least 32 batches,
+cycling through plain scrolling text, unique hyperlinks, Unicode text (4,000
+lines each), and long combining-mark sequences (64 lines of 4,096 accents).
+Unicode batches include emoji and ordinary accents, and use small writes to
+exercise PTY read boundaries; unit tests cover exact byte boundaries. Each
+Unicode/combining batch ends with a content probe that must survive in the log,
+including the screen cell's six-codepoint limit for long combining sequences.
+Each batch waits for its completion marker to reach the log before checking
+content and sampling the helper's RSS. JSONL batch records identify the workload.
 The fixture rotates logs with a 256 KiB budget and discards terminal output;
 the Python producer's memory is not included in the helper's measurements.
 
-After four warm-up batches, RSS must remain within 12 MiB of the baseline. Once
-output stops, CPU must stay below 5% of one core over a 1.5-second sample. These
+After four warm-up batches (one of each workload), RSS must remain within 12 MiB
+of the baseline. Once output stops, CPU must stay below 5% of one core over a
+1.5-second sample. These
 are deliberately generous regression limits for this workload, not guarantees
 about every application or proof that smaller leaks are absent. CI preserves
 JSONL measurements as the `ptylog-resources` artifact, including on failure.
