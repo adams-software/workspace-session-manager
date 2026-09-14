@@ -16,6 +16,7 @@ GROWTH_LIMIT_KIB = 12 * 1024
 CPU_LIMIT = 5
 WARMUP_BATCHES = 4
 MIN_BATCHES = 32
+WORKLOADS = ("plain", "hyperlink", "unicode", "combining")
 CHILD = r"""
 import os, pathlib, sys, tty
 tty.setraw(0)
@@ -25,13 +26,29 @@ ready.with_suffix(".tmp").replace(ready)
 for batch, command in enumerate(sys.stdin):
     if command.strip() == "quit":
         break
-    if batch % 2:
+    kind = batch % 4
+    if kind == 1:
         text = "".join("\x1b]8;;https://example/%d/%d\x1b\\link\x1b]8;;\x1b\\\r\n"
                        % (batch, line) for line in range(4000))
+    elif kind == 2:
+        sample = "ASCII \u00a3 \u20ac \U0001f600 e\u0301 A\u0308 end"
+        text = (sample + "\r\n") * 4000
+        text += "CHECK%d:%s\r\n" % (batch, sample)
+    elif kind == 3:
+        sample = "e" + "\u0301" * 4096 + " tail"
+        text = (sample + "\r\n") * 64
+        text += "CHECK%d:%s\r\n" % (batch, sample)
     else:
         text = "scrolling line\r\n" * 4000
-    sys.stdout.write(text + "DONE%d\r\nWAIT\r\n" % batch)
-    sys.stdout.flush()
+    data = (text + "DONE%d\r\nWAIT\r\n" % batch).encode("utf-8")
+    if kind >= 2:
+        # Small writes encourage split reads; exact boundaries are unit-tested.
+        offset = 0
+        while offset < len(data):
+            offset += os.write(1, data[offset:offset + 257])
+    else:
+        sys.stdout.buffer.write(data)
+        sys.stdout.buffer.flush()
 """
 
 
@@ -72,7 +89,10 @@ def log_tail(path):
 
 def wait_for(process, check):
     deadline = time.monotonic() + 30
-    while not check():
+    while True:
+        result = check()
+        if result:
+            return result
         usage(process)
         if time.monotonic() >= deadline:
             raise RuntimeError("timed out waiting for workload progress")
@@ -122,8 +142,24 @@ def check(binary, soak_seconds):
                 while batch < MIN_BATCHES or time.monotonic() - start < soak_seconds:
                     process.stdin.write(b"batch\n")
                     process.stdin.flush()
-                    marker = f"DONE{batch}".encode()
-                    wait_for(process, lambda: marker in log_tail(log))
+                    marker = f"DONE{batch}\x1b[0m\n".encode()
+                    tail = wait_for(
+                        process,
+                        lambda: data if marker in (data := log_tail(log)) else None,
+                    )
+                    workload = WORKLOADS[batch % len(WORKLOADS)]
+                    if workload in ("unicode", "combining"):
+                        # The cell holds six codepoints: e plus five accents.
+                        sample = (
+                            "ASCII £ € 😀 e\u0301 A\u0308 end"
+                            if workload == "unicode"
+                            else "e" + "\u0301" * 5 + " tail"
+                        )
+                        expected = f"CHECK{batch}:{sample}\x1b[0m\n".encode("utf-8") + marker
+                        if expected not in tail:
+                            raise RuntimeError(
+                                f"{workload} log text mismatch in batch {batch}"
+                            )
                     current = usage(process)["rss_kib"]
                     if batch == WARMUP_BATCHES - 1:
                         baseline = current
@@ -133,6 +169,7 @@ def check(binary, soak_seconds):
                     report(
                         type="batch",
                         batch=batch,
+                        workload=workload,
                         rss_kib=current,
                         growth_kib=growth,
                         elapsed_seconds=round(time.monotonic() - start, 3),
