@@ -20,6 +20,20 @@ fn addVendoredLibvterm(module: *std.Build.Module, b: *std.Build) void {
     } });
 }
 
+fn buildVersion(b: *std.Build) []const u8 {
+    if (b.option([]const u8, "version", "Version shown in wsm help (defaults to Git describe)")) |version|
+        return version;
+
+    var code: u8 = 0;
+    const output = b.runAllowFail(&.{
+        "git",     "-C",      b.build_root.path orelse ".", "describe",
+        "--tags",  "--match", "v[0-9]*",                    "--always",
+        "--dirty",
+    }, &code, .ignore) catch return "dev";
+    const version = std.mem.trim(u8, output, " \r\n\t");
+    return if (code == 0 and version.len > 0) version else "dev";
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -202,6 +216,9 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+    const version_options = b.addOptions();
+    version_options.addOption([]const u8, "version", buildVersion(b));
+    wsm_root.addOptions("build_options", version_options);
     wsm_root.addImport("byte_queue", byte_queue_mod);
     wsm_root.addImport("fd_stream", fd_stream_mod);
     wsm_root.addImport("duplex_link", duplex_link_mod);
