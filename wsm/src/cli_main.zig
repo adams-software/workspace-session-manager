@@ -143,7 +143,7 @@ pub fn parseMode(allocator: std.mem.Allocator, argv: []const []const u8) !Mode {
 
 pub fn printHelp(allocator: std.mem.Allocator, writer: anytype, workspace_root: ?[]const u8, current_session: ?[]const u8) !void {
     try writer.writeAll(
-        "wsm - workspace session manager\n\n" ++
+        "wsm " ++ @import("build_options").version ++ " - workspace session manager\n\n" ++
             "USAGE\n" ++
             "  wsm <command> [args]\n\n" ++
             "COMMANDS\n" ++

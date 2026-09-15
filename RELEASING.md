@@ -14,6 +14,12 @@ bash wsm/scripts/smoke_wsm.sh
 
 `build_dist.sh` now pins the release artifact to a portable Zig target for `linux-x86_64` instead of inheriting the release machine's native CPU features. That matters: a native build on a newer host can emit AVX instructions and crash with `Illegal instruction` on older x86_64 machines.
 
+`wsm help` includes the version embedded at build time. Tagged release builds
+use the Git tag automatically (for example, `v0.1.0-beta.26`). Development builds
+use `git describe`, including a revision suffix and `-dirty` for tracked edits.
+Without Git metadata the version is `dev`; source-archive builders can set it
+explicitly with `zig build -Dversion=v0.1.0-beta.26`. Git is not needed at runtime.
+
 ## 2) Do a fresh local install sanity check
 
 ```bash
