@@ -70,6 +70,8 @@ pub fn createSession(allocator: std.mem.Allocator, host_bin: []const u8, provide
     defer allocator.free(log_path);
     const session_id_env = try std.fmt.allocPrint(allocator, "WSM_SESSION_ID={s}", .{spec.id});
     defer allocator.free(session_id_env);
+    const workspace_env = try std.fmt.allocPrint(allocator, "WSM_ROOT={s}", .{provider.root});
+    defer allocator.free(workspace_env);
     const term_env = try std.fmt.allocPrint(allocator, "TERM={s}", .{sessionTerm()});
     defer allocator.free(term_env);
 
@@ -92,6 +94,7 @@ pub fn createSession(allocator: std.mem.Allocator, host_bin: []const u8, provide
         "--",
         "env",
         session_id_env,
+        workspace_env,
         term_env,
         spec.shell,
         "-i",

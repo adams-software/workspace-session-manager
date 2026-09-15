@@ -1,6 +1,8 @@
 # Quickstart
 
-This repo currently targets Linux first.
+For release installation, prerequisites, PATH, and session-directory setup, see
+the [README install guide](../README.md#install). Release bundles target Linux
+x86_64 with glibc 2.28 or newer. Source builds use Zig 0.16.0.
 
 ## Build from source
 
@@ -58,7 +60,8 @@ After unpacking the tarball:
 sh install.sh
 ```
 
-No separate `libvterm0` runtime package is required. The private runtime helpers vendor libvterm as part of the project build and release bundle.
+`wsm log` requires Bash and `less`; normal session use does not require Zig or
+tmux. No separate `libvterm0` runtime package is required. The private runtime helpers vendor libvterm as part of the project build and release bundle.
 
 By default this installs to:
 
@@ -116,8 +119,8 @@ This is the generic single-child host process. Most users should prefer `wsm`, w
 Use workspace-wide naming:
 
 ```bash
-wsm create -a api/dev -- bash
-wsm status api/dev
+wsm create api/dev
+wsm inspect api/dev
 wsm attach api/dev
 ```
 

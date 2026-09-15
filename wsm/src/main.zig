@@ -84,15 +84,9 @@ const App = struct {
     layout: bar_layout.Layout,
     reassert_bar_after_first_pump: bool,
 
-    fn init(allocator: std.mem.Allocator, term: *TerminalState, initial_mode: ?cli_main.Mode) !App {
+    fn init(allocator: std.mem.Allocator, term: *TerminalState, initial_mode: ?cli_main.Mode, root: []const u8) !App {
         var bar_state = ui_state.State.init(allocator);
         errdefer bar_state.deinit();
-
-        const root_env = if (std.c.getenv("WSM_ROOT")) |value| std.mem.span(value) else ".";
-        var root_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const root_len = try std.Io.Dir.realPathFile(.cwd(), std.Io.Threaded.global_single_threaded.io(), root_env, &root_buf);
-        const root = try allocator.dupe(u8, root_buf[0..root_len]);
-        defer allocator.free(root);
 
         var provider = try policy.Provider.init(allocator, root, null);
         errdefer provider.deinit();
@@ -449,37 +443,31 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
+    const root = cli_main.resolveWorkspace(init.io, allocator, args) catch |err| {
+        std.debug.print("wsm: cannot open session directory ({s}). Set WSM_ROOT to an existing directory you own, or use --workspace=<path>.\n", .{@errorName(err)});
+        std.process.exit(1);
+    };
+    defer allocator.free(root);
+
     switch (mode) {
         .help, .list, .inspect, .log, .cleanup, .create_detached, .create_detached_alias, .kill => {
-            const root = cli_main.resolveWorkspace(init.io, allocator, args) catch |err| {
-                if (err == error.MissingWorkspace) {
-                    var stdout_buf: [4096]u8 = undefined;
-                    var stdout_writer = std.Io.File.stdout().writer(init.io, &stdout_buf);
-                    const current_session = if (std.c.getenv("WSM_SESSION_ID")) |value| std.mem.span(value) else null;
-                    try cli_main.printHelp(allocator, &stdout_writer.interface, null, current_session);
-                    try stdout_writer.interface.flush();
-                    return;
-                }
-                return err;
-            };
-            defer allocator.free(root);
             var stdout_buf: [4096]u8 = undefined;
             var stdout_writer = std.Io.File.stdout().writer(init.io, &stdout_buf);
             _ = try cli_main.runCommand(allocator, root, mode, &stdout_writer.interface);
             try stdout_writer.interface.flush();
             return;
         },
-        .interactive_attach, .interactive_create_attach => try runInteractive(allocator, mode),
+        .interactive_attach, .interactive_create_attach => try runInteractive(allocator, mode, root),
     }
 }
 
-fn runInteractive(allocator: std.mem.Allocator, mode: cli_main.Mode) !void {
+fn runInteractive(allocator: std.mem.Allocator, mode: cli_main.Mode, root: []const u8) !void {
     installSigwinchHandler();
 
     var term = try TerminalState.init();
     try writeAll(term.tty_fd, ENTER_ALT_SCREEN);
 
-    var app = try App.init(allocator, &term, mode);
+    var app = try App.init(allocator, &term, mode, root);
 
     app.render() catch |err| {
         try setRuntimeExitMessage(&app, allocator, "render", err);
