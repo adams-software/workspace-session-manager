@@ -56,6 +56,15 @@ echo "Installed private runtime helpers to: $LIBEXEC_DEST"
 echo "Installed bash completions to: $COMP_DEST"
 echo "Bash completion files were installed as command-name autoload files."
 echo "Make sure $BIN_DEST is on your PATH."
+echo "Run wsm help to see the version and active session directory."
+if [ -n "${WSM_ROOT:-}" ]; then
+  echo "Session directory (WSM_ROOT): $WSM_ROOT"
+else
+  echo "Default session directory: /tmp/wsm-$(id -u) (private, created on first use)"
+fi
+echo 'For persistent logs: mkdir -p "$HOME/sessions"; export WSM_ROOT="$HOME/sessions"'
+echo 'Use --workspace=<path> to override the directory for one command.'
+echo 'Log viewing requires Bash and less. No Zig, Git, or tmux is needed to run wsm.'
 EOS
 chmod +x "$DIST_ROOT/install.sh"
 

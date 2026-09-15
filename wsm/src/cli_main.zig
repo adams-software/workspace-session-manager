@@ -163,7 +163,9 @@ pub fn printHelp(allocator: std.mem.Allocator, writer: anytype, workspace_root: 
             "  Status-bar letters map to CLI aliases where that makes sense: a/c/g/x.\n" ++
             "  The bar's [d]etach action is UI-local and does not have a top-level CLI alias.\n\n" ++
             "GLOBAL OPTIONS\n" ++
-            "  --workspace <path>        Workspace root (fallback: WSM_ROOT)\n\n",
+            "  --workspace=<path>        Session directory (overrides WSM_ROOT)\n" ++
+            "  Default: /tmp/wsm-<uid> when WSM_ROOT is unset or empty.\n" ++
+            "  For persistent logs: mkdir -p ~/sessions; export WSM_ROOT=\"$HOME/sessions\"\n\n",
     );
 
     if (workspace_root) |root| {
@@ -183,15 +185,11 @@ pub fn resolveWorkspace(io: std.Io, allocator: std.mem.Allocator, argv: []const 
     defer allocator.free(parsed.options);
     defer allocator.free(parsed.positionals);
     defer if (parsed.literal_tail) |tail| allocator.free(tail);
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-
-    if (argv_parse.findOptionValue(parsed, &.{"workspace"})) |v| {
-        const n = try std.Io.Dir.realPathFile(.cwd(), io, v, &buf);
-        return try allocator.dupe(u8, buf[0..n]);
+    if (argv_parse.findOption(parsed, &.{"workspace"})) |option| {
+        if (option.value == null or option.value.?.len == 0) return error.MissingOptionValue;
     }
-    const env_root = std.c.getenv("WSM_ROOT") orelse return error.MissingWorkspace;
-    const n = try std.Io.Dir.realPathFile(.cwd(), io, std.mem.span(env_root), &buf);
-    return try allocator.dupe(u8, buf[0..n]);
+    const environment = if (std.c.getenv("WSM_ROOT")) |value| std.mem.span(value) else null;
+    return @import("workspace.zig").resolve(io, allocator, argv_parse.findOptionValue(parsed, &.{"workspace"}), environment);
 }
 
 fn presentSummary(allocator: std.mem.Allocator, info: service_mod.SessionInfo) ![]u8 {

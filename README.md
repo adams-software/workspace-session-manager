@@ -8,7 +8,7 @@ If you just want to start using it, start with `wsm help`.
 
 ### from GitHub release
 
-Once release assets are published, the intended install path is:
+Install the latest release without sudo:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/adams-software/workspace-session-manager/main/scripts/install-release.sh | sh
@@ -16,9 +16,46 @@ curl -fsSL https://raw.githubusercontent.com/adams-software/workspace-session-ma
 
 That downloads the latest Linux x86_64 release bundle and runs its installer.
 
+Requirements:
+
+- **Linux x86_64 with glibc 2.28 or newer.** The release bundle does not support
+  ARM, macOS, or musl-based systems such as Alpine.
+- A POSIX shell and `curl` for the command above (the downloaded script also
+  accepts `wget`), plus `tar`, `gzip`, `mktemp`, `mkdir`, `rm`, `install`, `env`, `id`, `uname`, and `getconf`.
+  These normally come with the system's core utilities.
+- A usable PTY (`/dev/ptmx` and `/dev/pts`), `/proc`, and a writable session
+  directory, plus the standard `env` command for launching the shell. Interactive
+  sessions need a terminal; detached commands can run
+  without one. WSM uses `$SHELL`, falling back to `/bin/sh`.
+- **Bash and `less` for `wsm log`**; they are not needed for creating sessions.
+  Bash completion is optional and uses your shell's bash-completion setup.
+
+No Zig, Git, tmux, Python, or separate libvterm package is required at runtime.
+Do not run the installer with sudo for the default per-user installation.
+
+The installer cannot update the calling shell's PATH. After installation:
+
+```sh
+export PATH="$HOME/.local/bin:$PATH"
+wsm help
+```
+
+Add the PATH export once to `~/.bashrc` (Bash) or `~/.zshrc` (Zsh) for future
+shells. `wsm help` identifies the installed version and session directory.
+To install elsewhere, put `PREFIX` on the **sh side** of the pipe:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/adams-software/workspace-session-manager/main/scripts/install-release.sh | PREFIX="$HOME/apps/wsm" sh
+```
+
+Then add `$HOME/apps/wsm/bin` to PATH instead. To select an older release, use
+`VERSION=v0.1.0-beta.27 sh` on that side of the pipe.
+
 ### from a local checkout
 
-Build a local distribution bundle:
+Building from source requires Zig **0.16.0**, Bash, and the standard build/install
+utilities. Git is optional but supplies the embedded build version. Build a local
+distribution bundle:
 
 ```bash
 ./scripts/build_dist.sh
@@ -77,31 +114,38 @@ correctly while `~/.local/bin/wsm` shows stale behavior.
 
 ## Quick usage
 
-Set up a workspace root in your shell environment:
+Session directory selection in current source builds is:
 
-### bash
+1. `--workspace=<path>` for that command.
+2. A nonempty `WSM_ROOT` environment variable.
+3. `/tmp/wsm-<uid>` (for example `/tmp/wsm-1000`), created automatically with
+   owner-only permissions. `wsm help` shows the resolved `WORKSPACE` path.
 
-```bash
-mkdir -p ~/sessions
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
-echo 'export WSM_ROOT="$HOME/sessions"' >> ~/.bashrc
-source ~/.bashrc
+**Release compatibility:** beta27 and earlier require `WSM_ROOT` for CLI
+commands; the automatic default is available in source builds and the next
+release. If your installed `wsm help` shows no `WORKSPACE`, configure it below.
+
+For a persistent directory, choose an existing directory you own:
+
+```sh
+mkdir -p "$HOME/sessions"
+export WSM_ROOT="$HOME/sessions"
 ```
 
-### zsh
+Add that export once to `~/.bashrc` or `~/.zshrc` if desired. To use a different
+directory for one command:
 
-```bash
-mkdir -p ~/sessions
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
-echo 'export WSM_ROOT="$HOME/sessions"' >> ~/.zshrc
-source ~/.zshrc
+```sh
+mkdir -p "$HOME/project-sessions"
+wsm --workspace="$HOME/project-sessions" create test
 ```
 
-Then run `wsm help` to see the command surface:
-
-```bash
-wsm help
-```
+`/tmp` may be cleared on reboot or by system cleanup. Use a persistent directory
+if you want to retain logs; live processes do not survive reboot either way.
+Changing the directory changes which sessions WSM discovers—it does not move or
+terminate existing sessions. If an older interactive build created sessions in
+the current directory without `WSM_ROOT`, select that directory explicitly to
+find them again.
 
 Create and attach to a workspace session:
 

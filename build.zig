@@ -564,7 +564,17 @@ pub fn build(b: *std.Build) void {
     const test_server_step = b.step("test-server", "Run host PTY EOF tests");
     test_server_step.dependOn(&run_server_tests.step);
 
+    const workspace_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("wsm/src/workspace.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    }) });
+    const run_workspace_tests = b.addRunArtifact(workspace_tests);
+    const test_workspace_step = b.step("test-workspace", "Run workspace directory tests");
+    test_workspace_step.dependOn(&run_workspace_tests.step);
     const test_step = b.step("test", "Run workspace tests");
+    test_step.dependOn(&run_workspace_tests.step);
     test_step.dependOn(&run_server_tests.step);
     test_step.dependOn(&run_terminal_state_vterm_tests.step);
     test_step.dependOn(&run_session_link_tests.step);
