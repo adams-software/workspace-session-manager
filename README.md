@@ -114,7 +114,7 @@ correctly while `~/.local/bin/wsm` shows stale behavior.
 
 ## Quick usage
 
-Session directory selection in current source builds is:
+Session directory selection in beta28 and newer is:
 
 1. `--workspace=<path>` for that command.
 2. A nonempty `WSM_ROOT` environment variable.
@@ -122,8 +122,7 @@ Session directory selection in current source builds is:
    owner-only permissions. `wsm help` shows the resolved `WORKSPACE` path.
 
 **Release compatibility:** beta27 and earlier require `WSM_ROOT` for CLI
-commands; the automatic default is available in source builds and the next
-release. If your installed `wsm help` shows no `WORKSPACE`, configure it below.
+commands; the automatic default is available in beta28 and newer. If your installed `wsm help` shows no `WORKSPACE`, configure it below.
 
 For a persistent directory, choose an existing directory you own:
 
