@@ -166,13 +166,12 @@ pub const State = struct {
     fn handleActiveMenu(self: *State, ctx: ExternalContext, key: Key) StepResult {
         _ = ctx;
         return switch (key) {
-            .esc, .ctrl_g, .enter => blk: {
+            .esc, .ctrl_g, .ctrl_c, .enter => blk: {
                 self.mode = .passive;
                 self.notice_kind = .none;
                 self.notice_text.clearRetainingCapacity();
                 break :blk .{ .rerender = true };
             },
-            .ctrl_c => .{ .rerender = true, .action = .detach },
             .left => .{ .rerender = true, .action = .prev },
             .right => .{ .rerender = true, .action = .next },
             .down => .{ .rerender = true, .action = .in },
@@ -205,8 +204,7 @@ pub const State = struct {
 
     fn handlePromptAttach(self: *State, ctx: ExternalContext, key: Key) StepResult {
         return switch (key) {
-            .ctrl_c => .{ .rerender = true, .action = .quit },
-            .ctrl_g => blk: {
+            .ctrl_c, .ctrl_g => blk: {
                 self.mode = .passive;
                 self.notice_kind = .none;
                 self.notice_text.clearRetainingCapacity();
@@ -273,8 +271,7 @@ pub const State = struct {
 
     fn handlePromptCreate(self: *State, key: Key) StepResult {
         return switch (key) {
-            .ctrl_c => .{ .rerender = true, .action = .quit },
-            .ctrl_g => blk: {
+            .ctrl_c, .ctrl_g => blk: {
                 self.mode = .passive;
                 self.notice_kind = .none;
                 self.notice_text.clearRetainingCapacity();
@@ -326,6 +323,10 @@ pub const State = struct {
 
     fn handlePromptKill(self: *State, key: Key) StepResult {
         return switch (key) {
+            .ctrl_c => blk: {
+                self.enterPassive();
+                break :blk .{ .rerender = true };
+            },
             .ctrl_g, .esc => blk: {
                 self.mode = .active_menu;
                 self.notice_kind = .none;
@@ -491,4 +492,28 @@ test "enter exits active menu" {
     const result = state.handleKey(.{}, .enter);
     try std.testing.expect(result.rerender);
     try std.testing.expectEqual(Mode.passive, state.mode);
+}
+
+test "ctrl-c dismisses every active UI mode without an action" {
+    for ([_]bool{ false, true }) |detached| {
+        for ([_]Mode{ .active_menu, .prompt_attach, .prompt_create, .prompt_kill }) |mode| {
+            var state = State.init(std.testing.allocator);
+            defer state.deinit();
+            state.mode = mode;
+            _ = state.setExternalError("old notice");
+            const result = state.handleKey(.{ .detached = detached }, .ctrl_c);
+            try std.testing.expectEqual(Mode.passive, state.mode);
+            try std.testing.expect(result.rerender);
+            try std.testing.expect(result.action == null);
+            try std.testing.expectEqualStrings("", state.notice());
+        }
+    }
+}
+
+test "d still detaches from the active menu" {
+    var state = State.init(std.testing.allocator);
+    defer state.deinit();
+    state.mode = .active_menu;
+    const result = state.handleKey(.{}, .{ .printable = 'd' });
+    try std.testing.expectEqual(Action.detach, result.action.?);
 }

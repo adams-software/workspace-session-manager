@@ -139,6 +139,7 @@ Inside the UI:
 - `c` opens create prompt
 - `g` opens logs
 - `x` force-kills the current session child
+- `Ctrl+C` dismisses the menu or prompt and returns focus to the child session
 - `d` detaches from the current interactive session
 - `h/j/k/l` or arrow keys navigate sibling/child/parent/next session targets
 - `b` toggles back to the previously visited session target
