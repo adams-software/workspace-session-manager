@@ -285,6 +285,7 @@ pub fn runCommand(allocator: std.mem.Allocator, root: []const u8, mode: Mode, wr
                 defer allocator.free(line);
                 try writer.writeAll(line);
             }
+            if (!apply) try writer.writeAll("\nDry run. Run `wsm cleanup --apply` to apply these changes.\n");
             if (apply and applied_any) provider.rebuildWorkspaceIndex() catch {};
             return 0;
         },
