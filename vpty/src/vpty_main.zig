@@ -267,7 +267,8 @@ fn handleResizeIfNeeded(
     mode: RunMode,
     viewport: Viewport,
     viewport_intent: ViewportIntent,
-) void {
+    forwarder: *side_effects.SideEffectForwarder,
+) !void {
     const size = lifecycle.takeSettledResizeIfNeeded(terminal) orelse return;
     const resolved = switch (mode) {
         .fullscreen => Viewport.init(0, 0, size.rows, size.cols),
@@ -289,6 +290,10 @@ fn handleResizeIfNeeded(
     shared_model.lock();
     const changed = viewerSizeChanged(shared_model.model.currentSize(), target_rows, target_cols);
     shared_model.unlock();
+
+    // An explicit resize also serves as viewer reactivation, even at the same
+    // size. Screen damage alone cannot restore forwarded input modes.
+    try forwarder.restoreModes(stdout_actor);
 
     if (changed) {
         applyViewerSize(session_host, shared_model, render_thread, stdout_actor, target_rows, target_cols);
@@ -361,7 +366,7 @@ fn pumpUntilExit(lifecycle: *RuntimeLifecycle, session_host: *host.SessionHost, 
     try transport.configureNonBlocking(session_host, terminal.stdin_fd, terminal.stdout_fd);
 
     while (true) {
-        handleResizeIfNeeded(lifecycle, session_host, shared_model, render_thread, stdout_actor, terminal, mode, viewport, viewport_intent);
+        try handleResizeIfNeeded(lifecycle, session_host, shared_model, render_thread, stdout_actor, terminal, mode, viewport, viewport_intent, forwarder);
         lifecycle.issueTerminationIfNeeded(session_host);
         if (stdout_actor.output_failed.load(.seq_cst)) return error.OutputClosed;
         if (exit_status) |status| {
