@@ -29,6 +29,21 @@ const State = enum {
 const max_osc_bytes = 1024 * 1024;
 const max_csi_bytes = 4096;
 
+// Off/on sequences already forwarded by vpty; this does not expand VT support.
+const passthrough_modes = [_][2][]const u8{
+    .{ "\x1b[?1l", "\x1b[?1h" },
+    .{ "\x1b[?2004l", "\x1b[?2004h" },
+    .{ "\x1b[?1004l", "\x1b[?1004h" },
+    .{ "\x1b[?1000l", "\x1b[?1000h" },
+    .{ "\x1b[?1002l", "\x1b[?1002h" },
+    .{ "\x1b[?1003l", "\x1b[?1003h" },
+    .{ "\x1b[?1005l", "\x1b[?1005h" },
+    .{ "\x1b[?1006l", "\x1b[?1006h" },
+    .{ "\x1b[?1015l", "\x1b[?1015h" },
+    .{ "\x1b[?2005l", "\x1b[?2005h" },
+    .{ "\x1b[?2006l", "\x1b[?2006h" },
+};
+
 pub const FeedResult = struct {
     emitted_osc52: bool = false,
     screen_bytes: []const u8,
@@ -59,6 +74,9 @@ pub const SideEffectForwarder = struct {
     osc_buf: std.ArrayList(u8),
     csi_buf: std.ArrayList(u8),
     screen_buf: std.ArrayList(u8),
+    mode_enabled: [passthrough_modes.len]bool = @splat(false),
+    mode_order: [passthrough_modes.len]usize = undefined,
+    mode_count: usize = 0,
 
     pub fn init(allocator: std.mem.Allocator) SideEffectForwarder {
         return .{
@@ -109,38 +127,45 @@ pub const SideEffectForwarder = struct {
         try stdout_actor.enqueueControl(actor_mailboxes.ControlChunk{ .bytes = self.osc_buf.items });
     }
 
-    fn isPassthroughCsi(self: *SideEffectForwarder) bool {
-        const csi = self.csi_buf.items;
-        return std.mem.eql(u8, csi, "\x1b[?1h") or
-            std.mem.eql(u8, csi, "\x1b[?1l") or
-            std.mem.eql(u8, csi, "\x1b[?2004h") or
-            std.mem.eql(u8, csi, "\x1b[?2004l") or
-            std.mem.eql(u8, csi, "\x1b[?1004h") or
-            std.mem.eql(u8, csi, "\x1b[?1004l") or
-            std.mem.eql(u8, csi, "\x1b[?1000h") or
-            std.mem.eql(u8, csi, "\x1b[?1000l") or
-            std.mem.eql(u8, csi, "\x1b[?1002h") or
-            std.mem.eql(u8, csi, "\x1b[?1002l") or
-            std.mem.eql(u8, csi, "\x1b[?1003h") or
-            std.mem.eql(u8, csi, "\x1b[?1003l") or
-            std.mem.eql(u8, csi, "\x1b[?1005h") or
-            std.mem.eql(u8, csi, "\x1b[?1005l") or
-            std.mem.eql(u8, csi, "\x1b[?1006h") or
-            std.mem.eql(u8, csi, "\x1b[?1006l") or
-            std.mem.eql(u8, csi, "\x1b[?1015h") or
-            std.mem.eql(u8, csi, "\x1b[?1015l") or
-            std.mem.eql(u8, csi, "\x1b[?2005h") or
-            std.mem.eql(u8, csi, "\x1b[?2005l") or
-            std.mem.eql(u8, csi, "\x1b[?2006h") or
-            std.mem.eql(u8, csi, "\x1b[?2006l");
+    // Reassert only modes explicitly owned by this child. Keep last-assignment
+    // order: mouse tracking/encoding modes can interact in the outer terminal.
+    pub fn restoreModes(self: *const SideEffectForwarder, stdout_actor: anytype) !void {
+        var bytes: [passthrough_modes.len * 8]u8 = undefined;
+        var len: usize = 0;
+        for (self.mode_order[0..self.mode_count]) |index| {
+            const sequence = passthrough_modes[index][@intFromBool(self.mode_enabled[index])];
+            @memcpy(bytes[len..][0..sequence.len], sequence);
+            len += sequence.len;
+        }
+        if (len != 0) try stdout_actor.enqueueControl(.{ .bytes = bytes[0..len] });
+    }
+
+    fn rememberMode(self: *SideEffectForwarder, index: usize, enabled: bool) void {
+        for (self.mode_order[0..self.mode_count], 0..) |existing, position| {
+            if (existing == index) {
+                std.mem.copyForwards(usize, self.mode_order[position .. self.mode_count - 1], self.mode_order[position + 1 .. self.mode_count]);
+                self.mode_count -= 1;
+                break;
+            }
+        }
+        self.mode_order[self.mode_count] = index;
+        self.mode_count += 1;
+        self.mode_enabled[index] = enabled;
     }
 
     fn flushCsi(self: *SideEffectForwarder, stdout_actor: anytype) !void {
-        if (self.isPassthroughCsi()) {
-            try stdout_actor.enqueueControl(actor_mailboxes.ControlChunk{ .bytes = self.csi_buf.items });
-        } else {
-            try self.appendScreenSlice(self.csi_buf.items);
+        for (passthrough_modes, 0..) |toggles, index| {
+            for (toggles, 0..) |sequence, enabled| {
+                if (std.mem.eql(u8, self.csi_buf.items, sequence)) {
+                    try stdout_actor.enqueueControl(actor_mailboxes.ControlChunk{ .bytes = self.csi_buf.items });
+                    self.rememberMode(index, enabled != 0);
+                    self.csi_buf.clearRetainingCapacity();
+                    self.state = .idle;
+                    return;
+                }
+            }
         }
+        try self.appendScreenSlice(self.csi_buf.items);
         self.csi_buf.clearRetainingCapacity();
         self.state = .idle;
     }
@@ -622,4 +647,57 @@ test "bounded control limits include complete sequences exactly at the limit" {
     csi[csi.len - 1] = 'm';
     const screen = try forwarder.feed(&actor, &csi);
     try std.testing.expectEqualSlices(u8, &csi, screen.screen_bytes);
+}
+
+test "restore modes retains latest explicit toggles across every input split" {
+    for (passthrough_modes) |toggles| {
+        for (toggles, 0..) |sequence, enabled| {
+            for (0..sequence.len + 1) |split| {
+                var forwarder = SideEffectForwarder.init(std.testing.allocator);
+                defer forwarder.deinit();
+                var actor = TestStdoutActor.init(std.testing.allocator);
+                defer actor.deinit();
+                _ = try forwarder.feed(&actor, toggles[1 - enabled]);
+                _ = try forwarder.feed(&actor, sequence[0..split]);
+                _ = try forwarder.feed(&actor, sequence[split..]);
+                try forwarder.restoreModes(&actor);
+                try std.testing.expectEqual(@as(usize, 3), actor.controls.items.len);
+                try std.testing.expectEqualStrings(sequence, actor.controls.items[2]);
+            }
+        }
+    }
+}
+
+test "restore modes excludes clipboard unknown and incomplete controls" {
+    var forwarder = SideEffectForwarder.init(std.testing.allocator);
+    defer forwarder.deinit();
+    var actor = TestStdoutActor.init(std.testing.allocator);
+    defer actor.deinit();
+    try forwarder.restoreModes(&actor);
+    try std.testing.expectEqual(@as(usize, 0), actor.controls.items.len);
+    _ = try forwarder.feed(&actor, "\x1b]52;c;YQ==\x07\x1b[?9999h\x1b[?2004");
+    try forwarder.restoreModes(&actor);
+    try std.testing.expectEqual(@as(usize, 1), actor.controls.items.len);
+    _ = try forwarder.feed(&actor, "h");
+    try forwarder.restoreModes(&actor);
+    try std.testing.expectEqual(@as(usize, 3), actor.controls.items.len);
+    try std.testing.expectEqualStrings("\x1b[?2004h", actor.controls.items[2]);
+}
+
+test "restore modes keeps bounded latest assignment order across repeated redraws" {
+    var forwarder = SideEffectForwarder.init(std.testing.allocator);
+    defer forwarder.deinit();
+    var actor = TestStdoutActor.init(std.testing.allocator);
+    defer actor.deinit();
+    for (0..100) |_| {
+        for (passthrough_modes) |toggles| _ = try forwarder.feed(&actor, toggles[1]);
+    }
+    try std.testing.expectEqual(passthrough_modes.len, forwarder.mode_count);
+    _ = try forwarder.feed(&actor, "\x1b[?1000l\x1b[?2004l\x1b[?1000h");
+    const expected = "\x1b[?1h\x1b[?1004h\x1b[?1002h\x1b[?1003h\x1b[?1005h\x1b[?1006h\x1b[?1015h\x1b[?2005h\x1b[?2006h\x1b[?2004l\x1b[?1000h";
+    for (0..3) |_| {
+        try forwarder.restoreModes(&actor);
+        try std.testing.expectEqualStrings(expected, actor.controls.items[actor.controls.items.len - 1]);
+    }
+    try std.testing.expectEqual(passthrough_modes.len, forwarder.mode_count);
 }

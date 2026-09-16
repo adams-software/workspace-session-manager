@@ -22,6 +22,9 @@ jobs:
       - name: Test
         run: zig build test
 
+      - name: Test vpty mode restoration on redraw
+        run: python3 vpty/scripts/test_mode_redraw.py zig-out/bin/vpty
+
       - name: Test resource collector
         run: python3 -m unittest discover -s scripts -p test_diagnose_resources.py
 
