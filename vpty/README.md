@@ -24,6 +24,19 @@ Run a TUI directly:
 vpty -- nvim
 ```
 
+## Explicit redraw contract
+
+A resize notification (`SIGWINCH`), including one with unchanged dimensions,
+requests a full redraw within vpty's viewport. It also reasserts the latest
+terminal-mode toggles explicitly sent by the child and supported by vpty
+(application cursor keys, paste, focus, and mouse modes). These settings affect
+the outer terminal globally, even when drawing into a bounded viewport. A caller
+using resize to reactivate a view should give that view ownership of input modes.
+
+Modes the child has never set are left alone. Clipboard operations are not
+replayed. Ordinary incremental screen updates do not reassert modes. This is a
+redraw contract, not an acknowledgement that pending display bytes have drained.
+
 ## What lives here
 
 - `src/` — terminal-state integration, rendering, and PTY-facing runtime code
