@@ -49,7 +49,10 @@ pub const WorkspaceIndex = struct {
 
         for (ids) |id| {
             try id_set.put(id, {});
-            const parent = parentId(id) orelse "";
+        }
+
+        for (ids) |id| {
+            const parent = nearestLiveAncestor(&id_set, id) orelse "";
             const gop = try children_by_parent.getOrPut(parent);
             if (!gop.found_existing) gop.value_ptr.* = .empty;
             try gop.value_ptr.append(allocator, id);
@@ -68,10 +71,6 @@ pub const WorkspaceIndex = struct {
         self.allocator.free(self.ids);
         self.id_set.deinit();
         deinitChildrenByParent(self.allocator, &self.children_by_parent);
-    }
-
-    fn hasId(self: *const WorkspaceIndex, id: []const u8) bool {
-        return self.id_set.contains(id);
     }
 
     fn children(self: *const WorkspaceIndex, parent: []const u8) ?[]const []u8 {
@@ -234,8 +233,8 @@ pub const Provider = struct {
         const index = self.workspace_index.?;
         switch (op) {
             .prev, .next => {
-                const current_dir = currentNodeDir(self.current_session);
-                const names = index.children(current_dir) orelse return null;
+                const current_parent = nearestLiveAncestor(&index.id_set, self.current_session) orelse "";
+                const names = index.children(current_parent) orelse return null;
                 if (names.len <= 1) return null;
                 for (names, 0..) |name, i| {
                     if (std.mem.eql(u8, name, self.current_session)) {
@@ -256,8 +255,7 @@ pub const Provider = struct {
                 return try self.allocator.dupe(u8, children[0]);
             },
             .out => {
-                const parent = parentId(self.current_session) orelse return null;
-                if (!index.hasId(parent)) return null;
+                const parent = nearestLiveAncestor(&index.id_set, self.current_session) orelse return null;
                 return try self.allocator.dupe(u8, parent);
             },
         }
@@ -355,12 +353,17 @@ fn canonicalIdForSock(allocator: std.mem.Allocator, root: []const u8, sock: []co
     return try allocator.dupe(u8, rel[0 .. rel.len - 4]);
 }
 
-fn currentNodeDir(session: []const u8) []const u8 {
-    return std.fs.path.dirname(session) orelse "";
-}
-
 fn parentId(id: []const u8) ?[]const u8 {
     return std.fs.path.dirname(id);
+}
+
+fn nearestLiveAncestor(id_set: *const std.StringHashMap(void), id: []const u8) ?[]const u8 {
+    var candidate = parentId(id);
+    while (candidate) |ancestor| {
+        if (id_set.contains(ancestor)) return ancestor;
+        candidate = parentId(ancestor);
+    }
+    return null;
 }
 
 fn lessThanString(_: void, a: []u8, b: []u8) bool {
@@ -473,6 +476,56 @@ test "refresh rebuilds the workspace index after new sessions appear" {
     defer resolved.deinit(allocator);
     try std.testing.expect(resolved == .exact);
     try std.testing.expectEqualStrings("proj/session", resolved.exact);
+}
+
+test "navigation reparents nested sessions when an intermediate session changes" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.createDirPath(global_io, "workspace/test");
+    const session_paths = [_][]const u8{ "workspace/alpha.wsm", "workspace/test/code.wsm", "workspace/test/docs.wsm" };
+    for (session_paths) |path| {
+        var file = try tmp.dir.createFile(global_io, path, .{ .truncate = true });
+        file.close(global_io);
+    }
+
+    var rel_buf: [128]u8 = undefined;
+    const rel = try std.fmt.bufPrint(&rel_buf, ".zig-cache/tmp/{s}/workspace", .{tmp.sub_path[0..]});
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try std.Io.Dir.realPathFile(.cwd(), global_io, rel, &root_buf);
+
+    var provider = try Provider.init(allocator, root_buf[0..root_len], "test/code");
+    defer provider.deinit();
+    try provider.rebuildWorkspaceIndex();
+
+    const previous = (try provider.resolveNavTarget(.prev)).?;
+    defer allocator.free(previous);
+    try std.testing.expectEqualStrings("alpha", previous);
+    const next = (try provider.resolveNavTarget(.next)).?;
+    defer allocator.free(next);
+    try std.testing.expectEqualStrings("test/docs", next);
+    try std.testing.expectEqual(@as(?[]u8, null), try provider.resolveNavTarget(.out));
+
+    var parent_file = try tmp.dir.createFile(global_io, "workspace/test.wsm", .{ .truncate = true });
+    parent_file.close(global_io);
+    try provider.rebuildWorkspaceIndex();
+
+    const parent = (try provider.resolveNavTarget(.out)).?;
+    defer allocator.free(parent);
+    try std.testing.expectEqualStrings("test", parent);
+    try provider.setCurrentSession("test");
+    const child = (try provider.resolveNavTarget(.in)).?;
+    defer allocator.free(child);
+    try std.testing.expectEqualStrings("test/code", child);
+
+    try tmp.dir.deleteFile(global_io, "workspace/test.wsm");
+    try provider.rebuildWorkspaceIndex();
+    try provider.setCurrentSession("test/code");
+    try std.testing.expectEqual(@as(?[]u8, null), try provider.resolveNavTarget(.out));
+    const reparents_to_root = (try provider.resolveNavTarget(.prev)).?;
+    defer allocator.free(reparents_to_root);
+    try std.testing.expectEqualStrings("alpha", reparents_to_root);
 }
 
 test "resolveQueryOutcome reports missing target when sessions exist" {

@@ -187,6 +187,12 @@ Inside the UI:
 - `h/j/k/l` or arrow keys navigate sibling/child/parent/next session targets
 - `b` toggles back to the previously visited session target
 
+Nested names form a tree of live sessions. Intermediate path components do not
+need their own session: each session is grouped beneath its nearest live ancestor,
+or at the workspace root if none exists. Closing or recreating an intermediate
+session immediately reparents its descendants for sibling, child, and parent
+navigation.
+
 To leave an attached session, use the in-session detach flow, then reattach later:
 
 ```bash
