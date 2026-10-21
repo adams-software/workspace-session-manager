@@ -37,6 +37,12 @@ Modes the child has never set are left alone. Clipboard operations are not
 replayed. Ordinary incremental screen updates do not reassert modes. This is a
 redraw contract, not an acknowledgement that pending display bytes have drained.
 
+When vpty relinquishes the terminal, it returns every forwarded interaction mode
+to a neutral baseline. WSM does the same before detaching or changing attached
+sessions; the newly active vpty then restores its own remembered modes through
+the explicit redraw contract. This prevents a crashed or disconnected TUI from
+leaving mouse, focus, paste, or cursor-key reporting enabled for the next view.
+
 ## What lives here
 
 - `src/` — terminal-state integration, rendering, and PTY-facing runtime code
