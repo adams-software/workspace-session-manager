@@ -29,6 +29,9 @@ Requirements:
   without one. WSM uses `$SHELL`, falling back to `/bin/sh`.
 - **Bash and `less` for `wsm log`**; they are not needed for creating sessions.
   Bash completion is optional and uses your shell's bash-completion setup.
+  Session-name completion follows `--workspace`, then `WSM_ROOT`, then WSM's
+  automatic `/tmp/wsm-<uid>` workspace. Bash controls whether multiple matches
+  are listed or cycled.
 
 No Zig, Git, tmux, Python, or separate libvterm package is required at runtime.
 Do not run the installer with sudo for the default per-user installation.
