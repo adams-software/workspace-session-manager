@@ -15,12 +15,33 @@ pub const Size = struct {
     cols: u16,
 };
 
+// vpty forwards these child-owned modes to the outer terminal. Return them to a
+// neutral baseline whenever vpty relinquishes that terminal to its caller.
+const interaction_mode_reset =
+    "\x1b[?1000l\x1b[?1002l\x1b[?1003l" ++
+    "\x1b[?1005l\x1b[?1006l\x1b[?1015l" ++
+    "\x1b[?1004l\x1b[?2004l\x1b[?2005l\x1b[?2006l\x1b[?1l";
+
+fn writeAllBestEffort(fd: c_int, bytes: []const u8) void {
+    var offset: usize = 0;
+    while (offset < bytes.len) {
+        const written = c.write(fd, bytes.ptr + offset, bytes.len - offset);
+        if (written > 0) {
+            offset += @intCast(written);
+            continue;
+        }
+        if (written < 0 and std.c.errno(written) == .INTR) continue;
+        return;
+    }
+}
+
 pub const TerminalMode = struct {
     stdin_fd: c_int,
     stdout_fd: c_int,
     interactive: bool,
     raw_enabled: bool = false,
     alt_screen_enabled: bool = false,
+    interaction_modes_owned: bool = false,
     saved_termios: c.struct_termios = undefined,
 
     pub fn init(stdin_fd: c_int, stdout_fd: c_int) TerminalMode {
@@ -39,6 +60,7 @@ pub const TerminalMode = struct {
         c.cfmakeraw(&raw);
         if (c.tcsetattr(self.stdin_fd, c.TCSANOW, &raw) != 0) return Error.IoError;
         self.raw_enabled = true;
+        self.interaction_modes_owned = true;
     }
 
     pub fn enterAltScreen(self: *TerminalMode) Error!void {
@@ -56,6 +78,10 @@ pub const TerminalMode = struct {
     }
 
     pub fn restore(self: *TerminalMode) void {
+        if (self.interactive and self.interaction_modes_owned) {
+            writeAllBestEffort(self.stdout_fd, interaction_mode_reset);
+            self.interaction_modes_owned = false;
+        }
         self.leaveAltScreen();
         if (!self.interactive or !self.raw_enabled) return;
         _ = c.tcsetattr(self.stdin_fd, c.TCSANOW, &self.saved_termios);

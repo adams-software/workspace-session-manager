@@ -25,7 +25,7 @@ _wsm_complete() {
     elif [[ -n "${WSM_ROOT:-}" ]]; then
       root="$WSM_ROOT"
     else
-      return 0
+      root="/tmp/wsm-$(id -u)"
     fi
 
     [[ -d "$root" ]] || return 0

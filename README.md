@@ -29,6 +29,9 @@ Requirements:
   without one. WSM uses `$SHELL`, falling back to `/bin/sh`.
 - **Bash and `less` for `wsm log`**; they are not needed for creating sessions.
   Bash completion is optional and uses your shell's bash-completion setup.
+  Session-name completion follows `--workspace`, then `WSM_ROOT`, then WSM's
+  automatic `/tmp/wsm-<uid>` workspace. Bash controls whether multiple matches
+  are listed or cycled.
 
 No Zig, Git, tmux, Python, or separate libvterm package is required at runtime.
 Do not run the installer with sudo for the default per-user installation.
@@ -186,6 +189,12 @@ Inside the UI:
 - `d` detaches from the current interactive session
 - `h/j/k/l` or arrow keys navigate sibling/child/parent/next session targets
 - `b` toggles back to the previously visited session target
+
+Nested names form a tree of live sessions. Intermediate path components do not
+need their own session: each session is grouped beneath its nearest live ancestor,
+or at the workspace root if none exists. Closing or recreating an intermediate
+session immediately reparents its descendants for sibling, child, and parent
+navigation.
 
 To leave an attached session, use the in-session detach flow, then reattach later:
 

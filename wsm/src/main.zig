@@ -16,7 +16,11 @@ const c = @cImport({
 });
 
 const ENTER_ALT_SCREEN = "\x1b[?1049h\x1b[2J\x1b[H\x1b[?25h";
-const EXIT_RESET = "\x1b[0m\x1b[?25h\x1b[?1049l\x1b(B";
+const INTERACTION_MODE_RESET =
+    "\x1b[?1000l\x1b[?1002l\x1b[?1003l" ++
+    "\x1b[?1005l\x1b[?1006l\x1b[?1015l" ++
+    "\x1b[?1004l\x1b[?2004l\x1b[?2005l\x1b[?2006l\x1b[?1l";
+const EXIT_RESET = INTERACTION_MODE_RESET ++ "\x1b[0m\x1b[?25h\x1b[?1049l\x1b(B";
 
 const Error = error{
     TerminalUnavailable,
@@ -294,6 +298,9 @@ const App = struct {
             },
             .attached => |id| {
                 defer self.allocator.free(id);
+                // The previous view may have left global input modes enabled.
+                // The activated vpty restores its own modes on the resize below.
+                try writeAll(self.term.tty_fd, INTERACTION_MODE_RESET);
                 try self.provider.setCurrentSession(id);
                 _ = self.bar_state.clearNotice();
                 self.reassert_bar_after_first_pump = true;
@@ -465,9 +472,14 @@ fn runInteractive(allocator: std.mem.Allocator, mode: cli_main.Mode, root: []con
     installSigwinchHandler();
 
     var term = try TerminalState.init();
+    errdefer {
+        writeAll(term.tty_fd, EXIT_RESET) catch {};
+        term.deinit();
+    }
     try writeAll(term.tty_fd, ENTER_ALT_SCREEN);
 
     var app = try App.init(allocator, &term, mode, root);
+    errdefer app.deinit();
 
     app.render() catch |err| {
         try setRuntimeExitMessage(&app, allocator, "render", err);
