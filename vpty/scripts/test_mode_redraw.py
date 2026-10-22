@@ -15,6 +15,13 @@ import sys
 import termios
 import time
 
+MODE_RESETS = [
+    b"\x1b[?1000l", b"\x1b[?1002l", b"\x1b[?1003l",
+    b"\x1b[?1005l", b"\x1b[?1006l", b"\x1b[?1015l",
+    b"\x1b[?1004l", b"\x1b[?2004l", b"\x1b[?2005l",
+    b"\x1b[?2006l", b"\x1b[?1l",
+]
+
 CHILD = r'''
 import os, signal, tty
 signal.alarm(20)
@@ -40,7 +47,12 @@ def collect_until(fd, expected):
         complete = all(value in output for value in expected)
         timeout = min(0.1 if complete else 0.5, max(0, deadline - time.monotonic()))
         if select.select([fd], [], [], timeout)[0]:
-            output.extend(os.read(fd, 65536))
+            try:
+                output.extend(os.read(fd, 65536))
+            except OSError:
+                if complete:
+                    return
+                raise
             assert len(output) < 1024 * 1024, "unexpected output flood"
         elif complete:
             return
@@ -73,6 +85,7 @@ def check(binary, flags):
                 os.kill(proc.pid, signal.SIGWINCH)
                 collect_until(master, expected)
         os.write(master, b"quit\n")
+        collect_until(master, MODE_RESETS)
         assert proc.wait(timeout=5) == 0
     finally:
         os.close(master)
