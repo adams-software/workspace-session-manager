@@ -55,6 +55,9 @@ echo "Installed commands to: $BIN_DEST"
 echo "Installed private runtime helpers to: $LIBEXEC_DEST"
 echo "Installed bash completions to: $COMP_DEST"
 echo "Bash completion files were installed as command-name autoload files."
+echo "To load or refresh Bash completion in this shell, run:"
+printf '  source "%s/wsm"\n' "$COMP_DEST"
+echo "New Bash shells use the installed completion through bash-completion."
 echo "Make sure $BIN_DEST is on your PATH."
 echo "Run wsm help to see the version and active session directory."
 if [ -n "${WSM_ROOT:-}" ]; then
@@ -85,6 +88,11 @@ Default install paths:
 - commands -> ~/.local/bin
 - private helpers -> ~/.local/libexec/wsm
 - completions -> ~/.local/share/bash-completion/completions
+
+Load or refresh Bash completion in the current shell:
+  source ~/.local/share/bash-completion/completions/wsm
+
+New Bash shells use the installed completion through bash-completion.
 
 Or manually copy files from bin/ into a directory on PATH.
 EOS

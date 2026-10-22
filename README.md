@@ -45,6 +45,16 @@ wsm help
 
 Add the PATH export once to `~/.bashrc` (Bash) or `~/.zshrc` (Zsh) for future
 shells. `wsm help` identifies the installed version and session directory.
+The installer places Bash completion in the standard per-user completion
+directory. New Bash shells load it through `bash-completion`. After updating
+WSM, an existing shell can keep the previously loaded completion function; open
+a new shell or refresh it in place with:
+
+```bash
+source ~/.local/share/bash-completion/completions/wsm
+```
+
+A custom `PREFIX` changes the path accordingly.
 To install elsewhere, put `PREFIX` on the **sh side** of the pipe:
 
 ```sh
