@@ -385,6 +385,12 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+    const presentation_control_mod = b.addModule("presentation_control", .{
+        .root_source_file = b.path("vpty/src/presentation_control.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
     const side_effects = b.createModule(.{
         .root_source_file = b.path("vpty/src/side_effects.zig"),
         .target = target,
@@ -407,6 +413,7 @@ pub fn build(b: *std.Build) void {
     vpty_root.addImport("actor_mailboxes", actor_mailboxes_mod);
     vpty_root.addImport("wake_pipe", wake_pipe_mod);
     vpty_root.addImport("runtime_lifecycle", runtime_lifecycle_mod);
+    vpty_root.addImport("presentation_control", presentation_control_mod);
 
     const vpty_exe = b.addExecutable(.{
         .name = "vpty",
@@ -522,6 +529,9 @@ pub fn build(b: *std.Build) void {
     const test_side_effects_step = b.step("test-side-effects", "Run terminal control parser tests");
     test_side_effects_step.dependOn(&run_side_effect_tests.step);
 
+    const presentation_control_tests = b.addTest(.{ .root_module = presentation_control_mod });
+    const run_presentation_control_tests = b.addRunArtifact(presentation_control_tests);
+
     const vpty_input_tests = b.addTest(.{ .root_module = vpty_root, .filters = &.{"vpty input"} });
     const run_vpty_input_tests = b.addRunArtifact(vpty_input_tests);
     const test_vpty_input_step = b.step("test-vpty-input", "Run vpty input backpressure tests");
@@ -582,6 +592,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_vpty_output_tests.step);
     test_step.dependOn(&run_vpty_input_tests.step);
     test_step.dependOn(&run_side_effect_tests.step);
+    test_step.dependOn(&run_presentation_control_tests.step);
     test_step.dependOn(&run_stdout_thread_tests.step);
     test_step.dependOn(&run_stdout_actor_tests.step);
     test_step.dependOn(&run_wake_pipe_tests.step);

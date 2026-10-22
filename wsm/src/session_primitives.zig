@@ -13,11 +13,13 @@ pub const SessionPaths = struct {
     id: []u8,
     data_path: []u8,
     control_path: []u8,
+    presentation_path: []u8,
 
     pub fn deinit(self: SessionPaths, allocator: std.mem.Allocator) void {
         allocator.free(self.id);
         allocator.free(self.data_path);
         allocator.free(self.control_path);
+        allocator.free(self.presentation_path);
     }
 };
 
@@ -36,11 +38,19 @@ pub fn pathsForId(allocator: std.mem.Allocator, provider: *policy.Provider, id: 
     errdefer allocator.free(data_path);
     const control_path = try controlPathForDataPath(allocator, data_path);
     errdefer allocator.free(control_path);
+    const presentation_path = try presentationPathForDataPath(allocator, data_path);
+    errdefer allocator.free(presentation_path);
     return .{
         .id = try allocator.dupe(u8, id),
         .data_path = data_path,
         .control_path = control_path,
+        .presentation_path = presentation_path,
     };
+}
+
+pub fn presentationPathForDataPath(allocator: std.mem.Allocator, data_path: []const u8) ![]u8 {
+    if (!std.mem.endsWith(u8, data_path, ".wsm")) return error.InvalidPath;
+    return try std.fmt.allocPrint(allocator, "{s}.present", .{data_path[0 .. data_path.len - 4]});
 }
 
 pub fn controlPathForDataPath(allocator: std.mem.Allocator, data_path: []const u8) ![]u8 {
@@ -52,7 +62,7 @@ pub fn createSession(allocator: std.mem.Allocator, host_bin: []const u8, provide
     var paths = try pathsForId(allocator, provider, spec.id);
     errdefer paths.deinit(allocator);
 
-    if (pathExists(paths.data_path) or pathExists(paths.control_path)) return error.SessionAlreadyExists;
+    if (pathExists(paths.data_path) or pathExists(paths.control_path) or pathExists(paths.presentation_path)) return error.SessionAlreadyExists;
 
     if (std.fs.path.dirname(paths.data_path)) |dir| std.Io.Dir.createDirAbsolute(global_io, dir, .default_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
@@ -87,6 +97,8 @@ pub fn createSession(allocator: std.mem.Allocator, host_bin: []const u8, provide
     try argv.appendSlice(allocator, &.{
         "--",
         spec.vpty_bin,
+        "--presentation-socket",
+        paths.presentation_path,
         "--",
         spec.ptylog_bin,
         "--log",
@@ -120,10 +132,10 @@ pub fn createSession(allocator: std.mem.Allocator, host_bin: []const u8, provide
     _ = &child;
     try waitSocketPathExists(paths.data_path, 2000);
     try waitSocketPathExists(paths.control_path, 2000);
+    try waitSocketPathExists(paths.presentation_path, 2000);
 
     return paths;
 }
-
 
 fn waitSocketPathExists(path: []const u8, timeout_ms: u64) !void {
     const deadline = monotonicMs() + timeout_ms;
