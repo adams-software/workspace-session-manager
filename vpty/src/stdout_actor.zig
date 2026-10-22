@@ -7,6 +7,8 @@ const c = @cImport({
 pub const Error = error{
     IoError,
     UnexpectedEof,
+    BoundaryPending,
+    EmptyBoundary,
 };
 
 pub const CommitNotice = actor_mailboxes.CommitNotice;
@@ -29,6 +31,8 @@ pub const StdoutBuffer = struct {
     control_offset: usize = 0,
     pending_render: ?RenderCandidate = null,
     deferred_render: ?RenderCandidate = null,
+    presentation_boundary: ?std.ArrayList(u8) = null,
+    presentation_boundary_offset: usize = 0,
     committed_render_version: u64 = 0,
     newly_committed_render_version: ?u64 = null,
 
@@ -46,6 +50,9 @@ pub const StdoutBuffer = struct {
         }
         if (self.deferred_render) |*candidate| {
             candidate.storage.deinit(self.allocator);
+        }
+        if (self.presentation_boundary) |*boundary| {
+            boundary.deinit(self.allocator);
         }
     }
 
@@ -89,6 +96,15 @@ pub const StdoutBuffer = struct {
         });
     }
 
+    pub fn enqueuePresentationBoundary(self: *StdoutBuffer, bytes: []const u8) !void {
+        if (bytes.len == 0) return error.EmptyBoundary;
+        if (self.presentation_boundary != null) return error.BoundaryPending;
+        self.presentation_boundary = .empty;
+        errdefer self.presentation_boundary = null;
+        try self.presentation_boundary.?.appendSlice(self.allocator, bytes);
+        self.presentation_boundary_offset = 0;
+    }
+
     pub fn committedRenderVersion(self: *const StdoutBuffer) u64 {
         return self.committed_render_version;
     }
@@ -100,14 +116,19 @@ pub const StdoutBuffer = struct {
     }
 
     pub fn hasPending(self: *const StdoutBuffer) bool {
-        return self.control_offset < self.control_queue.items.len or self.pending_render != null;
+        return self.control_offset < self.control_queue.items.len or self.pending_render != null or self.presentation_boundary != null;
     }
 
     pub fn pendingControlBytes(self: *const StdoutBuffer) usize {
-        return if (self.control_offset < self.control_queue.items.len)
+        const regular = if (self.control_offset < self.control_queue.items.len)
             self.control_queue.items.len - self.control_offset
         else
             0;
+        const boundary = if (self.presentation_boundary) |pending|
+            pending.items.len - self.presentation_boundary_offset
+        else
+            0;
+        return regular + boundary;
     }
 
     pub fn pendingRenderBytes(self: *const StdoutBuffer) usize {
@@ -130,6 +151,19 @@ pub const StdoutBuffer = struct {
         if (self.pending_render) |*candidate| {
             candidate.storage.deinit(self.allocator);
             self.pending_render = null;
+        }
+        if (self.deferred_render) |*candidate| {
+            candidate.storage.deinit(self.allocator);
+            self.deferred_render = null;
+        }
+    }
+
+    pub fn discardUnstartedRenders(self: *StdoutBuffer) void {
+        if (self.pending_render) |*candidate| {
+            if (candidate.offset == 0) {
+                candidate.storage.deinit(self.allocator);
+                self.pending_render = null;
+            }
         }
         if (self.deferred_render) |*candidate| {
             candidate.storage.deinit(self.allocator);
@@ -178,6 +212,25 @@ pub const StdoutBuffer = struct {
                                 self.pending_render = deferred;
                                 self.deferred_render = null;
                             }
+                        }
+                    },
+                }
+                continue;
+            }
+
+            if (self.presentation_boundary) |*boundary| {
+                const remaining = boundary.items[self.presentation_boundary_offset..];
+                const chunk = remaining[0..@min(remaining.len, max_bytes - total_written)];
+                const n = try writeSome(chunk);
+                switch (n) {
+                    .would_block => return if (total_written > 0) .{ .progress = total_written } else .would_block,
+                    .written => |written| {
+                        total_written += written;
+                        self.presentation_boundary_offset += written;
+                        if (self.presentation_boundary_offset == boundary.items.len) {
+                            boundary.deinit(self.allocator);
+                            self.presentation_boundary = null;
+                            self.presentation_boundary_offset = 0;
                         }
                     },
                 }
@@ -250,6 +303,45 @@ test "started render candidate defers newer render until current batch completes
     try std.testing.expect(buffer.deferred_render != null);
     try std.testing.expectEqual(@as(u64, 2), buffer.deferred_render.?.publish.version);
     try std.testing.expectEqualStrings("second", buffer.deferred_render.?.storage.items);
+}
+
+test "presentation boundary follows a partially emitted render and drops deferred work" {
+    var fds: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe2(&fds, .{ .NONBLOCK = true, .CLOEXEC = true }));
+    defer _ = c.close(fds[0]);
+    defer _ = c.close(fds[1]);
+    const saved_stdout = c.dup(c.STDOUT_FILENO);
+    try std.testing.expect(saved_stdout >= 0);
+    defer _ = c.close(saved_stdout);
+    try std.testing.expectEqual(@as(c_int, c.STDOUT_FILENO), c.dup2(fds[1], c.STDOUT_FILENO));
+    defer _ = c.dup2(saved_stdout, c.STDOUT_FILENO);
+
+    var buffer = StdoutBuffer.init(std.testing.allocator);
+    defer buffer.deinit();
+    buffer.publishOwnedRenderCandidate(1, try std.testing.allocator.dupe(u8, "render"), .{ .visible = true, .row = 0, .col = 0 });
+    buffer.pending_render.?.offset = 2; // "re" has already reached the terminal.
+    buffer.publishOwnedRenderCandidate(2, try std.testing.allocator.dupe(u8, "deferred"), .{ .visible = true, .row = 0, .col = 0 });
+    buffer.discardUnstartedRenders();
+    try buffer.enqueuePresentationBoundary("boundary");
+
+    const flushed = try buffer.flushSome(64);
+    try std.testing.expectEqual(@as(usize, 12), flushed.progress);
+    var output: [12]u8 = undefined;
+    try std.testing.expectEqual(@as(isize, output.len), c.read(fds[0], &output, output.len));
+    try std.testing.expectEqualStrings("nderboundary", &output);
+    try std.testing.expect(!buffer.hasPending());
+}
+
+test "presentation boundary replaces an unstarted render" {
+    var buffer = StdoutBuffer.init(std.testing.allocator);
+    defer buffer.deinit();
+    buffer.publishOwnedRenderCandidate(1, try std.testing.allocator.dupe(u8, "unstarted"), .{ .visible = true, .row = 0, .col = 0 });
+    buffer.discardUnstartedRenders();
+    try buffer.enqueuePresentationBoundary("boundary");
+
+    try std.testing.expect(buffer.pending_render == null);
+    try std.testing.expectEqual(@as(usize, 0), buffer.pendingRenderBytes());
+    try std.testing.expectEqual(@as(usize, 8), buffer.pendingControlBytes());
 }
 
 test "pending byte categories keep control separate from render backlog" {

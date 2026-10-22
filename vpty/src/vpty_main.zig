@@ -24,6 +24,7 @@ const runtime_lifecycle_mod = @import("runtime_lifecycle");
 const RuntimeLifecycle = runtime_lifecycle_mod.RuntimeLifecycle;
 const ModelSize = terminal_model_mod.ModelSize;
 const GraphemeMode = terminal_model_mod.GraphemeMode;
+const presentation_control = @import("presentation_control");
 
 const INPUT_READ_CHUNK = 4096;
 const INPUT_QUEUE_LIMIT = 256 * 1024;
@@ -53,6 +54,7 @@ const ParsedArgs = struct {
     mode: RunMode,
     viewport: Viewport,
     viewport_intent: ViewportIntent,
+    presentation_socket: ?[]const u8,
     child_argv: std.ArrayList([]const u8),
 
     fn deinit(self: *ParsedArgs, allocator: std.mem.Allocator) void {
@@ -357,11 +359,45 @@ fn monotonicMs() !u64 {
     return @as(u64, @intCast(now.tv_sec)) * 1000 + @as(u64, @intCast(now.tv_nsec)) / std.time.ns_per_ms;
 }
 
-fn pumpUntilExit(lifecycle: *RuntimeLifecycle, session_host: *host.SessionHost, shared_model: *SharedTerminalModel, render_thread: *RenderThread, terminal: *vpty_terminal.TerminalMode, mode: RunMode, viewport: Viewport, viewport_intent: ViewportIntent, forwarder: *side_effects.SideEffectForwarder, stdout_actor: *StdoutThread) !host.ExitStatus {
+fn applyPresentationCommand(command: presentation_control.Command, hidden: *bool, shared_model: *SharedTerminalModel, render_thread: *RenderThread, forwarder: *side_effects.SideEffectForwarder, stdout_actor: *StdoutThread) !void {
+    var boundary_buffer: [presentation_control.max_boundary_len]u8 = undefined;
+    const boundary = try presentation_control.formatBoundary(&boundary_buffer, command.action, command.tokenSlice());
+    switch (command.action) {
+        .yielded => {
+            if (hidden.*) return error.InvalidState;
+            render_thread.setPresentationEnabled(false);
+            stdout_actor.beginPresentationYield(boundary) catch |yield_error| {
+                render_thread.setPresentationEnabled(true);
+                return yield_error;
+            };
+            hidden.* = true;
+        },
+        .resumed => {
+            if (!hidden.*) return error.InvalidState;
+            try stdout_actor.resumePresentation(boundary);
+            try forwarder.restoreModes(stdout_actor);
+            forceViewerRepaint(shared_model, render_thread);
+            render_thread.setPresentationEnabled(true);
+            hidden.* = false;
+        },
+    }
+}
+
+fn recoverPresentation(hidden: *bool, shared_model: *SharedTerminalModel, render_thread: *RenderThread, forwarder: *side_effects.SideEffectForwarder, stdout_actor: *StdoutThread) !void {
+    if (!hidden.*) return;
+    stdout_actor.recoverPresentation();
+    try forwarder.restoreModes(stdout_actor);
+    forceViewerRepaint(shared_model, render_thread);
+    render_thread.setPresentationEnabled(true);
+    hidden.* = false;
+}
+
+fn pumpUntilExit(lifecycle: *RuntimeLifecycle, session_host: *host.SessionHost, shared_model: *SharedTerminalModel, render_thread: *RenderThread, terminal: *vpty_terminal.TerminalMode, mode: RunMode, viewport: Viewport, viewport_intent: ViewportIntent, forwarder: *side_effects.SideEffectForwarder, stdout_actor: *StdoutThread, presentation_server: ?*presentation_control.Server) !host.ExitStatus {
     var transport = TransportState{};
     defer transport.deinit(std.heap.page_allocator);
     var exit_status: ?host.ExitStatus = null;
     var drain_deadline: u64 = 0;
+    var presentation_hidden = false;
 
     try transport.configureNonBlocking(session_host, terminal.stdin_fd, terminal.stdout_fd);
 
@@ -374,14 +410,16 @@ fn pumpUntilExit(lifecycle: *RuntimeLifecycle, session_host: *host.SessionHost, 
         }
 
         const pty_events = transport.ptyPollEvents(stdout_actor.pendingControlBytes());
-        var pfds = [4]c.struct_pollfd{
+        var pfds = [6]c.struct_pollfd{
             .{ .fd = transport.stdinPollFd(terminal.stdin_fd), .events = c.POLLIN, .revents = 0 },
             .{ .fd = if (pty_events != 0) session_host.getMasterFd() orelse -1 else -1, .events = pty_events, .revents = 0 },
             .{ .fd = lifecycle.readFd(), .events = c.POLLIN, .revents = 0 },
             .{ .fd = -1, .events = 0, .revents = 0 },
+            .{ .fd = if (presentation_server) |server| server.listenerFd() else -1, .events = c.POLLIN, .revents = 0 },
+            .{ .fd = if (presentation_server) |server| server.clientFd() else -1, .events = c.POLLIN | c.POLLHUP, .revents = 0 },
         };
 
-        const pr = std.c.poll(@ptrCast(&pfds), 4, 10);
+        const pr = std.c.poll(@ptrCast(&pfds), pfds.len, 10);
         if (pr < 0) {
             const e = std.posix.errno(-1);
             if (e == .INTR) continue;
@@ -389,6 +427,18 @@ fn pumpUntilExit(lifecycle: *RuntimeLifecycle, session_host: *host.SessionHost, 
         }
 
         lifecycle.consumeWakeRevents(pfds[2].revents);
+        if (presentation_server) |server| {
+            if ((pfds[4].revents & c.POLLIN) != 0) try server.acceptClient();
+            if ((pfds[5].revents & (c.POLLIN | c.POLLHUP)) != 0) {
+                while (try server.readCommand()) |command| {
+                    applyPresentationCommand(command, &presentation_hidden, shared_model, render_thread, forwarder, stdout_actor) catch |command_error| switch (command_error) {
+                        error.InvalidState => {},
+                        else => return command_error,
+                    };
+                }
+            }
+            if (server.takeDisconnected()) try recoverPresentation(&presentation_hidden, shared_model, render_thread, forwarder, stdout_actor);
+        }
         try stepStdoutCommitted(stdout_actor, shared_model);
         try stepInput(&transport, session_host, terminal, &pfds);
         try stepPtyOutput(&transport, session_host, shared_model, render_thread, forwarder, stdout_actor, &pfds);
@@ -418,8 +468,9 @@ const VptyRuntime = struct {
     shared_model: SharedTerminalModel,
     render_thread: RenderThread,
     lifecycle: RuntimeLifecycle,
+    presentation_server: ?presentation_control.Server,
 
-    fn init(self: *VptyRuntime, allocator: std.mem.Allocator, io: anytype, child_argv: []const []const u8, mode: RunMode, viewport_override: Viewport, viewport_intent: ViewportIntent) !void {
+    fn init(self: *VptyRuntime, allocator: std.mem.Allocator, io: anytype, child_argv: []const []const u8, mode: RunMode, viewport_override: Viewport, viewport_intent: ViewportIntent, presentation_socket: ?[]const u8) !void {
         var terminal = vpty_terminal.TerminalMode.init(c.STDIN_FILENO, c.STDOUT_FILENO);
         errdefer terminal.restore();
 
@@ -459,6 +510,9 @@ const VptyRuntime = struct {
         var shared_model = SharedTerminalModel.init(io, try TerminalModel.initWithMode(viewport.rows, viewport.cols, graphemeModeFromEnv()));
         errdefer shared_model.model.deinit();
 
+        var presentation_server = if (presentation_socket) |path| try presentation_control.Server.init(allocator, path) else null;
+        errdefer if (presentation_server) |*server| server.deinit();
+
         self.* = .{
             .allocator = allocator,
             .child_argv = child_argv,
@@ -472,6 +526,7 @@ const VptyRuntime = struct {
             .shared_model = shared_model,
             .render_thread = undefined,
             .lifecycle = .{},
+            .presentation_server = presentation_server,
         };
         self.render_thread = RenderThread.init(
             allocator,
@@ -482,6 +537,7 @@ const VptyRuntime = struct {
     }
 
     fn deinit(self: *VptyRuntime) void {
+        if (self.presentation_server) |*server| server.deinit();
         self.render_thread.deinit();
         self.shared_model.model.deinit();
         self.session_host.deinit();
@@ -515,7 +571,7 @@ const VptyRuntime = struct {
         const signal_handlers = try self.lifecycle.install();
         defer signal_handlers.restore();
 
-        const status = try pumpUntilExit(&self.lifecycle, &self.session_host, &self.shared_model, &self.render_thread, &self.terminal, self.mode, self.viewport, self.viewport_intent, &self.forwarder, &self.stdout_actor);
+        const status = try pumpUntilExit(&self.lifecycle, &self.session_host, &self.shared_model, &self.render_thread, &self.terminal, self.mode, self.viewport, self.viewport_intent, &self.forwarder, &self.stdout_actor, if (self.presentation_server) |*server| server else null);
         self.render_thread.shutdownActor();
         self.render_thread.stop();
         if (self.mode == .fullscreen) {
@@ -542,6 +598,7 @@ fn parseArgs(allocator: std.mem.Allocator, argv: []const []const u8) !ParsedArgs
     var origin_col: ?u16 = null;
     var rows: ?u16 = null;
     var cols: ?u16 = null;
+    var presentation_socket: ?[]const u8 = null;
     var sep_idx: ?usize = null;
 
     var i: usize = 1;
@@ -558,10 +615,13 @@ fn parseArgs(allocator: std.mem.Allocator, argv: []const []const u8) !ParsedArgs
                 return error.InvalidArgs;
             }
             const value = try parseU16Flag(arg, argv[i]);
-            if (std.mem.eql(u8, arg, "--origin-row")) origin_row = value
-            else if (std.mem.eql(u8, arg, "--origin-col")) origin_col = value
-            else if (std.mem.eql(u8, arg, "--rows")) rows = value
-            else cols = value;
+            if (std.mem.eql(u8, arg, "--origin-row")) origin_row = value else if (std.mem.eql(u8, arg, "--origin-col")) origin_col = value else if (std.mem.eql(u8, arg, "--rows")) rows = value else cols = value;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--presentation-socket")) {
+            i += 1;
+            if (i >= argv.len or argv[i].len == 0) return error.InvalidArgs;
+            presentation_socket = argv[i];
             continue;
         }
 
@@ -593,6 +653,7 @@ fn parseArgs(allocator: std.mem.Allocator, argv: []const []const u8) !ParsedArgs
             .rows_explicit = rows != null,
             .cols_explicit = cols != null,
         },
+        .presentation_socket = presentation_socket,
         .child_argv = result,
     };
 }
@@ -615,7 +676,7 @@ pub fn main(init: std.process.Init) !u8 {
     defer parsed.deinit(allocator);
 
     var runtime: VptyRuntime = undefined;
-    try runtime.init(allocator, .{}, parsed.child_argv.items, parsed.mode, parsed.viewport, parsed.viewport_intent);
+    try runtime.init(allocator, .{}, parsed.child_argv.items, parsed.mode, parsed.viewport, parsed.viewport_intent, parsed.presentation_socket);
     defer runtime.deinit();
     return runtime.run();
 }
