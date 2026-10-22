@@ -73,6 +73,15 @@ The installed completion files use command-name autoload filenames:
 
 - `wsm`
 
+New Bash shells load the installed file through `bash-completion`. After an
+update, open a new shell or refresh completion in the current shell:
+
+```bash
+source ~/.local/share/bash-completion/completions/wsm
+```
+
+Use the corresponding path below a custom `PREFIX` when applicable.
+
 ## Log viewing
 
 `wsm log` opens the readable `.log` output directly through the bundled
