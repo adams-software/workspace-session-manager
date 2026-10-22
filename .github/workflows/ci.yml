@@ -28,6 +28,9 @@ jobs:
       - name: Test terminal mode cleanup on WSM detach
         run: python3 wsm/scripts/test_mode_cleanup.py zig-out/bin/wsm
 
+      - name: Test Bash session completion
+        run: bash wsm/scripts/test_completion.sh
+
       - name: Test resource collector
         run: python3 -m unittest discover -s scripts -p test_diagnose_resources.py
 
