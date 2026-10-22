@@ -65,6 +65,9 @@ printf '\nNext, make the command available in your current shell:\n'
 printf '  export PATH="%s/bin:$PATH"\n' "$PREFIX"
 printf '  wsm help\n'
 printf '  wsm create test\n'
+printf '\nTo load or refresh Bash completion in the current shell:\n'
+printf '  source "%s/share/bash-completion/completions/wsm"\n' "$PREFIX"
+printf 'New Bash shells use the installed completion through bash-completion.\n'
 printf '\nAdd the PATH export to ~/.bashrc (Bash) or ~/.zshrc (Zsh) if needed.\n'
 printf 'The installer cannot change its parent shell environment.\n'
 printf '\nSession directory: wsm help shows WORKSPACE and the build default.\n'
