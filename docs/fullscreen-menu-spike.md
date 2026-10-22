@@ -96,13 +96,26 @@ and encoding, and supported paste variants. A menu needs its own baseline so a
 child's mouse events cannot become menu commands. One-shot side effects such as
 clipboard writes must not accumulate for replay; suppress them while hidden.
 
-The wire format is intentionally **not settled by this spike**. Prototype the
-smallest negotiated request/boundary mechanism next. Its completion boundary must
-be ordered with display bytes, survive arbitrary socket splits and partial writes,
-and be unambiguous if the child prints similar bytes. A separate control reply
-alone is insufficient. Existing output commit tracking is a useful internal seam,
-but is not an end-to-end acknowledgement. Keep host a generic transport and avoid
-adding a general RPC framework or a terminal parser/model to the WSM client.
+The prototype uses a session-scoped vpty socket named `<session>.present`; host
+remains a generic transport. Requests are newline-delimited `yield <token>` and
+`resume <token>` commands. Tokens are caller-generated hexadecimal correlation
+values, up to 64 characters. Vpty emits a private DCS frame on the data stream:
+`ESC P +wsm;<action>;<token> ESC \\`. The caller strips every WSM frame and accepts
+only the action/token it is waiting for.
+
+The yield frame is a trailing boundary: vpty finishes a render already partially
+written, drops render work that has not started, and writes the frame after the
+surviving bytes. The resume frame is a leading boundary: terminal-mode restoration
+and a full repaint follow it. This lets WSM stop painting the menu when it sees the
+frame and forward the remainder of the same read as child presentation. Commands,
+tokens, and frames all require incremental parsing across arbitrary read splits.
+
+Disconnecting or replacing the presentation-control client recovers visible
+presentation and requests a full repaint, so a crashed viewer cannot strand a
+session in its hidden state. Sessions created by older binaries have no `.present`
+socket; WSM must treat the missing socket as an unsupported capability and leave
+the hotkey with the child. Raw clients keep their existing behavior because vpty
+does not change presentation until a client explicitly sends a valid request.
 
 The prototype must demonstrate how it preserves raw legacy clients and detects
 capability for older persistent sessions. Initially test with new, isolated epic
