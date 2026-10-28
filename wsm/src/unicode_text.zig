@@ -46,6 +46,39 @@ pub fn displayWidth(text: []const u8) usize {
     return cells;
 }
 
+pub const Viewport = struct {
+    start: usize,
+    end: usize,
+    cursor_cells: usize,
+};
+
+pub fn viewportAroundCursor(text: []const u8, cursor: usize, max_cells: usize) Viewport {
+    std.debug.assert(cursor <= text.len);
+    if (max_cells == 0) return .{ .start = cursor, .end = cursor, .cursor_cells = 0 };
+
+    const max_before_cursor = max_cells - 1;
+    var before_width = displayWidth(text[0..cursor]);
+    var start: usize = 0;
+    var before = GraphemeIterator.init(text[0..cursor]);
+    while (before_width > max_before_cursor) {
+        const cluster = before.next() orelse break;
+        before_width -= clusterWidth(text[cluster.start..cluster.end]);
+        start = cluster.end;
+    }
+
+    var end = start;
+    var visible_width: usize = 0;
+    var visible = GraphemeIterator.init(text[start..]);
+    while (visible.next()) |cluster| {
+        const width = clusterWidth(text[start + cluster.start .. start + cluster.end]);
+        if (width > max_cells -| visible_width) break;
+        visible_width += width;
+        end = start + cluster.end;
+    }
+
+    return .{ .start = start, .end = end, .cursor_cells = before_width };
+}
+
 const Cluster = struct {
     start: usize,
     end: usize,
@@ -143,4 +176,20 @@ test "cell clipping preserves complete UTF-8 graphemes" {
     try std.testing.expectEqualStrings("a🙂", prefixForWidth(text, 3));
     try std.testing.expectEqualStrings("a🙂e\u{301}", prefixForWidth(text, 4));
     try std.testing.expect(std.unicode.utf8ValidateSlice(prefixForWidth(text, 4)));
+}
+
+test "cursor viewport scrolls only at grapheme boundaries" {
+    const text = "ab🙂e\u{301}z";
+
+    const at_end = viewportAroundCursor(text, text.len, 5);
+    try std.testing.expectEqualStrings("🙂e\u{301}z", text[at_end.start..at_end.end]);
+    try std.testing.expectEqual(@as(usize, 4), at_end.cursor_cells);
+
+    const before_emoji = viewportAroundCursor(text, 2, 5);
+    try std.testing.expectEqualStrings("ab🙂e\u{301}", text[before_emoji.start..before_emoji.end]);
+    try std.testing.expectEqual(@as(usize, 2), before_emoji.cursor_cells);
+
+    const narrow = viewportAroundCursor(text, "ab🙂".len, 2);
+    try std.testing.expectEqualStrings("e\u{301}z", text[narrow.start..narrow.end]);
+    try std.testing.expectEqual(@as(usize, 0), narrow.cursor_cells);
 }

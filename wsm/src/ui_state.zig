@@ -98,6 +98,10 @@ pub const State = struct {
         return self.input_buf.items;
     }
 
+    pub fn inputCursor(self: *const State) usize {
+        return self.cursor;
+    }
+
     pub fn notice(self: *const State) []const u8 {
         return self.notice_text.items;
     }
