@@ -249,6 +249,10 @@ const App = struct {
         }
         if (self.should_exit) return;
         if (self.menu_state.mode == .passive and self.presentation_phase == .menu) {
+            if (!self.executor.isInteractiveAttached()) {
+                self.should_exit = true;
+                return;
+            }
             try self.beginResume();
             return;
         }
@@ -380,7 +384,20 @@ const App = struct {
     fn handlePumpResult(self: *App, pump_result: executor_mod.Result) anyerror!void {
         switch (pump_result) {
             .detached => {
-                if (!self.executor.isInteractiveAttached()) self.should_exit = true;
+                if (!self.executor.isInteractiveAttached()) {
+                    switch (self.presentation_phase) {
+                        .yielding, .menu => {
+                            try self.provider.setCurrentSession(null);
+                            try self.refreshPolicy();
+                            if (self.presentation_phase == .yielding) {
+                                try self.finishYield();
+                            } else {
+                                try self.render();
+                            }
+                        },
+                        .child, .resuming => self.should_exit = true,
+                    }
+                }
             },
             .idle => {},
             .err => {
