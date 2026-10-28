@@ -1,6 +1,7 @@
 const std = @import("std");
 const ui_state = @import("ui_state.zig");
 const policy = @import("policy.zig");
+const unicode_text = @import("unicode_text.zig");
 
 const screen_reset = "\x1b[0m\x1b[2J\x1b[H\x1b[?25l";
 
@@ -90,10 +91,7 @@ pub fn buildFrame(
 
 fn appendLine(frame: *std.ArrayList(u8), allocator: std.mem.Allocator, line: []const u8, cols: u16, rows: u16, row: *usize) !void {
     if (row.* >= rows) return;
-    const limit = @min(line.len, cols);
-    var end = limit;
-    while (end > 0 and end < line.len and (line[end] & 0xc0) == 0x80) end -= 1;
-    try frame.appendSlice(allocator, line[0..end]);
+    try frame.appendSlice(allocator, unicode_text.prefixForWidth(line, cols));
     row.* += 1;
     if (row.* < rows) try frame.appendSlice(allocator, "\r\n");
 }
@@ -132,4 +130,24 @@ test "menu clips rows and does not split UTF-8" {
 
     try std.testing.expect(std.unicode.utf8ValidateSlice(frame[screen_reset.len..]));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, frame, "\r\n"));
+    try std.testing.expect(std.mem.indexOf(u8, frame, "🙂wor") != null);
+    try std.testing.expect(std.mem.indexOf(u8, frame, "🙂work") == null);
+}
+
+test "menu clipping keeps combining and emoji graphemes whole" {
+    var state = ui_state.State.init(std.testing.allocator);
+    defer state.deinit();
+    state.mode = .prompt_create;
+    _ = state.handleText(.{}, "e\u{301}🙂z");
+
+    const frame = try buildFrame(std.testing.allocator, &state, .{
+        .workspace = "w",
+        .session = "s",
+        .active_summary = "",
+        .attach_candidates = &.{},
+    }, 11, 5);
+    defer std.testing.allocator.free(frame);
+
+    try std.testing.expect(std.mem.indexOf(u8, frame, "create> e\u{301}🙂") != null);
+    try std.testing.expect(std.mem.indexOf(u8, frame, "🙂z") == null);
 }

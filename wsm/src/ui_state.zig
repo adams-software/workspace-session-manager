@@ -1,4 +1,5 @@
 const std = @import("std");
+const unicode_text = @import("unicode_text.zig");
 
 pub const Mode = enum {
     passive,
@@ -37,7 +38,6 @@ pub const Key = union(enum) {
     right,
     up,
     down,
-    printable: u8,
 
     pub fn fromByte(b: u8) ?Key {
         return switch (b) {
@@ -47,7 +47,6 @@ pub const Key = union(enum) {
             0x7f => .backspace,
             '\r', '\n' => .enter,
             '\t' => .tab,
-            0x20...0x7e => .{ .printable = b },
             else => null,
         };
     }
@@ -110,6 +109,24 @@ pub const State = struct {
             .prompt_attach => self.handlePromptAttach(ctx, key),
             .prompt_create => self.handlePromptCreate(key),
             .prompt_kill => self.handlePromptKill(key),
+        };
+    }
+
+    pub fn handleText(self: *State, ctx: ExternalContext, text: []const u8) StepResult {
+        _ = ctx;
+        if (text.len == 0 or !std.unicode.utf8ValidateSlice(text)) return .{};
+        return switch (self.mode) {
+            .active_menu => self.handleActiveMenuText(text),
+            .prompt_attach => blk: {
+                self.insertText(text);
+                self.selected_candidate = null;
+                break :blk .{ .rerender = true, .request_attach_candidates = self.input_buf.items };
+            },
+            .prompt_create => blk: {
+                self.insertText(text);
+                break :blk .{ .rerender = true };
+            },
+            .passive, .prompt_kill => .{},
         };
     }
 
@@ -176,28 +193,32 @@ pub const State = struct {
             .right => .{ .rerender = true, .action = .next },
             .down => .{ .rerender = true, .action = .in },
             .up => .{ .rerender = true, .action = .out },
-            .printable => |ch| switch (ch) {
-                'd' => .{ .rerender = true, .action = .detach },
-                'b' => .{ .rerender = true, .action = .back },
-                'a' => blk: {
-                    self.enterPrompt(.prompt_attach);
-                    break :blk .{ .rerender = true };
-                },
-                'c' => blk: {
-                    self.enterPrompt(.prompt_create);
-                    break :blk .{ .rerender = true };
-                },
-                'x' => blk: {
-                    self.enterPrompt(.prompt_kill);
-                    break :blk .{ .rerender = true };
-                },
-                'h' => .{ .rerender = true, .action = .prev },
-                'j' => .{ .rerender = true, .action = .in },
-                'k' => .{ .rerender = true, .action = .out },
-                'l' => .{ .rerender = true, .action = .next },
-                'g' => .{ .rerender = true, .action = .logs },
-                else => .{},
+            else => .{},
+        };
+    }
+
+    fn handleActiveMenuText(self: *State, text: []const u8) StepResult {
+        if (text.len != 1) return .{};
+        return switch (text[0]) {
+            'd' => .{ .rerender = true, .action = .detach },
+            'b' => .{ .rerender = true, .action = .back },
+            'a' => blk: {
+                self.enterPrompt(.prompt_attach);
+                break :blk .{ .rerender = true };
             },
+            'c' => blk: {
+                self.enterPrompt(.prompt_create);
+                break :blk .{ .rerender = true };
+            },
+            'x' => blk: {
+                self.enterPrompt(.prompt_kill);
+                break :blk .{ .rerender = true };
+            },
+            'h' => .{ .rerender = true, .action = .prev },
+            'j' => .{ .rerender = true, .action = .in },
+            'k' => .{ .rerender = true, .action = .out },
+            'l' => .{ .rerender = true, .action = .next },
+            'g' => .{ .rerender = true, .action = .logs },
             else => .{},
         };
     }
@@ -218,8 +239,7 @@ pub const State = struct {
             },
             .backspace => blk: {
                 if (self.cursor == 0 or self.input_buf.items.len == 0) break :blk .{};
-                _ = self.input_buf.orderedRemove(self.cursor - 1);
-                self.cursor -= 1;
+                self.deletePreviousGrapheme();
                 self.selected_candidate = null;
                 break :blk .{ .rerender = true, .request_attach_candidates = self.input_buf.items };
             },
@@ -232,11 +252,11 @@ pub const State = struct {
                 break :blk .{ .rerender = true };
             },
             .left => blk: {
-                if (self.cursor > 0) self.cursor -= 1;
+                self.cursor = unicode_text.previousBoundary(self.input_buf.items, self.cursor);
                 break :blk .{ .rerender = true };
             },
             .right => blk: {
-                if (self.cursor < self.input_buf.items.len) self.cursor += 1;
+                self.cursor = unicode_text.nextBoundary(self.input_buf.items, self.cursor);
                 break :blk .{ .rerender = true };
             },
             .tab, .up => blk: {
@@ -261,11 +281,6 @@ pub const State = struct {
                 self.mode = .passive;
                 break :blk .{ .rerender = true, .action = .{ .attach = self.allocator.dupe(u8, self.input_buf.items) catch return .{} } };
             },
-            .printable => |ch| blk: {
-                self.insertChar(ch);
-                self.selected_candidate = null;
-                break :blk .{ .rerender = true, .request_attach_candidates = self.input_buf.items };
-            },
         };
     }
 
@@ -285,8 +300,7 @@ pub const State = struct {
             },
             .backspace => blk: {
                 if (self.cursor == 0 or self.input_buf.items.len == 0) break :blk .{};
-                _ = self.input_buf.orderedRemove(self.cursor - 1);
-                self.cursor -= 1;
+                self.deletePreviousGrapheme();
                 break :blk .{ .rerender = true };
             },
             .home => blk: {
@@ -298,11 +312,11 @@ pub const State = struct {
                 break :blk .{ .rerender = true };
             },
             .left => blk: {
-                if (self.cursor > 0) self.cursor -= 1;
+                self.cursor = unicode_text.previousBoundary(self.input_buf.items, self.cursor);
                 break :blk .{ .rerender = true };
             },
             .right => blk: {
-                if (self.cursor < self.input_buf.items.len) self.cursor += 1;
+                self.cursor = unicode_text.nextBoundary(self.input_buf.items, self.cursor);
                 break :blk .{ .rerender = true };
             },
             .enter => blk: {
@@ -312,10 +326,6 @@ pub const State = struct {
                 }
                 self.mode = .passive;
                 break :blk .{ .rerender = true, .action = .{ .create = self.allocator.dupe(u8, self.input_buf.items) catch return .{} } };
-            },
-            .printable => |ch| blk: {
-                self.insertChar(ch);
-                break :blk .{ .rerender = true };
             },
             else => .{},
         };
@@ -350,9 +360,15 @@ pub const State = struct {
         self.notice_text.clearRetainingCapacity();
     }
 
-    fn insertChar(self: *State, ch: u8) void {
-        self.input_buf.insert(self.allocator, self.cursor, ch) catch return;
-        self.cursor += 1;
+    fn insertText(self: *State, text: []const u8) void {
+        self.input_buf.insertSlice(self.allocator, self.cursor, text) catch return;
+        self.cursor += text.len;
+    }
+
+    fn deletePreviousGrapheme(self: *State) void {
+        const start = unicode_text.previousBoundary(self.input_buf.items, self.cursor);
+        self.input_buf.replaceRange(self.allocator, start, self.cursor - start, "") catch return;
+        self.cursor = start;
     }
 
     fn setNotice(self: *State, kind: InlineNoticeKind, message: []const u8) void {
@@ -479,7 +495,7 @@ test "active menu b triggers back action" {
     defer state.deinit();
     state.mode = .active_menu;
 
-    const result = state.handleKey(.{}, .{ .printable = 'b' });
+    const result = state.handleText(.{}, "b");
     try std.testing.expect(result.action != null);
     try std.testing.expectEqual(Action.back, result.action.?);
 }
@@ -514,6 +530,50 @@ test "d still detaches from the active menu" {
     var state = State.init(std.testing.allocator);
     defer state.deinit();
     state.mode = .active_menu;
-    const result = state.handleKey(.{}, .{ .printable = 'd' });
+    const result = state.handleText(.{}, "d");
     try std.testing.expectEqual(Action.detach, result.action.?);
+}
+
+test "prompt editing moves and deletes extended grapheme clusters" {
+    const samples = [_][]const u8{
+        "e\u{301}",
+        "👍🏽",
+        "👨‍👩‍👧‍👦",
+    };
+    for (samples) |sample| {
+        var state = State.init(std.testing.allocator);
+        defer state.deinit();
+        state.mode = .prompt_create;
+
+        var view = std.unicode.Utf8View.init(sample) catch unreachable;
+        var iterator = view.iterator();
+        while (iterator.nextCodepointSlice()) |scalar| _ = state.handleText(.{}, scalar);
+
+        try std.testing.expectEqual(sample.len, state.cursor);
+        _ = state.handleKey(.{}, .left);
+        try std.testing.expectEqual(@as(usize, 0), state.cursor);
+        _ = state.handleKey(.{}, .right);
+        try std.testing.expectEqual(sample.len, state.cursor);
+        _ = state.handleKey(.{}, .backspace);
+        try std.testing.expectEqualStrings("", state.input());
+        try std.testing.expectEqual(@as(usize, 0), state.cursor);
+    }
+}
+
+test "attach queries and create actions preserve exact UTF-8" {
+    const input = "café🙂";
+
+    var attach = State.init(std.testing.allocator);
+    defer attach.deinit();
+    attach.mode = .prompt_attach;
+    const query = attach.handleText(.{}, input);
+    try std.testing.expectEqualStrings(input, query.request_attach_candidates.?);
+
+    var create = State.init(std.testing.allocator);
+    defer create.deinit();
+    create.mode = .prompt_create;
+    _ = create.handleText(.{}, input);
+    const result = create.handleKey(.{}, .enter);
+    try std.testing.expectEqualStrings(input, result.action.?.create);
+    std.testing.allocator.free(result.action.?.create);
 }
