@@ -190,10 +190,23 @@ pub const StdoutThread = struct {
         self.wake();
     }
 
-    pub fn resumePresentation(self: *StdoutThread) !void {
+    pub fn resumePresentation(self: *StdoutThread, boundary: []const u8) !void {
         self.render_mutex.lock();
         defer self.render_mutex.unlock();
         if (self.presentation_enabled) return error.InvalidState;
+        // The yield boundary has already drained before a peer can request
+        // resume. Put this marker at the head of the newly visible stream;
+        // subsequent mode restoration and repaint bytes follow it.
+        try self.buffer.enqueueControl(.{ .bytes = @constCast(boundary) });
+        _ = self.shared.pending_control_bytes.fetchAdd(boundary.len, .seq_cst);
+        self.presentation_enabled = true;
+        self.wake();
+    }
+
+    pub fn recoverPresentation(self: *StdoutThread) void {
+        self.render_mutex.lock();
+        defer self.render_mutex.unlock();
+        if (self.presentation_enabled) return;
         self.presentation_enabled = true;
         self.wake();
     }
@@ -439,9 +452,9 @@ test "presentation yield rejects hidden output and preserves only a started rend
     try std.testing.expectEqual(@as(usize, visible_control.len + 8), worker.pendingControlBytes());
     try std.testing.expectEqual(@as(usize, 0), worker.pendingRenderBytes());
 
-    try worker.resumePresentation();
+    try worker.resumePresentation("resume-boundary");
     try worker.enqueueControl(.{ .bytes = &hidden_control });
-    try std.testing.expectEqual(@as(usize, visible_control.len + 8 + hidden_control.len), worker.pendingControlBytes());
+    try std.testing.expectEqual(@as(usize, visible_control.len + 8 + 15 + hidden_control.len), worker.pendingControlBytes());
 }
 
 test "presentation yield keeps the unfinished suffix of a started render" {

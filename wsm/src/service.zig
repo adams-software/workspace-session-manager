@@ -173,7 +173,6 @@ pub const WorkspaceService = struct {
         };
     }
 
-
     pub fn attach(self: *WorkspaceService, provider: *policy.Provider, id: []const u8) !AttachResult {
         const attached = try self.attachOnce(provider, id);
         return .{
@@ -264,6 +263,9 @@ pub const WorkspaceService = struct {
         }
         if (entry.remove_control) {
             unlinkBestEffort(entry.info.session.paths.control_path);
+        }
+        if (entry.cleanup == .remove) {
+            unlinkBestEffort(entry.info.session.paths.presentation_path);
         }
     }
 
