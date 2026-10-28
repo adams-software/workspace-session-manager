@@ -222,6 +222,11 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     presentation_stream_mod.addImport("byte_queue", byte_queue_mod);
+    const input_router_mod = b.addModule("input_router", .{
+        .root_source_file = b.path("wsm/src/input_router.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
     const version_options = b.addOptions();
     version_options.addOption([]const u8, "version", buildVersion(b));
     wsm_root.addOptions("build_options", version_options);
@@ -233,6 +238,7 @@ pub fn build(b: *std.Build) void {
     wsm_root.addImport("ctlwire", ctlwire_mod);
     wsm_root.addImport("argv_parse", argv_parse_mod);
     wsm_root.addImport("presentation_stream", presentation_stream_mod);
+    wsm_root.addImport("input_router", input_router_mod);
     const wsm_exe = b.addExecutable(.{
         .name = "wsm",
         .root_module = wsm_root,
@@ -575,6 +581,8 @@ pub fn build(b: *std.Build) void {
     session_link_test_root.addImport("presentation_stream", presentation_stream_mod);
     const presentation_stream_tests = b.addTest(.{ .root_module = presentation_stream_mod });
     const run_presentation_stream_tests = b.addRunArtifact(presentation_stream_tests);
+    const input_router_tests = b.addTest(.{ .root_module = input_router_mod });
+    const run_input_router_tests = b.addRunArtifact(input_router_tests);
     const session_link_tests = b.addTest(.{ .root_module = session_link_test_root });
     const run_session_link_tests = b.addRunArtifact(session_link_tests);
     const test_session_link_step = b.step("test-session-link", "Run session output flow-control tests");
@@ -600,6 +608,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_terminal_state_vterm_tests.step);
     test_step.dependOn(&run_session_link_tests.step);
     test_step.dependOn(&run_presentation_stream_tests.step);
+    test_step.dependOn(&run_input_router_tests.step);
     test_step.dependOn(&run_worker_start_tests.step);
     test_step.dependOn(&run_vpty_output_tests.step);
     test_step.dependOn(&run_vpty_input_tests.step);
