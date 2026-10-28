@@ -27,6 +27,7 @@ import fcntl, os, select, signal, struct, termios, time, tty
 tty.setraw(0)
 progress_path = os.environ["WSM_STRESS_PROGRESS"]
 exit_path = os.environ["WSM_STRESS_EXIT"]
+session = os.environ["WSM_SESSION_ID"]
 progress = os.open(progress_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
 resized = True
 size_label = b""
@@ -39,14 +40,14 @@ signal.signal(signal.SIGWINCH, on_resize)
 tick = 0
 try:
     while True:
-        if os.path.exists(exit_path):
+        if session == "stress" and os.path.exists(exit_path):
             break
         if resized:
             rows, cols, _, _ = struct.unpack("HHHH", fcntl.ioctl(0, termios.TIOCGWINSZ, b"\0" * 8))
             size_label = f" SIZE:{cols}x{rows}".encode()
             resized = False
         tick += 1
-        os.write(1, b"\x1b[2J\x1b[HSTRESS_SCREEN " + str(tick).encode() + size_label + b"\x1b[?2004h")
+        os.write(1, b"\x1b[2J\x1b[HSTRESS_SCREEN:" + session.encode() + b" " + str(tick).encode() + size_label + b"\x1b[?2004h")
         if tick % 10 == 0:
             os.write(progress, b".")
         ready, _, _ = select.select([0], [], [], 0.005)
@@ -160,15 +161,16 @@ def main() -> None:
         producer.write_text(PRODUCER)
         producer.chmod(0o700)
 
+        env = os.environ.copy()
+        env.update(
+            WSM_ROOT=tmp,
+            SHELL=str(producer),
+            WSM_STRESS_PROGRESS=str(progress),
+            WSM_STRESS_EXIT=str(exit_request),
+        )
+
         pid, fd = pty.fork()
         if pid == 0:
-            env = os.environ.copy()
-            env.update(
-                WSM_ROOT=tmp,
-                SHELL=str(producer),
-                WSM_STRESS_PROGRESS=str(progress),
-                WSM_STRESS_EXIT=str(exit_request),
-            )
             os.execve(str(wsm), [str(wsm), "create", "stress"], env)
 
         reaped = False
@@ -220,12 +222,33 @@ def main() -> None:
             if process_growth > PROCESS_GROWTH_LIMIT:
                 raise RuntimeError("processes leaked across presentation transitions")
 
+            subprocess.run(
+                [wsm, "create", "-d", "fallback"],
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=True,
+            )
+
             os.write(fd, b"\x07")
             read_until(fd, b"a  attach")
             exit_request.touch()
+            detached_menu = read_until(fd, b" / detached")
+            if b"a  attach" not in detached_menu:
+                detached_menu += read_until(fd, b"a  attach")
+            if wait_for_exit(pid, 0.2):
+                reaped = True
+                raise RuntimeError("WSM exited instead of keeping the menu after the hidden child exited")
+            os.write(fd, b"a")
+            read_until(fd, b"attach> ")
+            os.write(fd, b"fallback\r")
+            read_until(fd, b"STRESS_SCREEN:fallback")
+            os.write(fd, b"\x07")
+            read_until(fd, b"a  attach")
+            os.write(fd, b"d")
             reaped = wait_for_exit(pid)
             if not reaped:
-                raise RuntimeError("WSM did not exit after the hidden child exited")
+                raise RuntimeError("WSM did not detach after recovering from the hidden child exit")
 
             print(
                 "fullscreen transition stress: ok "
@@ -251,6 +274,13 @@ def main() -> None:
             env["WSM_ROOT"] = tmp
             subprocess.run(
                 [wsm, "kill", "-f", "stress"],
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            subprocess.run(
+                [wsm, "kill", "-f", "fallback"],
                 env=env,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
