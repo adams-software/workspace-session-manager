@@ -72,8 +72,8 @@ def check(binary):
         try:
             collect_until(master, output, lambda: b"READY" in output)
             assert b"\x1b[?1000h" in output, "child did not enable mouse reporting"
-            # Let WSM finish the first attachment repaint before changing its UI
-            # mode; that repaint deliberately reasserts the passive status bar.
+            # Let WSM finish the first attachment repaint before opening its
+            # full-screen menu.
             time.sleep(0.25)
             os.write(master, b"\x07")  # Ctrl+G opens the WSM menu.
             time.sleep(0.1)

@@ -171,7 +171,7 @@ Detached create:
 wsm create -d api/dev
 ```
 
-Alias forms mirror the in-session status bar where that makes sense:
+Alias forms mirror the in-session menu where that makes sense:
 
 ```bash
 wsm c test
