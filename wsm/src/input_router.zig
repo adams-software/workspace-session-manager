@@ -58,6 +58,15 @@ pub const Router = struct {
         return self.state == .paste;
     }
 
+    pub fn hasPending(self: *const Router) bool {
+        return self.pending_len > 0;
+    }
+
+    pub fn reset(self: *Router) void {
+        self.state = .child;
+        self.pending_len = 0;
+    }
+
     fn processChild(self: *Router, output: []u8, output_len: *usize) bool {
         while (self.pending_len > 0) {
             if (std.mem.startsWith(u8, bracketed_paste_start, self.pending[0..self.pending_len])) {

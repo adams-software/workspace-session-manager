@@ -227,6 +227,11 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const menu_input_mod = b.addModule("menu_input", .{
+        .root_source_file = b.path("wsm/src/menu_input.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
     const version_options = b.addOptions();
     version_options.addOption([]const u8, "version", buildVersion(b));
     wsm_root.addOptions("build_options", version_options);
@@ -272,17 +277,11 @@ pub fn build(b: *std.Build) void {
     const wsm_ui_state_mod = b.createModule(.{
         .root_source_file = b.path("wsm/src/ui_state.zig"), .target = target, .optimize = optimize, .link_libc = true,
     });
-    const wsm_bar_layout_mod = b.createModule(.{
-        .root_source_file = b.path("wsm/src/bar_layout.zig"), .target = target, .optimize = optimize, .link_libc = true,
+    const wsm_menu_render_mod = b.createModule(.{
+        .root_source_file = b.path("wsm/src/menu_render.zig"), .target = target, .optimize = optimize, .link_libc = true,
     });
-    wsm_bar_layout_mod.addImport("ui_state", wsm_ui_state_mod);
-    const wsm_bar_render_mod = b.createModule(.{
-        .root_source_file = b.path("wsm/src/bar_render.zig"), .target = target, .optimize = optimize, .link_libc = true,
-    });
-    wsm_bar_render_mod.addImport("ui_state", wsm_ui_state_mod);
     const wsm_ui_state_tests = b.addTest(.{ .root_module = wsm_ui_state_mod });
-    const wsm_bar_layout_tests = b.addTest(.{ .root_module = wsm_bar_layout_mod });
-    const wsm_bar_render_tests = b.addTest(.{ .root_module = wsm_bar_render_mod });
+    const wsm_menu_render_tests = b.addTest(.{ .root_module = wsm_menu_render_mod });
 
     // vpty
     const vpty_terminal_mod = b.addModule("vpty_terminal", .{
@@ -518,8 +517,7 @@ pub fn build(b: *std.Build) void {
     const run_host_control_tests = b.addRunArtifact(host_control_tests);
     const run_host_client_tests = b.addRunArtifact(host_client_tests);
     const run_wsm_ui_state_tests = b.addRunArtifact(wsm_ui_state_tests);
-    const run_wsm_bar_layout_tests = b.addRunArtifact(wsm_bar_layout_tests);
-    const run_wsm_bar_render_tests = b.addRunArtifact(wsm_bar_render_tests);
+    const run_wsm_menu_render_tests = b.addRunArtifact(wsm_menu_render_tests);
     const run_ptylog_log_core_tests = b.addRunArtifact(ptylog_log_core_tests);
 
     const wake_pipe_tests = b.addTest(.{ .root_module = wake_pipe_mod });
@@ -583,6 +581,8 @@ pub fn build(b: *std.Build) void {
     const run_presentation_stream_tests = b.addRunArtifact(presentation_stream_tests);
     const input_router_tests = b.addTest(.{ .root_module = input_router_mod });
     const run_input_router_tests = b.addRunArtifact(input_router_tests);
+    const menu_input_tests = b.addTest(.{ .root_module = menu_input_mod });
+    const run_menu_input_tests = b.addRunArtifact(menu_input_tests);
     const session_link_tests = b.addTest(.{ .root_module = session_link_test_root });
     const run_session_link_tests = b.addRunArtifact(session_link_tests);
     const test_session_link_step = b.step("test-session-link", "Run session output flow-control tests");
@@ -609,6 +609,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_session_link_tests.step);
     test_step.dependOn(&run_presentation_stream_tests.step);
     test_step.dependOn(&run_input_router_tests.step);
+    test_step.dependOn(&run_menu_input_tests.step);
     test_step.dependOn(&run_worker_start_tests.step);
     test_step.dependOn(&run_vpty_output_tests.step);
     test_step.dependOn(&run_vpty_input_tests.step);
@@ -625,8 +626,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_host_control_tests.step);
     test_step.dependOn(&run_host_client_tests.step);
     test_step.dependOn(&run_wsm_ui_state_tests.step);
-    test_step.dependOn(&run_wsm_bar_layout_tests.step);
-    test_step.dependOn(&run_wsm_bar_render_tests.step);
+    test_step.dependOn(&run_wsm_menu_render_tests.step);
     test_step.dependOn(&run_ptylog_log_core_tests.step);
 
     const test_terminal_state_vterm_step = b.step("test-vterm", "Run libvterm adapter tests");
@@ -665,11 +665,8 @@ pub fn build(b: *std.Build) void {
     const test_wsm_ui_state_step = b.step("test-wsm-ui-state", "Run wsm ui_state tests");
     test_wsm_ui_state_step.dependOn(&run_wsm_ui_state_tests.step);
 
-    const test_wsm_bar_layout_step = b.step("test-wsm-bar-layout", "Run wsm bar_layout tests");
-    test_wsm_bar_layout_step.dependOn(&run_wsm_bar_layout_tests.step);
-
-    const test_wsm_bar_render_step = b.step("test-wsm-bar-render", "Run wsm bar_render tests");
-    test_wsm_bar_render_step.dependOn(&run_wsm_bar_render_tests.step);
+    const test_wsm_menu_render_step = b.step("test-wsm-menu-render", "Run wsm full-screen menu render tests");
+    test_wsm_menu_render_step.dependOn(&run_wsm_menu_render_tests.step);
 
     const test_ptylog_log_core_step = b.step("test-ptylog-log-core", "Run ptylog log-core tests");
     test_ptylog_log_core_step.dependOn(&run_ptylog_log_core_tests.step);
@@ -709,5 +706,11 @@ pub fn build(b: *std.Build) void {
     const smoke_wsm_logs_step = b.step("smoke-wsm-logs", "Run log-behavior smoke test for wsm");
     smoke_wsm_logs_step.dependOn(b.getInstallStep());
     smoke_wsm_logs_step.dependOn(&smoke_wsm_logs_cmd.step);
+
+    const smoke_wsm_menu_cmd = b.addSystemCommand(&.{ "python3", "wsm/scripts/smoke_fullscreen_menu.py" });
+    smoke_wsm_menu_cmd.setCwd(b.path("."));
+    const smoke_wsm_menu_step = b.step("smoke-wsm-menu", "Run full-screen menu handoff smoke test");
+    smoke_wsm_menu_step.dependOn(b.getInstallStep());
+    smoke_wsm_menu_step.dependOn(&smoke_wsm_menu_cmd.step);
 
 }
