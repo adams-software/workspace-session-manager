@@ -312,6 +312,7 @@ const App = struct {
                 self.reassert_bar_after_first_pump = false;
             },
             .idle => {},
+            .presentation_yielded, .presentation_resumed => {},
         }
     }
 
