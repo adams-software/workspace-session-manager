@@ -160,8 +160,8 @@ pub fn printHelp(allocator: std.mem.Allocator, writer: anytype, workspace_root: 
             "  kill | x <id>             Send TERM to session child\n" ++
             "  kill | x -f <id>          Send KILL to session child\n\n" ++
             "NOTES\n" ++
-            "  Status-bar letters map to CLI aliases where that makes sense: a/c/g/x.\n" ++
-            "  The bar's [d]etach action is UI-local and does not have a top-level CLI alias.\n\n" ++
+            "  Menu letters map to CLI aliases where that makes sense: a/c/g/x.\n" ++
+            "  The menu's [d]etach action is UI-local and does not have a top-level CLI alias.\n\n" ++
             "GLOBAL OPTIONS\n" ++
             "  --workspace=<path>        Session directory (overrides WSM_ROOT)\n" ++
             "  Default: /tmp/wsm-<uid> when WSM_ROOT is unset or empty.\n" ++

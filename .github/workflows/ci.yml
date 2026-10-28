@@ -28,6 +28,9 @@ jobs:
       - name: Test terminal mode cleanup on WSM detach
         run: python3 wsm/scripts/test_mode_cleanup.py zig-out/bin/wsm
 
+      - name: Test full-screen menu session actions
+        run: zig build smoke-wsm-menu-actions
+
       - name: Test Bash session completion
         run: bash wsm/scripts/test_completion.sh
 
@@ -75,10 +78,15 @@ jobs:
       - name: Check ptylog resource use
         run: python3 ptylog/test_resources.py zig-out/bin/ptylog > ptylog-resources.jsonl
 
+      - name: Check hidden full-screen menu resource use
+        run: zig build stress-wsm-menu -Doptimize=ReleaseSafe > fullscreen-menu-resources.txt
+
       - name: Upload resource measurements
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ptylog-resources
-          path: ptylog-resources.jsonl
+          name: resource-measurements
+          path: |
+            ptylog-resources.jsonl
+            fullscreen-menu-resources.txt
           retention-days: 7
