@@ -174,6 +174,20 @@ what happens to remaining input in a read when ownership changes; do not let a
 menu cancellation accidentally execute trailing menu input in the child. Menu
 search must handle emoji and combining marks without reviving the split-read bug.
 
+The implemented transition stress harness runs with:
+
+```sh
+zig build stress-wsm-menu
+```
+
+It uses a real controlling PTY and a continuously producing child. An independent
+progress file proves the child advances while hidden. The harness also exercises
+hidden resize restoration, twenty yield/resume cycles, and child exit while the
+menu owns the terminal. It fails on leaked hidden terminal bytes, more than 24 MiB
+RSS growth, more than four additional descriptors, or more than 0.75 CPU-seconds
+in WSM and vpty during the one-second hidden-output interval. The process count
+must not grow across the repeated transitions.
+
 Measure main versus epic under an idle child, continuously producing child, and
 repeated menu transitions. Check idle CPU, RSS after warm-up, queue high-water
 marks, descriptors and process counts. Use a progress signal independent of the

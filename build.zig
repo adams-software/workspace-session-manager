@@ -713,4 +713,10 @@ pub fn build(b: *std.Build) void {
     smoke_wsm_menu_step.dependOn(b.getInstallStep());
     smoke_wsm_menu_step.dependOn(&smoke_wsm_menu_cmd.step);
 
+    const stress_wsm_menu_cmd = b.addSystemCommand(&.{ "python3", "wsm/scripts/stress_fullscreen_menu.py" });
+    stress_wsm_menu_cmd.setCwd(b.path("."));
+    const stress_wsm_menu_step = b.step("stress-wsm-menu", "Stress full-screen menu transitions and hidden output");
+    stress_wsm_menu_step.dependOn(b.getInstallStep());
+    stress_wsm_menu_step.dependOn(&stress_wsm_menu_cmd.step);
+
 }
