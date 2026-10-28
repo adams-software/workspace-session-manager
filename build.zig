@@ -719,4 +719,10 @@ pub fn build(b: *std.Build) void {
     stress_wsm_menu_step.dependOn(b.getInstallStep());
     stress_wsm_menu_step.dependOn(&stress_wsm_menu_cmd.step);
 
+    const smoke_wsm_menu_actions_cmd = b.addSystemCommand(&.{ "python3", "wsm/scripts/smoke_fullscreen_actions.py" });
+    smoke_wsm_menu_actions_cmd.setCwd(b.path("."));
+    const smoke_wsm_menu_actions_step = b.step("smoke-wsm-menu-actions", "Run full-screen menu session-action smoke test");
+    smoke_wsm_menu_actions_step.dependOn(b.getInstallStep());
+    smoke_wsm_menu_actions_step.dependOn(&smoke_wsm_menu_actions_cmd.step);
+
 }

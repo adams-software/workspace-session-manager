@@ -178,6 +178,7 @@ The implemented transition stress harness runs with:
 
 ```sh
 zig build stress-wsm-menu
+zig build smoke-wsm-menu-actions
 ```
 
 It uses a real controlling PTY and a continuously producing child. An independent
@@ -187,6 +188,11 @@ menu owns the terminal. It fails on leaked hidden terminal bytes, more than 24 M
 RSS growth, more than four additional descriptors, or more than 0.75 CPU-seconds
 in WSM and vpty during the one-second hidden-output interval. The process count
 must not grow across the repeated transitions.
+
+The session-action smoke uses several persistent sessions to cover navigation
+that keeps the menu open, attach/create into a visible child, prompt cancellation,
+log viewer return, presentation-client loss, and fallback to an older session
+without a `.present` capability path.
 
 Measure main versus epic under an idle child, continuously producing child, and
 repeated menu transitions. Check idle CPU, RSS after warm-up, queue high-water
