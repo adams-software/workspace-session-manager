@@ -158,6 +158,27 @@ def main() -> None:
             terminal.send(b"gamma\r")
             terminal.expect(b"SESSION:gamma")
 
+            # UTF-8 prompt input survives one-byte terminal reads, and editing
+            # treats combining and emoji sequences as whole graphemes.
+            terminal.send(b"\x07c")
+            terminal.expect(b"create> ")
+            unicode_input = "e\u0301👍🏽x".encode()
+            for byte in unicode_input:
+                terminal.send(bytes([byte]))
+                time.sleep(0.002)
+            terminal.expect(b"create> " + unicode_input)
+            for byte in b"\x1b[D":
+                terminal.send(bytes([byte]))
+                time.sleep(0.002)
+            terminal.send(b"\x7f")
+            terminal.expect("create> e\u0301x".encode())
+            terminal.send(b"\x7f")
+            terminal.expect(b"create> x")
+            terminal.send(b"\x1b")
+            terminal.expect(b"a  attach")
+            terminal.send(b"\x07")
+            terminal.expect(b"SESSION:gamma")
+
             # Prompt cancellation returns to the menu; the close-key suffix is
             # discarded rather than becoming input in gamma.
             terminal.send(b"\x07a")

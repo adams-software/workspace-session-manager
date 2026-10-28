@@ -218,15 +218,25 @@ const App = struct {
 
     fn handleUiInput(self: *App, bytes: []const u8) !void {
         for (bytes) |byte| {
-            const key = self.menu_input_decoder.feed(byte);
-            self.menu_escape_deadline_ms = if (self.menu_input_decoder.hasPending()) (try monotonicMs()) + INPUT_PREFIX_TIMEOUT_MS else null;
-            if (key) |resolved| try self.handleUiKey(resolved);
+            const event = self.menu_input_decoder.feed(byte);
+            self.menu_escape_deadline_ms = if (self.menu_input_decoder.hasPendingEscape()) (try monotonicMs()) + INPUT_PREFIX_TIMEOUT_MS else null;
+            if (event) |resolved| switch (resolved) {
+                .key => |key| try self.handleUiKey(key),
+                .text => |value| try self.handleUiText(value.slice()),
+            };
             if (self.presentation_phase != .menu) break;
         }
     }
 
+    fn handleUiText(self: *App, value: []const u8) !void {
+        try self.handleUiResult(self.menu_state.handleText(self.provider.externalContext(), value));
+    }
+
     fn handleUiKey(self: *App, key: ui_state.Key) !void {
-        const result = self.menu_state.handleKey(self.provider.externalContext(), key);
+        try self.handleUiResult(self.menu_state.handleKey(self.provider.externalContext(), key));
+    }
+
+    fn handleUiResult(self: *App, result: ui_state.StepResult) !void {
         if (result.request_attach_candidates) |query| {
             try self.provider.refreshAttachCandidates(query);
         }

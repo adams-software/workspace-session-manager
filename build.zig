@@ -1,5 +1,10 @@
 const std = @import("std");
 
+fn addVendoredUtf8proc(module: *std.Build.Module, b: *std.Build) void {
+    module.addIncludePath(b.path("term_engine/vendor/utf8proc"));
+    module.addCSourceFile(.{ .file = b.path("term_engine/vendor/utf8proc/utf8proc.c") });
+}
+
 fn addVendoredLibvterm(module: *std.Build.Module, b: *std.Build) void {
     module.addIncludePath(b.path("term_engine/vendor/libvterm/include"));
     module.addIncludePath(b.path("term_engine/vendor/libvterm/src"));
@@ -216,6 +221,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+    addVendoredUtf8proc(wsm_root, b);
     const presentation_stream_mod = b.addModule("presentation_stream", .{
         .root_source_file = b.path("wsm/src/presentation_stream.zig"),
         .target = target,
@@ -231,7 +237,9 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("wsm/src/menu_input.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
+    addVendoredUtf8proc(menu_input_mod, b);
     const version_options = b.addOptions();
     version_options.addOption([]const u8, "version", buildVersion(b));
     wsm_root.addOptions("build_options", version_options);
@@ -277,9 +285,11 @@ pub fn build(b: *std.Build) void {
     const wsm_ui_state_mod = b.createModule(.{
         .root_source_file = b.path("wsm/src/ui_state.zig"), .target = target, .optimize = optimize, .link_libc = true,
     });
+    addVendoredUtf8proc(wsm_ui_state_mod, b);
     const wsm_menu_render_mod = b.createModule(.{
         .root_source_file = b.path("wsm/src/menu_render.zig"), .target = target, .optimize = optimize, .link_libc = true,
     });
+    addVendoredUtf8proc(wsm_menu_render_mod, b);
     const wsm_ui_state_tests = b.addTest(.{ .root_module = wsm_ui_state_mod });
     const wsm_menu_render_tests = b.addTest(.{ .root_module = wsm_menu_render_mod });
 
