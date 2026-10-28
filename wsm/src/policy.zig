@@ -1,6 +1,6 @@
 const std = @import("std");
 const global_io = std.Io.Threaded.global_single_threaded.io();
-const bar_model = @import("bar_model.zig");
+const menu_model = @import("menu_model.zig");
 const ui_state = @import("ui_state.zig");
 const canonical = @import("canonical.zig");
 
@@ -95,19 +95,16 @@ pub const Provider = struct {
     root: []u8,
     current_session: []u8,
     workspace_index: ?WorkspaceIndex,
-    passive_label_buf: std.ArrayList(u8),
     active_summary: std.ArrayList(u8),
     attach_candidates: []ui_state.Candidate,
 
     pub const NavOp = enum { prev, next, in, out };
 
-    pub const BarModel = struct {
+    pub const MenuModel = struct {
         workspace: []const u8,
         session: []const u8,
-        passive_label: []const u8,
         active_summary: []const u8,
         attach_candidates: []const ui_state.Candidate,
-        detached: bool,
     };
 
     pub fn init(allocator: std.mem.Allocator, root: []const u8, current_session: ?[]const u8) !Provider {
@@ -116,7 +113,6 @@ pub const Provider = struct {
             .root = try allocator.dupe(u8, root),
             .current_session = try allocator.dupe(u8, current_session orelse ""),
             .workspace_index = null,
-            .passive_label_buf = .empty,
             .active_summary = .empty,
             .attach_candidates = &.{},
         };
@@ -126,7 +122,6 @@ pub const Provider = struct {
         self.allocator.free(self.root);
         self.allocator.free(self.current_session);
         if (self.workspace_index) |*index| index.deinit();
-        self.passive_label_buf.deinit(self.allocator);
         self.active_summary.deinit(self.allocator);
         freeCandidates(self.allocator, self.attach_candidates);
     }
@@ -155,21 +150,18 @@ pub const Provider = struct {
         };
     }
 
-    pub fn barModel(self: *const Provider) BarModel {
+    pub fn menuModel(self: *const Provider) MenuModel {
         return .{
             .workspace = self.root,
             .session = if (self.current_session.len == 0) "detached" else self.current_session,
-            .passive_label = self.passiveLabel(),
             .active_summary = self.active_summary.items,
             .attach_candidates = self.attach_candidates,
-            .detached = self.current_session.len == 0,
         };
     }
 
     pub fn refresh(self: *Provider) !void {
         try self.rebuildWorkspaceIndex();
 
-        try bar_model.buildPassiveLabel(&self.passive_label_buf, self.allocator, self.root, self.current_session);
         if (self.current_session.len == 0) {
             self.active_summary.clearRetainingCapacity();
             return;
@@ -184,16 +176,12 @@ pub const Provider = struct {
         const parent = try self.resolveNavTarget(.out);
         defer if (parent) |s| self.allocator.free(s);
 
-        try bar_model.buildActiveSummary(&self.active_summary, self.allocator, .{
+        try menu_model.buildActiveSummary(&self.active_summary, self.allocator, .{
             .prev = prev,
             .next = next,
             .child = child,
             .parent = parent,
         });
-    }
-
-    fn passiveLabel(self: *const Provider) []const u8 {
-        return self.passive_label_buf.items;
     }
 
     pub fn refreshAttachCandidates(self: *Provider, query: []const u8) !void {

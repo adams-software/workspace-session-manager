@@ -7,18 +7,6 @@ pub const NavTargets = struct {
     parent: ?[]const u8,
 };
 
-pub fn buildPassiveLabel(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, root: []const u8, current_session: []const u8) !void {
-    buf.clearRetainingCapacity();
-    if (current_session.len == 0) {
-        try buf.appendSlice(allocator, "detached");
-        return;
-    }
-
-    var writer = std.Io.Writer.Allocating.fromArrayList(allocator, buf);
-    defer buf.* = writer.toArrayList();
-    try writer.writer.print("{s}/{s}", .{ root, current_session });
-}
-
 pub fn buildActiveSummary(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, nav: NavTargets) !void {
     buf.clearRetainingCapacity();
 
