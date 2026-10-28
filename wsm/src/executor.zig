@@ -14,6 +14,8 @@ pub const Result = union(enum) {
     attached: []const u8,
     idle,
     detached,
+    presentation_yielded,
+    presentation_resumed,
 };
 
 pub const ResizeResult = enum {
@@ -127,6 +129,15 @@ pub const Executor = struct {
         return false;
     }
 
+    pub fn supportsPresentation(self: *const Executor) bool {
+        return if (self.link) |*link| link.supportsPresentation() else false;
+    }
+
+    pub fn requestPresentation(self: *Executor, action: service_mod.PresentationAction) !void {
+        if (self.link) |*link| return link.requestPresentation(action);
+        return error.NotAttached;
+    }
+
     pub fn forwardResize(self: *Executor, cols: u16, rows: u16) !ResizeResult {
         if (self.link) |*link| {
             try link.resize(cols, rows);
@@ -145,6 +156,10 @@ pub const Executor = struct {
                 link.detach();
                 return .detached;
             }
+            if (result.presentation_event) |event| return switch (event) {
+                .yielded => .presentation_yielded,
+                .resumed => .presentation_resumed,
+            };
             return if (result.did_work) .{ .info = try self.allocator.dupe(u8, "") } else .idle;
         }
         return .detached;

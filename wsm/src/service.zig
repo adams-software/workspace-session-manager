@@ -10,6 +10,8 @@ const c = @cImport({
     @cInclude("unistd.h");
 });
 
+pub const PresentationAction = session_link_mod.PresentationAction;
+
 pub const SessionRef = struct {
     id: []u8,
     paths: session_primitives.SessionPaths,
@@ -64,6 +66,14 @@ pub const AttachedSession = struct {
 
     pub fn hasPendingOutput(self: *const AttachedSession) bool {
         return self.link.hasPendingOutput();
+    }
+
+    pub fn supportsPresentation(self: *const AttachedSession) bool {
+        return self.link.supportsPresentation();
+    }
+
+    pub fn requestPresentation(self: *AttachedSession, action: PresentationAction) !void {
+        try self.link.requestPresentation(action);
     }
 
     pub fn resize(self: *AttachedSession, cols: u16, rows: u16) !void {
@@ -317,6 +327,7 @@ pub const WorkspaceService = struct {
         try link.attach(.{
             .data_path = paths.data_path,
             .control_path = if (pathExists(paths.control_path)) paths.control_path else null,
+            .presentation_path = if (pathExists(paths.presentation_path)) paths.presentation_path else null,
         });
         return .{ .link = link };
     }

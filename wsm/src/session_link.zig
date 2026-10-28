@@ -1,6 +1,9 @@
 const std = @import("std");
+const global_io = std.Io.Threaded.global_single_threaded.io();
 const DuplexLink = @import("duplex_link").DuplexLink;
 const fd_stream = @import("fd_stream");
+const ByteQueue = @import("byte_queue").ByteQueue;
+const presentation_stream = @import("presentation_stream");
 
 const c = @cImport({
     @cInclude("sys/socket.h");
@@ -12,11 +15,20 @@ const c = @cImport({
 pub const AttachSpec = struct {
     data_path: []const u8,
     control_path: ?[]const u8,
+    presentation_path: ?[]const u8 = null,
 };
 
 pub const PumpResult = struct {
     stream_lost: bool,
     did_work: bool,
+    presentation_event: ?presentation_stream.Action = null,
+};
+
+pub const PresentationAction = enum { request_yield, request_resume };
+
+const PendingPresentation = struct {
+    action: PresentationAction,
+    token: [32]u8,
 };
 
 pub const Signal = enum {
@@ -29,6 +41,11 @@ pub const SessionLink = struct {
     pump: DuplexLink,
     data_fd: ?c_int,
     control_fd: ?c_int,
+    presentation_fd: ?c_int,
+    wire_rx: ByteQueue,
+    presentation_decoder: presentation_stream.Decoder = .{},
+    pending_presentation: ?PendingPresentation = null,
+    ordered_event: ?presentation_stream.Action = null,
     data_eof: bool = false,
 
     pub fn init(allocator: std.mem.Allocator) SessionLink {
@@ -37,12 +54,15 @@ pub const SessionLink = struct {
             .pump = DuplexLink.init(allocator),
             .data_fd = null,
             .control_fd = null,
+            .presentation_fd = null,
+            .wire_rx = ByteQueue.init(),
         };
     }
 
     pub fn deinit(self: *SessionLink) void {
         self.detach();
         self.pump.deinit();
+        self.wire_rx.deinit(self.allocator);
     }
 
     pub fn attach(self: *SessionLink, spec: AttachSpec) !void {
@@ -52,18 +72,28 @@ pub const SessionLink = struct {
         errdefer _ = c.close(data_fd);
 
         var control_fd: ?c_int = null;
+        var presentation_fd: ?c_int = null;
         errdefer {
             if (control_fd) |fd| _ = c.close(fd);
+            if (presentation_fd) |fd| _ = c.close(fd);
         }
 
         if (spec.control_path) |control_path| {
             control_fd = connectUnix(control_path) catch null;
         }
+        if (spec.presentation_path) |presentation_path| {
+            presentation_fd = connectUnix(presentation_path) catch null;
+        }
 
         self.data_fd = data_fd;
         self.data_eof = false;
         self.control_fd = control_fd;
+        self.presentation_fd = presentation_fd;
         self.pump.clear();
+        self.wire_rx.clear();
+        self.presentation_decoder = .{};
+        self.pending_presentation = null;
+        self.ordered_event = null;
         if (self.control_fd) |fd| drainControl(fd);
     }
 
@@ -77,7 +107,15 @@ pub const SessionLink = struct {
             _ = c.close(fd);
             self.control_fd = null;
         }
+        if (self.presentation_fd) |fd| {
+            _ = c.close(fd);
+            self.presentation_fd = null;
+        }
         self.pump.clear();
+        self.wire_rx.clear();
+        self.presentation_decoder = .{};
+        self.pending_presentation = null;
+        self.ordered_event = null;
     }
 
     pub fn dataPollFd(self: *const SessionLink) ?c_int {
@@ -86,7 +124,8 @@ pub const SessionLink = struct {
 
     pub fn dataPollEvents(self: *const SessionLink) c_short {
         if (self.data_eof) return 0;
-        var events: c_short = if (self.pump.canReadRight()) c.POLLIN else 0;
+        const buffered = self.pump.right_to_left.len() + self.wire_rx.len() + self.presentation_decoder.bufferedBytes();
+        var events: c_short = if (self.ordered_event == null and buffered < DuplexLink.output_queue_limit) c.POLLIN else 0;
         if (!self.pump.left_to_right.isEmpty()) events |= c.POLLOUT;
         return events;
     }
@@ -96,7 +135,7 @@ pub const SessionLink = struct {
     }
 
     pub fn hasPendingOutput(self: *const SessionLink) bool {
-        return !self.pump.right_to_left.isEmpty();
+        return !self.pump.right_to_left.isEmpty() or !self.wire_rx.isEmpty();
     }
 
     pub fn writeInput(self: *SessionLink, bytes: []const u8) !void {
@@ -104,15 +143,102 @@ pub const SessionLink = struct {
         if (self.data_fd) |fd| _ = try self.pump.flushLeftToRight(fd);
     }
 
+    pub fn supportsPresentation(self: *const SessionLink) bool {
+        return self.presentation_fd != null;
+    }
+
+    pub fn requestPresentation(self: *SessionLink, action: PresentationAction) !void {
+        const fd = self.presentation_fd orelse return error.UnsupportedPresentation;
+        if (self.pending_presentation != null or self.ordered_event != null) return error.PresentationPending;
+
+        var random_bytes: [16]u8 = undefined;
+        global_io.random(&random_bytes);
+        const token_buffer = std.fmt.bytesToHex(random_bytes, .lower);
+        const token = token_buffer[0..];
+        var command_buffer: [80]u8 = undefined;
+        const action_text = switch (action) {
+            .request_yield => "yield",
+            .request_resume => "resume",
+        };
+        const command = try std.fmt.bufPrint(&command_buffer, "{s} {s}\n", .{ action_text, token });
+        writeControl(fd, command) catch |write_error| {
+            _ = c.close(fd);
+            self.presentation_fd = null;
+            return write_error;
+        };
+        self.pending_presentation = .{ .action = action, .token = token_buffer };
+    }
+
     pub fn pumpDataToOutput(self: *SessionLink, output_fd: c_int) !PumpResult {
         const data_fd = self.data_fd orelse return .{ .stream_lost = false, .did_work = false };
-        if (self.data_eof) {
-            const did_work = try self.pump.flushRightToLeft(output_fd);
-            return .{ .stream_lost = !self.hasPendingOutput(), .did_work = did_work };
+        var result = PumpResult{ .stream_lost = false, .did_work = false };
+        const started_with_output = !self.pump.right_to_left.isEmpty();
+
+        if (try self.pump.flushLeftToRight(data_fd)) result.did_work = true;
+        if (try self.pump.flushRightToLeft(output_fd)) result.did_work = true;
+
+        if (self.ordered_event == null) {
+            if (try self.processWireBytes()) result.did_work = true;
+            if (!self.data_eof and self.outputBufferRoom() > 0) {
+                var read_buffer: [64 * 1024]u8 = undefined;
+                while (self.outputBufferRoom() > 0) {
+                    const read_len = @min(read_buffer.len, self.outputBufferRoom());
+                    const count = c.read(data_fd, &read_buffer, read_len);
+                    if (count > 0) {
+                        result.did_work = true;
+                        try self.wire_rx.append(self.allocator, read_buffer[0..@intCast(count)]);
+                        if (try self.processWireBytes()) result.did_work = true;
+                        if (self.ordered_event != null or (started_with_output and @as(usize, @intCast(count)) < read_len)) break;
+                        continue;
+                    }
+                    if (count == 0) {
+                        self.data_eof = true;
+                        try self.presentation_decoder.finish(self.allocator, &self.pump.right_to_left);
+                        break;
+                    }
+                    const read_error = std.posix.errno(-1);
+                    if (read_error == .INTR) continue;
+                    if (read_error == .AGAIN) break;
+                    return error.ReadFailed;
+                }
+            }
         }
-        const result = try self.pump.pump(output_fd, data_fd);
-        self.data_eof = result.right_eof;
-        return .{ .stream_lost = self.data_eof and !self.hasPendingOutput(), .did_work = result.did_work };
+
+        if (try self.pump.flushRightToLeft(output_fd)) result.did_work = true;
+        if (self.ordered_event != null and self.pump.right_to_left.isEmpty()) {
+            result.presentation_event = self.ordered_event;
+            self.ordered_event = null;
+            result.did_work = true;
+        }
+        result.stream_lost = self.data_eof and !self.hasPendingOutput() and self.presentation_decoder.bufferedBytes() == 0;
+        return result;
+    }
+
+    fn outputBufferRoom(self: *const SessionLink) usize {
+        const used = self.pump.right_to_left.len() + self.wire_rx.len() + self.presentation_decoder.bufferedBytes();
+        return DuplexLink.output_queue_limit -| used;
+    }
+
+    fn processWireBytes(self: *SessionLink) !bool {
+        var did_work = false;
+        while (!self.wire_rx.isEmpty() and self.ordered_event == null) {
+            const byte = self.wire_rx.readableSlice()[0];
+            self.wire_rx.discard(1);
+            did_work = true;
+            if (try self.presentation_decoder.feedByte(self.allocator, &self.pump.right_to_left, byte)) |frame| {
+                if (self.pending_presentation) |pending| {
+                    const expected_action: presentation_stream.Action = switch (pending.action) {
+                        .request_yield => .yielded,
+                        .request_resume => .resumed,
+                    };
+                    if (frame.action == expected_action and std.mem.eql(u8, frame.tokenSlice(), &pending.token)) {
+                        self.pending_presentation = null;
+                        self.ordered_event = frame.action;
+                    }
+                }
+            }
+        }
+        return did_work;
     }
 
     pub fn resize(self: *SessionLink, cols: u16, rows: u16) !void {
@@ -359,4 +485,96 @@ test "session input is bounded and resumes on socket write readiness" {
     try std.testing.expectEqual(@as(usize, 0), link.pump.left_to_right.len());
     try std.testing.expectEqual(@as(usize, 256 * 1024), link.pump.left_to_right.capacity());
     try std.testing.expectEqual(@as(c_short, c.POLLIN), link.dataPollEvents());
+}
+
+test "presentation boundary is reported after preceding output and before following output" {
+    var data: [2]c_int = undefined;
+    var presentation: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(c.AF_UNIX, c.SOCK_STREAM | c.SOCK_NONBLOCK, 0, &data));
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(c.AF_UNIX, c.SOCK_STREAM | c.SOCK_NONBLOCK, 0, &presentation));
+    defer _ = c.close(data[0]);
+    defer _ = c.close(presentation[0]);
+
+    var link = SessionLink.init(std.testing.allocator);
+    defer link.deinit();
+    link.data_fd = data[1];
+    link.presentation_fd = presentation[1];
+    try link.requestPresentation(.request_yield);
+
+    var command_buffer: [80]u8 = undefined;
+    const command_len = c.read(presentation[0], &command_buffer, command_buffer.len);
+    try std.testing.expect(command_len > 0);
+    const command = command_buffer[0..@intCast(command_len)];
+    try std.testing.expect(std.mem.startsWith(u8, command, "yield "));
+    const token = std.mem.trimEnd(u8, command["yield ".len..], "\n");
+    var wire_buffer: [160]u8 = undefined;
+    const wire = try std.fmt.bufPrint(&wire_buffer, "before\x1bP+wsm;yield;{s}\x1b\\after", .{token});
+    try std.testing.expectEqual(@as(isize, @intCast(wire.len)), c.write(data[0], wire.ptr, wire.len));
+
+    var output: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe2(&output, .{ .NONBLOCK = true, .CLOEXEC = true }));
+    defer _ = c.close(output[0]);
+    defer _ = c.close(output[1]);
+
+    const boundary = try link.pumpDataToOutput(output[1]);
+    try std.testing.expectEqual(presentation_stream.Action.yielded, boundary.presentation_event.?);
+    var received: [16]u8 = undefined;
+    const before_len = c.read(output[0], &received, received.len);
+    try std.testing.expectEqualStrings("before", received[0..@intCast(before_len)]);
+
+    const tail = try link.pumpDataToOutput(output[1]);
+    try std.testing.expect(tail.presentation_event == null);
+    const after_len = c.read(output[0], &received, received.len);
+    try std.testing.expectEqualStrings("after", received[0..@intCast(after_len)]);
+}
+
+test "presentation boundary waits for blocked preceding output" {
+    var data: [2]c_int = undefined;
+    var presentation: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(c.AF_UNIX, c.SOCK_STREAM | c.SOCK_NONBLOCK, 0, &data));
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(c.AF_UNIX, c.SOCK_STREAM | c.SOCK_NONBLOCK, 0, &presentation));
+    defer _ = c.close(data[0]);
+    defer _ = c.close(presentation[0]);
+
+    var link = SessionLink.init(std.testing.allocator);
+    defer link.deinit();
+    link.data_fd = data[1];
+    link.presentation_fd = presentation[1];
+    try link.requestPresentation(.request_yield);
+
+    var command_buffer: [80]u8 = undefined;
+    const command_len = c.read(presentation[0], &command_buffer, command_buffer.len);
+    try std.testing.expect(command_len > 0);
+    const command = command_buffer[0..@intCast(command_len)];
+    const token = std.mem.trimEnd(u8, command["yield ".len..], "\n");
+    var wire_buffer: [160]u8 = undefined;
+    const wire = try std.fmt.bufPrint(&wire_buffer, "before\x1bP+wsm;yield;{s}\x1b\\", .{token});
+    try std.testing.expectEqual(@as(isize, @intCast(wire.len)), c.write(data[0], wire.ptr, wire.len));
+
+    var output: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe2(&output, .{ .NONBLOCK = true, .CLOEXEC = true }));
+    defer _ = c.close(output[0]);
+    defer _ = c.close(output[1]);
+    const padding: [4096]u8 = @splat('x');
+    while (c.write(output[1], &padding, padding.len) > 0) {}
+    try std.testing.expectEqual(std.posix.E.AGAIN, std.posix.errno(-1));
+
+    const blocked = try link.pumpDataToOutput(output[1]);
+    try std.testing.expect(blocked.presentation_event == null);
+    try std.testing.expectEqualStrings("before", link.pump.right_to_left.readableSlice());
+
+    var drain: [4096]u8 = undefined;
+    while (c.read(output[0], &drain, drain.len) > 0) {}
+    const boundary = try link.pumpDataToOutput(output[1]);
+    try std.testing.expectEqual(presentation_stream.Action.yielded, boundary.presentation_event.?);
+    var received: ["before".len]u8 = undefined;
+    try std.testing.expectEqual(@as(isize, received.len), c.read(output[0], &received, received.len));
+    try std.testing.expectEqualStrings("before", &received);
+}
+
+test "presentation requests require a negotiated socket" {
+    var link = SessionLink.init(std.testing.allocator);
+    defer link.deinit();
+    try std.testing.expect(!link.supportsPresentation());
+    try std.testing.expectError(error.UnsupportedPresentation, link.requestPresentation(.request_yield));
 }
