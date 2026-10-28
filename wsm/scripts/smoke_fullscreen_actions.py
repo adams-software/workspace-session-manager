@@ -149,6 +149,7 @@ def main() -> None:
             # Explicit attach closes the menu into the selected child.
             terminal.send(b"\x07a")
             terminal.expect(b"attach> ")
+            terminal.expect(b"\x1b[4;9H\x1b[?25h")
             terminal.send(b"alpha\r")
             terminal.expect(b"SESSION:alpha")
 
