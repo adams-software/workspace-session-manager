@@ -64,6 +64,7 @@ pub const RenderThread = struct {
     pending: PendingRequests = .{},
     thread: ?std.Thread = null,
     stop_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    presentation_enabled: std.atomic.Value(bool) = std.atomic.Value(bool).init(true),
     wake_pipe: WakePipe = .{},
     backlog_deferrals: u8 = 0,
 
@@ -125,6 +126,11 @@ pub const RenderThread = struct {
         self.wake();
     }
 
+    pub fn setPresentationEnabled(self: *RenderThread, enabled: bool) void {
+        self.presentation_enabled.store(enabled, .seq_cst);
+        self.wake();
+    }
+
     fn syncCommittedVersion(self: *RenderThread) void {
         self.renderer.noteCommitted(.{ .version = self.stdout_thread.committedRenderVersion() });
     }
@@ -168,7 +174,7 @@ pub const RenderThread = struct {
             self.syncCommittedVersion();
             self.applyPendingRequests();
 
-            if (self.renderer.needsRender()) {
+            if (self.presentation_enabled.load(.seq_cst) and self.renderer.needsRender()) {
                 if (self.stdout_thread.pendingRenderBytes() > 0 and !self.renderer.shouldBypassBacklogCoalescing() and self.backlog_deferrals < MAX_BACKLOG_DEFERRALS) {
                     self.backlog_deferrals += 1;
                     if (self.stop_requested.load(.seq_cst)) break;

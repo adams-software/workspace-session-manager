@@ -47,6 +47,7 @@ pub const StdoutThread = struct {
     control_queue: actor_mailboxes.MutexQueue(OwnedControlChunk),
     render_mutex: SpinMutex = .{},
     pending_render_publish: ?OwnedRenderPublish = null,
+    presentation_enabled: bool = true,
     shared: SharedState = .{},
     thread: ?std.Thread = null,
     shutdown_deadline_ms: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
@@ -124,6 +125,12 @@ pub const StdoutThread = struct {
     pub fn enqueueControl(self: *StdoutThread, chunk: actor_mailboxes.ControlChunk) !void {
         const owned = try self.allocator.dupe(u8, chunk.bytes);
         errdefer self.allocator.free(owned);
+        self.render_mutex.lock();
+        defer self.render_mutex.unlock();
+        if (!self.presentation_enabled) {
+            self.allocator.free(owned);
+            return;
+        }
         // Account before publication: the consumer may immediately drain the chunk.
         _ = self.shared.pending_control_bytes.fetchAdd(owned.len, .seq_cst);
         errdefer _ = self.shared.pending_control_bytes.fetchSub(owned.len, .seq_cst);
@@ -136,12 +143,58 @@ pub const StdoutThread = struct {
         self.render_mutex.lock();
         defer self.render_mutex.unlock();
 
+        if (!self.presentation_enabled) {
+            self.allocator.free(owned);
+            return;
+        }
+
         if (self.pending_render_publish) |previous| {
             _ = self.shared.pending_render_bytes.fetchSub(previous.bytes.len, .seq_cst);
             self.allocator.free(previous.bytes);
         }
         self.pending_render_publish = .{ .version = publish.version, .bytes = owned, .final_cursor = publish.final_cursor };
         _ = self.shared.pending_render_bytes.fetchAdd(owned.len, .seq_cst);
+        self.wake();
+    }
+
+    pub fn beginPresentationYield(self: *StdoutThread, boundary: []const u8) !void {
+        self.render_mutex.lock();
+        defer self.render_mutex.unlock();
+
+        if (!self.presentation_enabled) return error.InvalidState;
+        // Pull every control accepted before the yield into the consumer buffer
+        // while publication is locked. Otherwise the worker could have passed
+        // drainInbound and flush the boundary before an older mailbox item.
+        while (self.control_queue.pop()) |chunk| {
+            const len = chunk.bytes.len;
+            self.buffer.enqueueOwnedControl(chunk.bytes) catch |err| {
+                _ = self.shared.pending_control_bytes.fetchSub(len, .seq_cst);
+                return err;
+            };
+        }
+        try self.buffer.enqueuePresentationBoundary(boundary);
+        _ = self.shared.pending_control_bytes.fetchAdd(boundary.len, .seq_cst);
+        self.presentation_enabled = false;
+
+        if (self.pending_render_publish) |publish| {
+            _ = self.shared.pending_render_bytes.fetchSub(publish.bytes.len, .seq_cst);
+            self.allocator.free(publish.bytes);
+            self.pending_render_publish = null;
+        }
+        const before = self.buffer.pendingRenderBytes();
+        self.buffer.discardUnstartedRenders();
+        const after = self.buffer.pendingRenderBytes();
+        if (before > after) {
+            _ = self.shared.pending_render_bytes.fetchSub(before - after, .seq_cst);
+        }
+        self.wake();
+    }
+
+    pub fn resumePresentation(self: *StdoutThread) !void {
+        self.render_mutex.lock();
+        defer self.render_mutex.unlock();
+        if (self.presentation_enabled) return error.InvalidState;
+        self.presentation_enabled = true;
         self.wake();
     }
 
@@ -355,6 +408,54 @@ test "failed control publication restores pending byte accounting" {
     try std.testing.expectError(error.Closed, worker.enqueueControl(.{ .bytes = &bytes }));
     try std.testing.expectEqual(bytes.len, worker.pendingControlBytes());
     try std.testing.expectEqual(@as(usize, 1), worker.control_queue.len());
+}
+
+test "presentation yield rejects hidden output and preserves only a started render" {
+    var worker = StdoutThread.init(std.testing.allocator, {});
+    defer worker.deinit();
+
+    var visible_control = "mode".*;
+    try worker.enqueueControl(.{ .bytes = &visible_control });
+    var unstarted = "unstarted".*;
+    try worker.publishRenderCandidate(.{
+        .version = 1,
+        .bytes = &unstarted,
+        .final_cursor = .{ .visible = true, .row = 0, .col = 0 },
+    });
+    try worker.beginPresentationYield("boundary");
+
+    try std.testing.expectEqual(@as(usize, visible_control.len + 8), worker.pendingControlBytes());
+    try std.testing.expectEqual(@as(usize, 0), worker.pendingRenderBytes());
+    try std.testing.expect(worker.pending_render_publish == null);
+
+    var hidden_control = "hidden-mode".*;
+    try worker.enqueueControl(.{ .bytes = &hidden_control });
+    var hidden_frame = "hidden-frame".*;
+    try worker.publishRenderCandidate(.{
+        .version = 2,
+        .bytes = &hidden_frame,
+        .final_cursor = .{ .visible = true, .row = 0, .col = 0 },
+    });
+    try std.testing.expectEqual(@as(usize, visible_control.len + 8), worker.pendingControlBytes());
+    try std.testing.expectEqual(@as(usize, 0), worker.pendingRenderBytes());
+
+    try worker.resumePresentation();
+    try worker.enqueueControl(.{ .bytes = &hidden_control });
+    try std.testing.expectEqual(@as(usize, visible_control.len + 8 + hidden_control.len), worker.pendingControlBytes());
+}
+
+test "presentation yield keeps the unfinished suffix of a started render" {
+    var worker = StdoutThread.init(std.testing.allocator, {});
+    defer worker.deinit();
+
+    worker.buffer.publishOwnedRenderCandidate(1, try std.testing.allocator.dupe(u8, "partial"), .{ .visible = true, .row = 0, .col = 0 });
+    worker.buffer.pending_render.?.offset = 3;
+    _ = worker.shared.pending_render_bytes.fetchAdd(4, .seq_cst);
+    try worker.beginPresentationYield("boundary");
+
+    try std.testing.expect(worker.buffer.pending_render != null);
+    try std.testing.expectEqual(@as(usize, 4), worker.pendingRenderBytes());
+    try std.testing.expectEqual(@as(usize, 8), worker.pendingControlBytes());
 }
 
 test "control buffer allocation failure frees the rejected chunk once and preserves queued work" {
