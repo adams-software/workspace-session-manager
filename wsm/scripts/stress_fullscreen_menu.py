@@ -181,7 +181,7 @@ def main() -> None:
             baseline_rss, baseline_fds, _ = process_stats(processes)
 
             os.write(fd, b"\x07")
-            read_until(fd, b"a  attach")
+            read_until(fd, b"enter attaches")
             before_progress = progress.stat().st_size
             before_hidden = process_stats(matching_processes(tmp, pid))
             hidden_bytes = collect(fd, HIDDEN_SECONDS)
@@ -208,7 +208,7 @@ def main() -> None:
 
             for _ in range(TOGGLES):
                 os.write(fd, b"\x07")
-                read_until(fd, b"a  attach")
+                read_until(fd, b"enter attaches")
                 os.write(fd, b"\x07")
                 read_until(fd, b"STRESS_SCREEN")
 
@@ -231,20 +231,18 @@ def main() -> None:
             )
 
             os.write(fd, b"\x07")
-            read_until(fd, b"a  attach")
+            read_until(fd, b"enter attaches")
             exit_request.touch()
             detached_menu = read_until(fd, b" / detached")
-            if b"a  attach" not in detached_menu:
-                detached_menu += read_until(fd, b"a  attach")
+            if b"enter attaches" not in detached_menu:
+                detached_menu += read_until(fd, b"enter attaches")
             if wait_for_exit(pid, 0.2):
                 reaped = True
                 raise RuntimeError("WSM exited instead of keeping the menu after the hidden child exited")
-            os.write(fd, b"a")
-            read_until(fd, b"attach> ")
-            os.write(fd, b"fallback\r")
+            os.write(fd, b"\r")
             read_until(fd, b"STRESS_SCREEN:fallback")
             os.write(fd, b"\x07")
-            read_until(fd, b"a  attach")
+            read_until(fd, b"enter attaches")
             os.write(fd, b"d")
             reaped = wait_for_exit(pid)
             if not reaped:

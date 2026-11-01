@@ -37,7 +37,6 @@ pub const Executor = struct {
     link: ?service_mod.AttachedSession,
     interactive_attached: bool,
     current_session_id: ?[]u8,
-    previous_session_id: ?[]u8,
 
     pub fn init(allocator: std.mem.Allocator, _: []const u8) !Executor {
         const tool_paths = try cli_main.resolveToolPaths(allocator);
@@ -51,7 +50,6 @@ pub const Executor = struct {
             .link = null,
             .interactive_attached = false,
             .current_session_id = null,
-            .previous_session_id = null,
         };
     }
 
@@ -62,7 +60,6 @@ pub const Executor = struct {
         self.allocator.free(self.ptylog_bin);
         self.allocator.free(self.logs_viewer_bin);
         if (self.current_session_id) |id| self.allocator.free(id);
-        if (self.previous_session_id) |id| self.allocator.free(id);
     }
 
     pub fn run(self: *Executor, provider: *policy.Provider, action: policy.ResolvedAction) !Result {
@@ -73,14 +70,12 @@ pub const Executor = struct {
         return switch (action) {
             .quit => .detached,
             .detach => self.runDetach() catch |err| .{ .err = try std.fmt.allocPrint(self.allocator, "detach failed: {s}", .{@errorName(err)}) },
-            .back => self.handleBack(provider, writer_fd, size),
             .kill => self.handleKill(provider),
             .logs => blk: {
                 break :blk self.viewLogsLocal(provider) catch |err| .{
                     .err = try std.fmt.allocPrint(self.allocator, "logs failed: {s}", .{@errorName(err)}),
                 };
             },
-            .nav => |target| self.handleNav(provider, target, writer_fd, size),
             .attach => |target| self.handleAttach(provider, target, writer_fd, size),
             .create => |name| self.handleCreate(provider, name, size),
         };
@@ -179,18 +174,6 @@ pub const Executor = struct {
         return .detached;
     }
 
-    fn handleBack(self: *Executor, provider: *policy.Provider, writer_fd: ?std.posix.fd_t, size: ?SessionSize) Result {
-        var service = service_mod.WorkspaceService.init(self.allocator, self.host_bin, self.vpty_bin, self.ptylog_bin);
-        var outcome = commands.planBack(self.allocator, provider, &service, self.current_session_id, self.previous_session_id) catch |err| {
-            return .{ .err = std.fmt.allocPrint(self.allocator, "back planning failed: {s}", .{@errorName(err)}) catch unreachable };
-        };
-        defer outcome.deinit(self.allocator);
-        return switch (outcome) {
-            .ready => |previous_id| self.attachReadyId(provider, previous_id, writer_fd, size, "back"),
-            else => .{ .err = messages.formatBackOutcome(self.allocator, outcome, "") catch unreachable },
-        };
-    }
-
     fn handleKill(self: *Executor, provider: *policy.Provider) Result {
         var service = service_mod.WorkspaceService.init(self.allocator, self.host_bin, self.vpty_bin, self.ptylog_bin);
         const outcome = commands.killCurrentSession(provider, &service, self.current_session_id, .kill) catch |err| {
@@ -199,19 +182,6 @@ pub const Executor = struct {
         return switch (outcome) {
             .signaled => .{ .info = messages.formatKillOutcome(self.allocator, outcome, "") catch unreachable },
             else => .{ .err = messages.formatKillOutcome(self.allocator, outcome, "") catch unreachable },
-        };
-    }
-
-    fn handleNav(self: *Executor, provider: *policy.Provider, target: []u8, writer_fd: ?std.posix.fd_t, size: ?SessionSize) Result {
-        defer self.allocator.free(target);
-        var service = service_mod.WorkspaceService.init(self.allocator, self.host_bin, self.vpty_bin, self.ptylog_bin);
-        var outcome = commands.planResolvedTarget(self.allocator, provider, &service, target) catch |err| {
-            return .{ .err = std.fmt.allocPrint(self.allocator, "nav planning failed: {s}", .{@errorName(err)}) catch unreachable };
-        };
-        defer outcome.deinit(self.allocator);
-        return switch (outcome) {
-            .ready => |resolved_target| self.attachReadyId(provider, resolved_target, writer_fd, size, "attach"),
-            else => .{ .err = messages.formatNavOutcome(self.allocator, outcome, "") catch unreachable },
         };
     }
 
@@ -296,9 +266,6 @@ pub const Executor = struct {
         if (self.current_session_id) |current| {
             if (std.mem.eql(u8, current, id)) return;
             const next_current = try self.allocator.dupe(u8, id);
-            const previous_copy = try self.allocator.dupe(u8, current);
-            if (self.previous_session_id) |old_previous| self.allocator.free(old_previous);
-            self.previous_session_id = previous_copy;
             self.allocator.free(current);
             self.current_session_id = next_current;
             return;

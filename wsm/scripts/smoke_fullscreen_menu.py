@@ -76,7 +76,7 @@ def main() -> None:
                 raise RuntimeError("bracketed paste opened the menu")
 
             os.write(fd, b"\x07")
-            menu = read_until(fd, b"a  attach")
+            menu = read_until(fd, b"enter attaches")
             if b"WSM" not in menu:
                 raise RuntimeError("full-screen menu did not render")
 

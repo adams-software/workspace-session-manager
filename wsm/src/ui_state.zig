@@ -22,6 +22,8 @@ pub const Candidate = struct {
 
 pub const ExternalContext = struct {
     detached: bool = false,
+    browser_sessions: []const []const u8 = &.{},
+    current_session_index: ?usize = null,
     attach_candidates: []const Candidate = &.{},
 };
 
@@ -55,11 +57,6 @@ pub const Key = union(enum) {
 pub const Action = union(enum) {
     quit,
     detach,
-    back,
-    prev,
-    next,
-    in,
-    out,
     logs,
     kill,
     attach: []const u8,
@@ -79,6 +76,7 @@ pub const State = struct {
     cursor: usize = 0,
     notice_kind: InlineNoticeKind = .none,
     notice_text: std.ArrayList(u8),
+    selected_session: ?usize = null,
     selected_candidate: ?usize = null,
 
     pub fn init(allocator: std.mem.Allocator) State {
@@ -117,10 +115,9 @@ pub const State = struct {
     }
 
     pub fn handleText(self: *State, ctx: ExternalContext, text: []const u8) StepResult {
-        _ = ctx;
         if (text.len == 0 or !std.unicode.utf8ValidateSlice(text)) return .{};
         return switch (self.mode) {
-            .active_menu => self.handleActiveMenuText(text),
+            .active_menu => self.handleActiveMenuText(ctx, text),
             .prompt_attach => blk: {
                 self.insertText(text);
                 self.selected_candidate = null;
@@ -159,13 +156,23 @@ pub const State = struct {
     }
 
     pub fn updateExternalContext(self: *State, ctx: ExternalContext) StepResult {
-        const before = self.selected_candidate;
+        const before_session = self.selected_session;
+        const before_candidate = self.selected_candidate;
+
+        if (ctx.browser_sessions.len == 0) {
+            self.selected_session = null;
+        } else if (self.selected_session) |idx| {
+            if (idx >= ctx.browser_sessions.len) self.selected_session = ctx.current_session_index orelse ctx.browser_sessions.len - 1;
+        } else {
+            self.selected_session = ctx.current_session_index orelse 0;
+        }
+
         if (ctx.attach_candidates.len == 0) {
             self.selected_candidate = null;
         } else if (self.selected_candidate) |idx| {
             if (idx >= ctx.attach_candidates.len) self.selected_candidate = 0;
         }
-        return .{ .rerender = before != self.selected_candidate };
+        return .{ .rerender = before_session != self.selected_session or before_candidate != self.selected_candidate };
     }
 
     fn handlePassive(self: *State, ctx: ExternalContext, key: Key) StepResult {
@@ -178,6 +185,7 @@ pub const State = struct {
                 self.mode = .active_menu;
                 self.notice_kind = .none;
                 self.notice_text.clearRetainingCapacity();
+                self.selected_session = ctx.current_session_index orelse if (ctx.browser_sessions.len > 0) 0 else null;
                 break :blk .{ .rerender = true };
             },
             else => .{},
@@ -185,31 +193,24 @@ pub const State = struct {
     }
 
     fn handleActiveMenu(self: *State, ctx: ExternalContext, key: Key) StepResult {
-        _ = ctx;
         return switch (key) {
-            .esc, .ctrl_g, .ctrl_c, .enter => blk: {
+            .esc, .ctrl_g, .ctrl_c => blk: {
                 self.mode = .passive;
                 self.notice_kind = .none;
                 self.notice_text.clearRetainingCapacity();
                 break :blk .{ .rerender = true };
             },
-            .left => .{ .rerender = true, .action = .prev },
-            .right => .{ .rerender = true, .action = .next },
-            .down => .{ .rerender = true, .action = .in },
-            .up => .{ .rerender = true, .action = .out },
+            .enter => self.activateSelectedSession(ctx),
+            .down => self.moveBrowserSelection(ctx, true),
+            .up => self.moveBrowserSelection(ctx, false),
             else => .{},
         };
     }
 
-    fn handleActiveMenuText(self: *State, text: []const u8) StepResult {
+    fn handleActiveMenuText(self: *State, ctx: ExternalContext, text: []const u8) StepResult {
         if (text.len != 1) return .{};
         return switch (text[0]) {
             'd' => .{ .rerender = true, .action = .detach },
-            'b' => .{ .rerender = true, .action = .back },
-            'a' => blk: {
-                self.enterPrompt(.prompt_attach);
-                break :blk .{ .rerender = true };
-            },
             'c' => blk: {
                 self.enterPrompt(.prompt_create);
                 break :blk .{ .rerender = true };
@@ -218,12 +219,36 @@ pub const State = struct {
                 self.enterPrompt(.prompt_kill);
                 break :blk .{ .rerender = true };
             },
-            'h' => .{ .rerender = true, .action = .prev },
-            'j' => .{ .rerender = true, .action = .in },
-            'k' => .{ .rerender = true, .action = .out },
-            'l' => .{ .rerender = true, .action = .next },
+            'j' => self.moveBrowserSelection(ctx, true),
+            'k' => self.moveBrowserSelection(ctx, false),
             'g' => .{ .rerender = true, .action = .logs },
             else => .{},
+        };
+    }
+
+    fn moveBrowserSelection(self: *State, ctx: ExternalContext, forward: bool) StepResult {
+        if (ctx.browser_sessions.len == 0) return .{};
+        const current = self.selected_session orelse ctx.current_session_index orelse 0;
+        const next = if (forward)
+            @min(current + 1, ctx.browser_sessions.len - 1)
+        else
+            current -| 1;
+        if (next == current and self.selected_session != null) return .{};
+        self.selected_session = next;
+        return .{ .rerender = true };
+    }
+
+    fn activateSelectedSession(self: *State, ctx: ExternalContext) StepResult {
+        const selected = self.selected_session orelse return .{};
+        if (selected >= ctx.browser_sessions.len) return .{};
+
+        self.mode = .passive;
+        self.notice_kind = .none;
+        self.notice_text.clearRetainingCapacity();
+        if (ctx.current_session_index == selected) return .{ .rerender = true };
+        return .{
+            .rerender = true,
+            .action = .{ .attach = self.allocator.dupe(u8, ctx.browser_sessions[selected]) catch return .{} },
         };
     }
 
@@ -393,8 +418,7 @@ pub const State = struct {
         const current = self.selected_candidate.?;
         self.selected_candidate = if (forward)
             (current + 1) % ctx.attach_candidates.len
-        else
-            if (current == 0) ctx.attach_candidates.len - 1 else current - 1;
+        else if (current == 0) ctx.attach_candidates.len - 1 else current - 1;
     }
 };
 
@@ -494,24 +518,57 @@ test "escaping attach prompt clears prompt-local notice" {
     try std.testing.expectEqualStrings("", state.notice());
 }
 
-test "active menu b triggers back action" {
+test "active menu browser selection moves without switching" {
     var state = State.init(std.testing.allocator);
     defer state.deinit();
     state.mode = .active_menu;
+    state.selected_session = 0;
+    const sessions = [_][]const u8{ "alpha", "projects/api", "projects/web" };
+    const ctx = ExternalContext{
+        .browser_sessions = &sessions,
+        .current_session_index = 0,
+    };
 
-    const result = state.handleText(.{}, "b");
-    try std.testing.expect(result.action != null);
-    try std.testing.expectEqual(Action.back, result.action.?);
+    const moved = state.handleKey(ctx, .down);
+    try std.testing.expect(moved.rerender);
+    try std.testing.expect(moved.action == null);
+    try std.testing.expectEqual(@as(?usize, 1), state.selected_session);
+
+    const attached = state.handleKey(ctx, .enter);
+    try std.testing.expectEqual(Mode.passive, state.mode);
+    try std.testing.expectEqualStrings("projects/api", attached.action.?.attach);
+    std.testing.allocator.free(attached.action.?.attach);
 }
 
-test "enter exits active menu" {
+test "enter on the current browser session returns to it" {
     var state = State.init(std.testing.allocator);
     defer state.deinit();
     state.mode = .active_menu;
+    state.selected_session = 1;
+    const sessions = [_][]const u8{ "alpha", "beta" };
 
-    const result = state.handleKey(.{}, .enter);
+    const result = state.handleKey(.{
+        .browser_sessions = &sessions,
+        .current_session_index = 1,
+    }, .enter);
     try std.testing.expect(result.rerender);
+    try std.testing.expect(result.action == null);
     try std.testing.expectEqual(Mode.passive, state.mode);
+}
+
+test "opening the browser selects the current session" {
+    var state = State.init(std.testing.allocator);
+    defer state.deinit();
+    const sessions = [_][]const u8{ "alpha", "beta", "gamma" };
+
+    const result = state.handleKey(.{
+        .browser_sessions = &sessions,
+        .current_session_index = 2,
+    }, .ctrl_g);
+
+    try std.testing.expect(result.rerender);
+    try std.testing.expectEqual(Mode.active_menu, state.mode);
+    try std.testing.expectEqual(@as(?usize, 2), state.selected_session);
 }
 
 test "ctrl-c dismisses every active UI mode without an action" {

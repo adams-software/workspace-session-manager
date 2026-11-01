@@ -134,23 +134,18 @@ def main() -> None:
         try:
             terminal.expect(b"SESSION:alpha")
 
-            # Navigation keeps the menu open and yields the newly attached vpty.
+            # Browsing moves an independent selection. Enter commits the switch.
             terminal.send(b"\x07")
-            terminal.expect(b"a  attach")
-            terminal.send(b"\x1b")
-            time.sleep(0.01)
-            terminal.send(b"[")
-            time.sleep(0.01)
-            terminal.send(b"C")
-            terminal.expect(b" / beta")
-            terminal.send(b"\x07")
+            terminal.expect(b"enter attaches")
+            terminal.send(b"\x1b[B")
+            terminal.expect(b"> \xe2\x97\x8b beta")
+            terminal.send(b"\r")
             terminal.expect(b"SESSION:beta")
 
-            # Explicit attach closes the menu into the selected child.
-            terminal.send(b"\x07a")
-            terminal.expect(b"attach> ")
-            terminal.expect(b"\x1b[4;9H\x1b[?25h")
-            terminal.send(b"alpha\r")
+            # Moving the browser back to alpha does not switch until Enter.
+            terminal.send(b"\x07\x1b[A")
+            terminal.expect(b"> \xe2\x97\x8b alpha")
+            terminal.send(b"\r")
             terminal.expect(b"SESSION:alpha")
 
             # Create closes the menu into the newly created session.
@@ -176,16 +171,16 @@ def main() -> None:
             terminal.send(b"\x7f")
             terminal.expect(b"create> x")
             terminal.send(b"\x1b")
-            terminal.expect(b"a  attach")
+            terminal.expect(b"enter attaches")
             terminal.send(b"\x07")
             terminal.expect(b"SESSION:gamma")
 
             # Prompt cancellation returns to the menu; the close-key suffix is
             # discarded rather than becoming input in gamma.
-            terminal.send(b"\x07a")
-            terminal.expect(b"attach> ")
+            terminal.send(b"\x07c")
+            terminal.expect(b"create> ")
             terminal.send(b"beta\x1b")
-            terminal.expect(b"a  attach")
+            terminal.expect(b"enter attaches")
             terminal.send(b"\x07LEAK")
             terminal.expect(b"SESSION:gamma")
             terminal.send(b"ok")
@@ -208,14 +203,12 @@ def main() -> None:
             # Removing the capability path simulates an older persistent
             # session. WSM must leave Ctrl+G with that child.
             (root / "legacy.present").unlink()
-            terminal.send(b"\x07a")
-            terminal.expect(b"attach> ")
-            terminal.send(b"legacy\r")
+            terminal.send(b"\x07\x1b[B\r")
             terminal.expect(b"SESSION:legacy")
             terminal.drain()
             terminal.send(b"\x07")
             legacy_input = terminal.expect(b"INPUT:07")
-            if b"a  attach" in legacy_input:
+            if b"enter attaches" in legacy_input:
                 raise RuntimeError("legacy session unexpectedly opened the WSM menu")
 
             print("fullscreen action transitions: ok")

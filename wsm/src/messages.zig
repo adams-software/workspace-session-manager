@@ -35,22 +35,6 @@ pub fn formatAttachOutcome(allocator: std.mem.Allocator, outcome: commands.Attac
     };
 }
 
-pub fn formatBackOutcome(allocator: std.mem.Allocator, outcome: commands.BackOutcome, suffix: []const u8) ![]u8 {
-    return switch (outcome) {
-        .ready => unreachable,
-        .no_previous_session => try std.fmt.allocPrint(allocator, "no previous session{s}", .{suffix}),
-        .not_attachable => |payload| try std.fmt.allocPrint(allocator, "session '{s}' is not attachable: {s}{s}", .{ payload.id, attachStateMessage(payload.state), suffix }),
-    };
-}
-
-pub fn formatNavOutcome(allocator: std.mem.Allocator, outcome: commands.NavOutcome, suffix: []const u8) ![]u8 {
-    return switch (outcome) {
-        .ready => unreachable,
-        .no_target => try std.fmt.allocPrint(allocator, "no target{s}", .{suffix}),
-        .not_attachable => |payload| try std.fmt.allocPrint(allocator, "session '{s}' is not attachable: {s}{s}", .{ payload.id, attachStateMessage(payload.state), suffix }),
-    };
-}
-
 pub fn formatCreateInvalidId(allocator: std.mem.Allocator, reason: commands.CreateInvalidIdReason, suffix: []const u8) ![]u8 {
     return try std.fmt.allocPrint(allocator, "invalid id: {s}{s}", .{ createInvalidIdReasonLabel(reason), suffix });
 }
