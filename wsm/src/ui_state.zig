@@ -73,6 +73,7 @@ pub const State = struct {
     allocator: std.mem.Allocator,
     mode: Mode = .passive,
     input_buf: std.ArrayList(u8),
+    create_base_buf: std.ArrayList(u8),
     cursor: usize = 0,
     notice_kind: InlineNoticeKind = .none,
     notice_text: std.ArrayList(u8),
@@ -83,12 +84,14 @@ pub const State = struct {
         return .{
             .allocator = allocator,
             .input_buf = .empty,
+            .create_base_buf = .empty,
             .notice_text = .empty,
         };
     }
 
     pub fn deinit(self: *State) void {
         self.input_buf.deinit(self.allocator);
+        self.create_base_buf.deinit(self.allocator);
         self.notice_text.deinit(self.allocator);
     }
 
@@ -98,6 +101,10 @@ pub const State = struct {
 
     pub fn inputCursor(self: *const State) usize {
         return self.cursor;
+    }
+
+    pub fn createBase(self: *const State) []const u8 {
+        return self.create_base_buf.items;
     }
 
     pub fn notice(self: *const State) []const u8 {
@@ -124,6 +131,8 @@ pub const State = struct {
                 break :blk .{ .rerender = true, .request_attach_candidates = self.input_buf.items };
             },
             .prompt_create => blk: {
+                self.notice_kind = .none;
+                self.notice_text.clearRetainingCapacity();
                 self.insertText(text);
                 break :blk .{ .rerender = true };
             },
@@ -212,7 +221,7 @@ pub const State = struct {
         return switch (text[0]) {
             'd' => .{ .rerender = true, .action = .detach },
             'c' => blk: {
-                self.enterPrompt(.prompt_create);
+                self.enterCreatePrompt(ctx);
                 break :blk .{ .rerender = true };
             },
             'x' => blk: {
@@ -329,6 +338,8 @@ pub const State = struct {
             },
             .backspace => blk: {
                 if (self.cursor == 0 or self.input_buf.items.len == 0) break :blk .{};
+                self.notice_kind = .none;
+                self.notice_text.clearRetainingCapacity();
                 self.deletePreviousGrapheme();
                 break :blk .{ .rerender = true };
             },
@@ -349,11 +360,7 @@ pub const State = struct {
                 break :blk .{ .rerender = true };
             },
             .enter => blk: {
-                if (self.input_buf.items.len == 0) {
-                    self.setNotice(.err, "name required");
-                    break :blk .{ .rerender = true };
-                }
-                break :blk .{ .rerender = true, .action = .{ .create = self.allocator.dupe(u8, self.input_buf.items) catch return .{} } };
+                break :blk self.resolveCreateInput();
             },
             else => .{},
         };
@@ -386,6 +393,46 @@ pub const State = struct {
         self.selected_candidate = null;
         self.notice_kind = .none;
         self.notice_text.clearRetainingCapacity();
+    }
+
+    fn enterCreatePrompt(self: *State, ctx: ExternalContext) void {
+        self.enterPrompt(.prompt_create);
+        self.create_base_buf.clearRetainingCapacity();
+        const selected = self.selected_session orelse return;
+        if (selected >= ctx.browser_sessions.len) return;
+        self.create_base_buf.appendSlice(self.allocator, ctx.browser_sessions[selected]) catch {};
+    }
+
+    fn resolveCreateInput(self: *State) StepResult {
+        const raw_name = self.input_buf.items;
+        if (raw_name.len == 0) {
+            self.setNotice(.err, "name required");
+            return .{ .rerender = true };
+        }
+
+        if (std.mem.startsWith(u8, raw_name, "./")) {
+            const suffix = raw_name[2..];
+            if (self.create_base_buf.items.len == 0) {
+                self.setNotice(.err, "./ requires a selected session");
+                return .{ .rerender = true };
+            }
+            if (suffix.len == 0) {
+                self.setNotice(.err, "nested name required after ./");
+                return .{ .rerender = true };
+            }
+            const resolved = std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ self.create_base_buf.items, suffix }) catch return .{};
+            return .{ .rerender = true, .action = .{ .create = resolved } };
+        }
+
+        const root_name = if (raw_name[0] == '/') raw_name[1..] else raw_name;
+        if (root_name.len == 0) {
+            self.setNotice(.err, "name required after /");
+            return .{ .rerender = true };
+        }
+        return .{
+            .rerender = true,
+            .action = .{ .create = self.allocator.dupe(u8, root_name) catch return .{} },
+        };
     }
 
     fn insertText(self: *State, text: []const u8) void {
@@ -637,4 +684,53 @@ test "attach queries and create actions preserve exact UTF-8" {
     try std.testing.expectEqualStrings(input, result.action.?.create);
     try std.testing.expectEqual(Mode.prompt_create, create.mode);
     std.testing.allocator.free(result.action.?.create);
+}
+
+test "create prompt resolves selected-relative explicit-root and bare names" {
+    const sessions = [_][]const u8{ "project1", "project2" };
+    const ctx = ExternalContext{ .browser_sessions = &sessions };
+
+    var nested = State.init(std.testing.allocator);
+    defer nested.deinit();
+    nested.mode = .active_menu;
+    nested.selected_session = 0;
+    _ = nested.handleText(ctx, "c");
+    try std.testing.expectEqualStrings("project1", nested.createBase());
+    _ = nested.handleText(ctx, "./api/dev");
+    const nested_result = nested.handleKey(ctx, .enter);
+    try std.testing.expectEqualStrings("project1/api/dev", nested_result.action.?.create);
+    std.testing.allocator.free(nested_result.action.?.create);
+
+    var rooted = State.init(std.testing.allocator);
+    defer rooted.deinit();
+    rooted.mode = .active_menu;
+    rooted.selected_session = 1;
+    _ = rooted.handleText(ctx, "c");
+    _ = rooted.handleText(ctx, "/api/dev");
+    const rooted_result = rooted.handleKey(ctx, .enter);
+    try std.testing.expectEqualStrings("api/dev", rooted_result.action.?.create);
+    std.testing.allocator.free(rooted_result.action.?.create);
+
+    var bare = State.init(std.testing.allocator);
+    defer bare.deinit();
+    bare.mode = .active_menu;
+    bare.selected_session = 1;
+    _ = bare.handleText(ctx, "c");
+    _ = bare.handleText(ctx, "notes");
+    const bare_result = bare.handleKey(ctx, .enter);
+    try std.testing.expectEqualStrings("notes", bare_result.action.?.create);
+    std.testing.allocator.free(bare_result.action.?.create);
+}
+
+test "relative create requires a selected session" {
+    var state = State.init(std.testing.allocator);
+    defer state.deinit();
+    state.mode = .active_menu;
+    _ = state.handleText(.{}, "c");
+    _ = state.handleText(.{}, "./child");
+
+    const result = state.handleKey(.{}, .enter);
+    try std.testing.expect(result.action == null);
+    try std.testing.expectEqual(Mode.prompt_create, state.mode);
+    try std.testing.expectEqualStrings("./ requires a selected session", state.notice());
 }

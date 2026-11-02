@@ -51,6 +51,7 @@ pub fn buildFrame(
         .prompt_create => {
             prompt_cursor = try appendPromptLine(&frame, allocator, "create> ", state.input(), state.inputCursor(), cols, rows, &row);
             try appendLine(&frame, allocator, "", cols, rows, &row);
+            try appendLine(&frame, allocator, "./ nests under selected; / and bare names use root", cols, rows, &row);
             try appendLine(&frame, allocator, "enter creates; esc goes back", cols, rows, &row);
         },
         .prompt_kill => {
