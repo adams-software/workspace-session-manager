@@ -277,7 +277,17 @@ const App = struct {
             return;
         }
 
-        try self.applyExecResult(try self.executeResolvedAction(action));
+        const closes_menu_on_success = switch (action) {
+            .attach, .create => true,
+            else => false,
+        };
+        const exec_result = try self.executeResolvedAction(action);
+        const attached = switch (exec_result) {
+            .attached => true,
+            else => false,
+        };
+        if (closes_menu_on_success and attached) self.menu_state.enterPassive();
+        try self.applyExecResult(exec_result);
     }
 
     fn executeResolvedAction(self: *App, action: ui_state.Action) !executor_mod.Result {
