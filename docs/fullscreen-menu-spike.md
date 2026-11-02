@@ -12,11 +12,13 @@ phase.
 
 ## Product behavior
 
-- Ctrl+G opens the menu. Esc, Enter, Ctrl+C, or Ctrl+G returns to the child.
+- Ctrl+G opens the session browser. Esc, Ctrl+C, or Ctrl+G returns to the
+  child. Enter attaches to the selected session.
 - Ordinary input, including Ctrl+C, belongs to the child while the menu is
   closed.
-- Attach, create, navigation, back, logs, force-kill, and detach remain available
-  from the menu.
+- The browser shows the lexical directory/session hierarchy. Browsing changes
+  only its selection; a PTY switch happens after Enter.
+- Create, logs, force-kill, and detach remain available as browser actions.
 - Opening the menu does not resize the child. Real terminal resizes continue to
   reach the child while it is hidden.
 - Child output continues to update vpty's bounded model while the menu is open.
@@ -33,7 +35,7 @@ presentation transitions. It has no animation or polling render loop.
 
 | Component | Responsibility |
 | --- | --- |
-| WSM runtime | Hotkey and paste parsing, presentation state machine, menu rendering, session policy and actions |
+| WSM runtime | Hotkey and paste parsing, presentation state machine, browser rendering, session policy and actions |
 | `SessionLink` | Bounded terminal/data relay, presentation command requests, incremental boundary decoding |
 | vpty presentation server | One active presentation client per session, ordered yield/resume commands, disconnect recovery |
 | vpty screen and stdout actors | Child screen model, supported mode state, output ordering, hidden render suppression, repaint |
@@ -44,9 +46,9 @@ needed the screen model to reconstruct a session; hidden output updates that sam
 model. The historical `alt` switcher is not part of the runtime because it would
 duplicate WSM's input routing and vpty's presentation responsibilities.
 
-The former bar renderer and reserved-row layout are removed. `menu_model.zig`
-contains only navigation labels, while `menu_render.zig` owns the full-screen
-surface.
+The former bar renderer, reserved-row layout, and directional navigation summary
+are removed. `menu_render.zig` builds the lexical session tree from the workspace
+index and owns the full-screen surface.
 
 ## Presentation state machine
 
@@ -153,7 +155,7 @@ Coverage includes:
 - hotkeys at arbitrary read boundaries and inside bracketed paste;
 - split escape sequences and UTF-8 input;
 - repeated transitions, hidden continuous output, and hidden resize;
-- navigation, attach, create, cancellation, logs, and force-kill behavior;
+- browser selection, attach, create, cancellation, logs, and force-kill behavior;
 - viewer loss and older sessions without presentation capability;
 - child exit while hidden followed by attachment to another session;
 - terminal mode restoration, Unicode prompt editing, and narrow terminals.

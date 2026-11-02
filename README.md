@@ -182,7 +182,7 @@ wsm ls
 wsm cd api/dev
 ```
 
-Open the in-session action menu after attaching:
+Open the in-session browser after attaching:
 
 ```bash
 wsm attach test
@@ -191,20 +191,18 @@ wsm attach test
 
 Inside the UI:
 
-- `a` opens attach prompt
+- `Up`/`Down` or `j`/`k` moves through the session browser
+- `Enter` attaches to the selected session
 - `c` opens create prompt
 - `g` opens logs
 - `x` force-kills the current session child
 - `Ctrl+C` dismisses the menu or prompt and returns focus to the child session
 - `d` detaches from the current interactive session
-- `h/j/k/l` or arrow keys navigate sibling/child/parent/next session targets
-- `b` toggles back to the previously visited session target
 
-Nested names form a tree of live sessions. Intermediate path components do not
-need their own session: each session is grouped beneath its nearest live ancestor,
-or at the workspace root if none exists. Closing or recreating an intermediate
-session immediately reparents its descendants for sibling, child, and parent
-navigation.
+Nested names form a lexical tree. Intermediate path components appear as
+directories even when they do not have their own live session. The selection
+cursor is independent from the attached-session marker, so browsing does not
+switch PTYs until you press `Enter`.
 
 To leave an attached session, use the in-session detach flow, then reattach later:
 
@@ -212,10 +210,10 @@ To leave an attached session, use the in-session detach flow, then reattach late
 wsm attach test
 ```
 
-The in-session action menu hotkey is currently fixed to `ctrl-g`.
+The in-session browser hotkey is currently fixed to `ctrl-g`.
 
-From the top-level status menu, `Esc`, `Enter`, and `ctrl-g` all return to the
-attached session view.
+From the session browser, `Esc`, `Ctrl+C`, and `ctrl-g` return to the attached
+session view. `Enter` attaches to the selected session.
 
 Interactive attach/create is intentionally blocked from inside an already-interactive nested `wsm` session. If you are already inside one attached session and want another, use detached create from the UI and then attach/switch.
 

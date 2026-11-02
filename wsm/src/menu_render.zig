@@ -33,17 +33,7 @@ pub fn buildFrame(
     switch (state.mode) {
         .passive => {},
         .active_menu => {
-            if (model.active_summary.len > 0) try appendLine(&frame, allocator, model.active_summary, cols, rows, &row);
-            try appendLine(&frame, allocator, "", cols, rows, &row);
-            try appendLine(&frame, allocator, "a  attach", cols, rows, &row);
-            try appendLine(&frame, allocator, "c  create", cols, rows, &row);
-            try appendLine(&frame, allocator, "g  logs", cols, rows, &row);
-            try appendLine(&frame, allocator, "b  back", cols, rows, &row);
-            try appendLine(&frame, allocator, "d  detach", cols, rows, &row);
-            try appendLine(&frame, allocator, "x  force kill", cols, rows, &row);
-            try appendLine(&frame, allocator, "", cols, rows, &row);
-            try appendLine(&frame, allocator, "arrows or h/j/k/l navigate", cols, rows, &row);
-            try appendLine(&frame, allocator, "esc, enter, or ctrl-g returns", cols, rows, &row);
+            try appendSessionBrowser(&frame, allocator, state, model, cols, rows, &row);
         },
         .prompt_attach => {
             prompt_cursor = try appendPromptLine(&frame, allocator, "attach> ", state.input(), state.inputCursor(), cols, rows, &row);
@@ -86,6 +76,119 @@ pub fn buildFrame(
     }
 
     return frame.toOwnedSlice(allocator);
+}
+
+const BrowserLine = struct {
+    path: []const u8,
+    name: []const u8,
+    depth: usize,
+    session_index: ?usize,
+    has_children: bool,
+};
+
+fn appendSessionBrowser(
+    frame: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    state: *const ui_state.State,
+    model: policy.Provider.MenuModel,
+    cols: u16,
+    rows: u16,
+    row: *usize,
+) !void {
+    try appendLine(frame, allocator, "Sessions", cols, rows, row);
+
+    const lines = try buildBrowserLines(allocator, model.sessions);
+    defer allocator.free(lines);
+    if (lines.len == 0) {
+        try appendLine(frame, allocator, "", cols, rows, row);
+        try appendLine(frame, allocator, "  No live sessions", cols, rows, row);
+    } else {
+        const footer_rows: usize = 5;
+        const remaining = @as(usize, rows) -| row.*;
+        const visible_count = @min(lines.len, remaining -| @min(footer_rows, remaining));
+        var start: usize = 0;
+        if (visible_count > 0) {
+            if (selectedDisplayIndex(lines, state.selected_session)) |selected| {
+                if (selected >= visible_count) start = selected - visible_count + 1;
+            }
+        }
+
+        for (lines[start..@min(lines.len, start + visible_count)]) |line| {
+            var rendered: std.ArrayList(u8) = .empty;
+            defer rendered.deinit(allocator);
+            const selected = line.session_index != null and line.session_index == state.selected_session;
+            try rendered.appendSlice(allocator, if (selected) "> " else "  ");
+            for (0..line.depth) |_| try rendered.appendSlice(allocator, "  ");
+            if (line.session_index != null) {
+                const is_current = if (model.current_session) |current| std.mem.eql(u8, line.path, current) else false;
+                try rendered.appendSlice(allocator, if (is_current) "● " else "○ ");
+            } else {
+                try rendered.appendSlice(allocator, "  ");
+            }
+            try rendered.appendSlice(allocator, line.name);
+            if (line.has_children) try rendered.append(allocator, '/');
+            try appendLine(frame, allocator, rendered.items, cols, rows, row);
+        }
+    }
+
+    try appendLine(frame, allocator, "", cols, rows, row);
+    try appendLine(frame, allocator, "up/down or j/k select; enter attaches", cols, rows, row);
+    try appendLine(frame, allocator, "c  create   g  logs current", cols, rows, row);
+    try appendLine(frame, allocator, "x  force kill current   d  detach", cols, rows, row);
+    try appendLine(frame, allocator, "esc, ctrl-c, or ctrl-g returns", cols, rows, row);
+}
+
+fn buildBrowserLines(allocator: std.mem.Allocator, sessions: []const []const u8) ![]BrowserLine {
+    var lines: std.ArrayList(BrowserLine) = .empty;
+    errdefer lines.deinit(allocator);
+    var emitted = std.StringHashMap(void).init(allocator);
+    defer emitted.deinit();
+
+    for (sessions, 0..) |session, session_index| {
+        var slash = std.mem.indexOfScalar(u8, session, '/');
+        while (slash) |end| {
+            const directory = session[0..end];
+            if (!emitted.contains(directory)) {
+                try emitted.put(directory, {});
+                try lines.append(allocator, .{
+                    .path = directory,
+                    .name = std.fs.path.basename(directory),
+                    .depth = std.mem.count(u8, directory, "/"),
+                    .session_index = null,
+                    .has_children = true,
+                });
+            }
+            const next_start = end + 1;
+            slash = if (next_start < session.len)
+                if (std.mem.indexOfScalar(u8, session[next_start..], '/')) |relative| next_start + relative else null
+            else
+                null;
+        }
+
+        if (!emitted.contains(session)) {
+            try emitted.put(session, {});
+            const has_children = if (session_index + 1 < sessions.len) blk: {
+                const next = sessions[session_index + 1];
+                break :blk next.len > session.len and next[session.len] == '/' and std.mem.startsWith(u8, next, session);
+            } else false;
+            try lines.append(allocator, .{
+                .path = session,
+                .name = std.fs.path.basename(session),
+                .depth = std.mem.count(u8, session, "/"),
+                .session_index = session_index,
+                .has_children = has_children,
+            });
+        }
+    }
+    return lines.toOwnedSlice(allocator);
+}
+
+fn selectedDisplayIndex(lines: []const BrowserLine, selected_session: ?usize) ?usize {
+    const selected = selected_session orelse return null;
+    for (lines, 0..) |line, index| {
+        if (line.session_index == selected) return index;
+    }
+    return null;
 }
 
 const CursorPosition = struct {
@@ -133,23 +236,60 @@ fn appendLine(frame: *std.ArrayList(u8), allocator: std.mem.Allocator, line: []c
     if (row.* < rows) try frame.appendSlice(allocator, "\r\n");
 }
 
-test "active menu renders a full-screen action surface" {
+test "active menu renders a full-screen session browser" {
     var state = ui_state.State.init(std.testing.allocator);
     defer state.deinit();
     state.mode = .active_menu;
+    state.selected_session = 0;
 
     const frame = try buildFrame(std.testing.allocator, &state, .{
         .workspace = "/tmp/workspace",
         .session = "dev",
-        .active_summary = "[left] prev [right] next",
+        .current_session = "dev",
+        .sessions = &.{ "dev", "projects/api", "projects/web" },
         .attach_candidates = &.{},
     }, 80, 24);
     defer std.testing.allocator.free(frame);
 
     try std.testing.expect(std.mem.startsWith(u8, frame, screen_reset));
     try std.testing.expect(std.mem.indexOf(u8, frame, "/tmp/workspace / dev") != null);
-    try std.testing.expect(std.mem.indexOf(u8, frame, "a  attach") != null);
+    try std.testing.expect(std.mem.indexOf(u8, frame, "> ● dev") != null);
+    try std.testing.expect(std.mem.indexOf(u8, frame, "projects/") != null);
+    try std.testing.expect(std.mem.indexOf(u8, frame, "○ api") != null);
     try std.testing.expect(std.mem.indexOf(u8, frame, "ctrl-g returns") != null);
+}
+
+test "browser merges a live session with its directory node" {
+    const lines = try buildBrowserLines(std.testing.allocator, &.{ "projects", "projects/api", "tools/lint" });
+    defer std.testing.allocator.free(lines);
+
+    try std.testing.expectEqual(@as(usize, 4), lines.len);
+    try std.testing.expectEqualStrings("projects", lines[0].path);
+    try std.testing.expectEqual(@as(?usize, 0), lines[0].session_index);
+    try std.testing.expect(lines[0].has_children);
+    try std.testing.expectEqualStrings("projects/api", lines[1].path);
+    try std.testing.expectEqualStrings("tools", lines[2].path);
+    try std.testing.expect(lines[2].session_index == null);
+    try std.testing.expectEqualStrings("tools/lint", lines[3].path);
+}
+
+test "detached browser does not mark a session named detached as current" {
+    var state = ui_state.State.init(std.testing.allocator);
+    defer state.deinit();
+    state.mode = .active_menu;
+    state.selected_session = 0;
+
+    const frame = try buildFrame(std.testing.allocator, &state, .{
+        .workspace = "w",
+        .session = "detached",
+        .current_session = null,
+        .sessions = &.{"detached"},
+        .attach_candidates = &.{},
+    }, 80, 24);
+    defer std.testing.allocator.free(frame);
+
+    try std.testing.expect(std.mem.indexOf(u8, frame, "> ○ detached") != null);
+    try std.testing.expect(std.mem.indexOf(u8, frame, "● detached") == null);
 }
 
 test "menu clips rows and does not split UTF-8" {
@@ -160,7 +300,8 @@ test "menu clips rows and does not split UTF-8" {
     const frame = try buildFrame(std.testing.allocator, &state, .{
         .workspace = "🙂workspace",
         .session = "dev",
-        .active_summary = "",
+        .current_session = "dev",
+        .sessions = &.{"dev"},
         .attach_candidates = &.{},
     }, 5, 2);
     defer std.testing.allocator.free(frame);
@@ -180,7 +321,8 @@ test "prompt viewport keeps its grapheme cursor visible" {
     const frame = try buildFrame(std.testing.allocator, &state, .{
         .workspace = "w",
         .session = "s",
-        .active_summary = "",
+        .current_session = "s",
+        .sessions = &.{"s"},
         .attach_candidates = &.{},
     }, 12, 5);
     defer std.testing.allocator.free(frame);
@@ -200,7 +342,8 @@ test "prompt cursor handles home narrow resizes and unavailable rows" {
     const model: policy.Provider.MenuModel = .{
         .workspace = "w",
         .session = "s",
-        .active_summary = "",
+        .current_session = "s",
+        .sessions = &.{"s"},
         .attach_candidates = &.{},
     };
 
