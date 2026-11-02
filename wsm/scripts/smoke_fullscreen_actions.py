@@ -126,7 +126,7 @@ def main() -> None:
 
         env = os.environ.copy()
         env.update(WSM_ROOT=tmp, SHELL=str(producer), WSM_LOGS_VIEWER_BIN=str(log_viewer))
-        sessions = ["alpha", "beta", "legacy", "gamma"]
+        sessions = ["alpha", "beta", "legacy", "menu/test/a"]
         for session in sessions[:3]:
             run_cli(wsm, env, "create", "-d", session)
 
@@ -151,8 +151,21 @@ def main() -> None:
             # Create closes the menu into the newly created session.
             terminal.send(b"\x07c")
             terminal.expect(b"create> ")
-            terminal.send(b"gamma\r")
-            terminal.expect(b"SESSION:gamma")
+            terminal.send(b"menu/test/a\r")
+            terminal.expect(b"SESSION:menu/test/a")
+
+            # Invalid names keep the create prompt visible with an actionable
+            # error instead of appearing to return to a newly created shell.
+            terminal.send(b"\x07c")
+            terminal.expect(b"create> ")
+            terminal.send(b"/test\r")
+            terminal.expect(b"session names are relative and cannot start with '/'")
+            terminal.send(b"\x1b")
+            terminal.expect(b"menu/")
+            terminal.expect(b"test/")
+            terminal.expect(b"\xe2\x97\x8f a")
+            terminal.send(b"\x07")
+            terminal.expect(b"SESSION:menu/test/a")
 
             # UTF-8 prompt input survives one-byte terminal reads, and editing
             # treats combining and emoji sequences as whole graphemes.
@@ -173,37 +186,37 @@ def main() -> None:
             terminal.send(b"\x1b")
             terminal.expect(b"enter attaches")
             terminal.send(b"\x07")
-            terminal.expect(b"SESSION:gamma")
+            terminal.expect(b"SESSION:menu/test/a")
 
             # Prompt cancellation returns to the menu; the close-key suffix is
-            # discarded rather than becoming input in gamma.
+            # discarded rather than becoming child input.
             terminal.send(b"\x07c")
             terminal.expect(b"create> ")
             terminal.send(b"beta\x1b")
             terminal.expect(b"enter attaches")
             terminal.send(b"\x07LEAK")
-            terminal.expect(b"SESSION:gamma")
+            terminal.expect(b"SESSION:menu/test/a")
             terminal.send(b"ok")
             child_input = terminal.expect(b"INPUT:6f6b")
             if b"INPUT:4c45414b" in child_input:
                 raise RuntimeError("input trailing menu cancellation leaked to the child")
 
-            # The log viewer temporarily owns the real terminal while gamma's
+            # The log viewer temporarily owns the real terminal while the
             # vpty remains yielded, then WSM restores the same menu.
             terminal.send(b"\x07g")
             terminal.expect(b"LOG_VIEWER_RETURNED")
-            terminal.expect(b" / gamma")
+            terminal.expect(b" / menu/test/a")
 
             # A crashed viewer drops the presentation client. Vpty must recover
             # visibility so a new WSM attachment can repaint the child.
             stop_viewer(pid, terminal, force=True)
-            pid, terminal = spawn_viewer(wsm, env, "gamma")
-            terminal.expect(b"SESSION:gamma")
+            pid, terminal = spawn_viewer(wsm, env, "menu/test/a")
+            terminal.expect(b"SESSION:menu/test/a")
 
             # Removing the capability path simulates an older persistent
             # session. WSM must leave Ctrl+G with that child.
             (root / "legacy.present").unlink()
-            terminal.send(b"\x07\x1b[B\r")
+            terminal.send(b"\x07\x1b[A\r")
             terminal.expect(b"SESSION:legacy")
             terminal.drain()
             terminal.send(b"\x07")

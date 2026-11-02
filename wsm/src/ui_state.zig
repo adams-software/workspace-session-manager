@@ -242,10 +242,12 @@ pub const State = struct {
         const selected = self.selected_session orelse return .{};
         if (selected >= ctx.browser_sessions.len) return .{};
 
-        self.mode = .passive;
         self.notice_kind = .none;
         self.notice_text.clearRetainingCapacity();
-        if (ctx.current_session_index == selected) return .{ .rerender = true };
+        if (ctx.current_session_index == selected) {
+            self.mode = .passive;
+            return .{ .rerender = true };
+        }
         return .{
             .rerender = true,
             .action = .{ .attach = self.allocator.dupe(u8, ctx.browser_sessions[selected]) catch return .{} },
@@ -299,7 +301,6 @@ pub const State = struct {
             .enter => blk: {
                 if (self.selected_candidate) |idx| {
                     if (idx < ctx.attach_candidates.len) {
-                        self.mode = .passive;
                         break :blk .{ .rerender = true, .action = .{ .attach = self.allocator.dupe(u8, ctx.attach_candidates[idx].value) catch return .{} } };
                     }
                 }
@@ -307,7 +308,6 @@ pub const State = struct {
                     self.setNotice(.err, "target required");
                     break :blk .{ .rerender = true };
                 }
-                self.mode = .passive;
                 break :blk .{ .rerender = true, .action = .{ .attach = self.allocator.dupe(u8, self.input_buf.items) catch return .{} } };
             },
         };
@@ -353,7 +353,6 @@ pub const State = struct {
                     self.setNotice(.err, "name required");
                     break :blk .{ .rerender = true };
                 }
-                self.mode = .passive;
                 break :blk .{ .rerender = true, .action = .{ .create = self.allocator.dupe(u8, self.input_buf.items) catch return .{} } };
             },
             else => .{},
@@ -535,7 +534,7 @@ test "active menu browser selection moves without switching" {
     try std.testing.expectEqual(@as(?usize, 1), state.selected_session);
 
     const attached = state.handleKey(ctx, .enter);
-    try std.testing.expectEqual(Mode.passive, state.mode);
+    try std.testing.expectEqual(Mode.active_menu, state.mode);
     try std.testing.expectEqualStrings("projects/api", attached.action.?.attach);
     std.testing.allocator.free(attached.action.?.attach);
 }
@@ -636,5 +635,6 @@ test "attach queries and create actions preserve exact UTF-8" {
     _ = create.handleText(.{}, input);
     const result = create.handleKey(.{}, .enter);
     try std.testing.expectEqualStrings(input, result.action.?.create);
+    try std.testing.expectEqual(Mode.prompt_create, create.mode);
     std.testing.allocator.free(result.action.?.create);
 }

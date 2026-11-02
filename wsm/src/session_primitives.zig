@@ -64,10 +64,7 @@ pub fn createSession(allocator: std.mem.Allocator, host_bin: []const u8, provide
 
     if (pathExists(paths.data_path) or pathExists(paths.control_path) or pathExists(paths.presentation_path)) return error.SessionAlreadyExists;
 
-    if (std.fs.path.dirname(paths.data_path)) |dir| std.Io.Dir.createDirAbsolute(global_io, dir, .default_dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
+    if (std.fs.path.dirname(paths.data_path)) |dir| try std.Io.Dir.cwd().createDirPath(global_io, dir);
 
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(allocator);

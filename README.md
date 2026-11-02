@@ -204,6 +204,9 @@ directories even when they do not have their own live session. The selection
 cursor is independent from the attached-session marker, so browsing does not
 switch PTYs until you press `Enter`.
 
+Session names are relative to the workspace: use `menu/test/a`, not
+`/menu/test/a`.
+
 To leave an attached session, use the in-session detach flow, then reattach later:
 
 ```bash

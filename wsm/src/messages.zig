@@ -16,12 +16,12 @@ pub fn attachStateMessage(state: service_mod.AttachState) []const u8 {
 
 pub fn createInvalidIdReasonLabel(reason: commands.CreateInvalidIdReason) []const u8 {
     return switch (reason) {
-        .empty => "Empty",
-        .starts_with_slash => "StartsWithSlash",
-        .ends_with_slash => "EndsWithSlash",
-        .empty_segment => "EmptySegment",
-        .dot_segment => "DotSegment",
-        .invalid_char => "InvalidChar",
+        .empty => "name is empty",
+        .starts_with_slash => "session names are relative and cannot start with '/'",
+        .ends_with_slash => "session names cannot end with '/'",
+        .empty_segment => "session names cannot contain an empty path segment",
+        .dot_segment => "session names cannot contain '.' or '..' path segments",
+        .invalid_char => "use lowercase letters, digits, '.', '_', or '-'",
     };
 }
 
