@@ -204,8 +204,11 @@ directories even when they do not have their own live session. The selection
 cursor is independent from the attached-session marker, so browsing does not
 switch PTYs until you press `Enter`.
 
-Session names are relative to the workspace: use `menu/test/a`, not
-`/menu/test/a`.
+Session IDs are stored relative to the workspace. In the in-session create
+prompt, a bare name such as `menu/test/a` creates from the workspace root, as
+does an explicit `/menu/test/a`. Prefix a name with `./` to create beneath the
+selected session; for example, `./api` beneath `project1` creates
+`project1/api`.
 
 To leave an attached session, use the in-session detach flow, then reattach later:
 
